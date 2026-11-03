@@ -1,0 +1,85 @@
+#include <windows.h>
+#include "resource.h"
+#include "../common/Version.h"
+
+IDR_MENU MENU
+BEGIN
+    POPUP "&File"
+    BEGIN
+        MENUITEM "E&xit", IDM_FILE_EXIT
+    END
+    POPUP "&Node"
+    BEGIN
+        MENUITEM "&Start Lightning", IDM_NODE_START
+        MENUITEM "S&top Lightning", IDM_NODE_STOP
+        MENUITEM "&Ping", IDM_NODE_PING
+        MENUITEM SEPARATOR
+        MENUITEM "&Edit...\tEnter", IDM_NODE_EDIT
+        MENUITEM "&Remove offline node", IDM_NODE_REMOVE
+    END
+    POPUP "&Settings"
+    BEGIN
+        MENUITEM "&Report interval...", IDM_SETTINGS_INTERVAL
+    END
+    POPUP "&Help"
+    BEGIN
+        MENUITEM "&About Thunderhead", IDM_HELP_ABOUT
+    END
+END
+
+IDD_NODE DIALOGEX 0, 0, 300, 196
+STYLE DS_MODALFRAME | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Node"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT           "Name:", -1, 10, 12, 40, 10
+    LTEXT           "", IDC_NODE_NAME, 60, 12, 230, 10
+    LTEXT           "MAC:", -1, 10, 26, 40, 10
+    LTEXT           "", IDC_NODE_MAC, 60, 26, 230, 10
+    LTEXT           "Group:", -1, 10, 42, 40, 10
+    EDITTEXT        IDC_NODE_GROUP, 60, 40, 230, 13, ES_AUTOHSCROLL
+    AUTOCHECKBOX    "Wake On LAN", IDC_NODE_WOL, 10, 60, 130, 10
+    AUTOCHECKBOX    "Boot", IDC_NODE_BOOT, 10, 74, 130, 10
+    AUTOCHECKBOX    "Auto Login", IDC_NODE_AUTOLOGIN, 10, 88, 130, 10
+    AUTOCHECKBOX    "Auto start Lightning Rod", IDC_NODE_AUTOROD, 150, 60, 140, 10
+    AUTOCHECKBOX    "Auto start Lightning", IDC_NODE_AUTOLIGHTNING, 150, 74, 140, 10
+    LTEXT           "Issue / Comment:", -1, 10, 104, 100, 10
+    EDITTEXT        IDC_NODE_COMMENT, 10, 116, 280, 52, ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL
+    DEFPUSHBUTTON   "OK", IDOK, 186, 174, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 240, 174, 50, 14
+END
+
+IDD_INTERVAL DIALOGEX 0, 0, 200, 64
+STYLE DS_MODALFRAME | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Report interval"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT           "Nodes report every:", -1, 10, 12, 80, 10
+    COMBOBOX        IDC_INTERVAL_COMBO, 95, 10, 95, 120, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    DEFPUSHBUTTON   "OK", IDOK, 86, 42, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 140, 42, 50, 14
+END
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     TLR_VERSION_MAJOR, TLR_VERSION_MINOR, TLR_VERSION_PATCH, 0
+PRODUCTVERSION  TLR_VERSION_MAJOR, TLR_VERSION_MINOR, TLR_VERSION_PATCH, 0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "Thunderhead render farm console"
+            VALUE "FileVersion", TLR_VERSION_STRING
+            VALUE "InternalName", "Thunderhead"
+            VALUE "OriginalFilename", "Thunderhead.exe"
+            VALUE "ProductName", "Thunderhead / Lightning Rod"
+            VALUE "ProductVersion", TLR_VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

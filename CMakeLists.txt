@@ -11,5 +11,6 @@ else()
 endif()
 add_compile_definitions(_WIN32_WINNT=${TARGET_WINVER} WINVER=${TARGET_WINVER} WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 
-add_subdirectory(src/Thunderhead)
+add_subdirectory(src/common)
 add_subdirectory(src/LightningRod)
+add_subdirectory(src/Thunderhead)

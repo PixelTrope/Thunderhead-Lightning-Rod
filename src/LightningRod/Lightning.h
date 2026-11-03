@@ -1,0 +1,34 @@
+#pragma once
+
+#include <windows.h>
+#include <string>
+
+namespace tlr {
+
+// Fixed location of the version 1 client; see docs/PROTOCOL.md.
+extern const wchar_t* const kLightningPath;
+
+struct LightningState {
+    bool running;
+    DWORD pid;
+    int cpuPct;         // share of the whole machine since the last query
+    bool rendering;     // owns an established TCP connection
+    LightningState() : running(false), pid(0), cpuPct(0), rendering(false) {}
+};
+
+class LightningMonitor {
+public:
+    LightningMonitor() : lastPid_(0), lastWall_(0), lastCpu_(0), cores_(1) {}
+    LightningState query();
+private:
+    DWORD lastPid_;
+    ULONGLONG lastWall_;    // 100 ns units
+    ULONGLONG lastCpu_;     // kernel + user, 100 ns units
+    int cores_;
+};
+
+DWORD findLightningPid();
+bool  startLightning(std::string& error);
+bool  stopLightning(std::string& error);
+
+} // namespace tlr
