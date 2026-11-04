@@ -142,7 +142,7 @@ std::wstring columnText(const NodeRecord& n, int col)
     case ColCpuPct:       return !n.online || r.verb.empty() ? L"" : widen(r.get("cpu_pct"));
     case ColMem:          return widen(h.get("mem_mb"));
     case ColMemFree:      return !n.online || r.verb.empty() ? L"" : widen(r.get("mem_free_mb"));
-    case ColDisk:         return widen(r.get("disk_total_mb"));
+    case ColDisk:         return widen(h.get("disk_total_mb"));
     case ColDiskFree:     return !n.online || r.verb.empty() ? L"" : widen(r.get("disk_free_mb"));
     case ColGpu:          return widen(h.get("gpu"));
     case ColVram:         return widen(h.get("vram_mb"));

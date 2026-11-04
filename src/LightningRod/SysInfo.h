@@ -16,21 +16,21 @@ struct StaticInfo {
     int cpuMhz;
     int cores;              // logical processors
     int memMb;              // installed, as seen by the OS
+    int diskTotalMb;        // size of C:
     std::string board;      // baseboard manufacturer and product
     std::string chipset;    // host bridge description
     std::string gpu;        // display adapter description
     int vramMb;
-    StaticInfo() : cpuMhz(0), cores(0), memMb(0), vramMb(0) {}
+    StaticInfo() : cpuMhz(0), cores(0), memMb(0), diskTotalMb(0), vramMb(0) {}
 };
 
 // Gathered every report.
 struct DynamicInfo {
     int cpuPct;
     int memFreeMb;
-    int diskTotalMb;
     int diskFreeMb;
     long long uptimeS;
-    DynamicInfo() : cpuPct(0), memFreeMb(0), diskTotalMb(0), diskFreeMb(0), uptimeS(0) {}
+    DynamicInfo() : cpuPct(0), memFreeMb(0), diskFreeMb(0), uptimeS(0) {}
 };
 
 // Whole-machine CPU use between two samples.

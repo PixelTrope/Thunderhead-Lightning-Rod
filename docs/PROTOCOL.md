@@ -65,6 +65,7 @@ cpu=AMD G-T56N Processor
 cpu_mhz=1650
 cores=2
 mem_mb=3892
+disk_total_mb=3889
 board=Dell Inc. 0XXXXX
 chipset=AMD A55E Host Bridge
 gpu=AMD Radeon HD 6310 Graphics
@@ -78,13 +79,14 @@ SET
 interval=5
 ```
 
-The agent then sends a REPORT every `interval` seconds:
+The agent then sends a REPORT every `interval` seconds. Only values that change
+during a session are in it; everything fixed for the session is in HELLO and
+is never repeated, and Thunderhead never polls:
 
 ```
 REPORT
 cpu_pct=12
 mem_free_mb=2900
-disk_total_mb=3889
 disk_free_mb=1040
 uptime_s=12345
 lightning=running

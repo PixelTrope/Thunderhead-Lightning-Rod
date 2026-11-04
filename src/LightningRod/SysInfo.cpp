@@ -316,6 +316,9 @@ StaticInfo collectStatic()
     ms.dwLength = sizeof(ms);
     if (GlobalMemoryStatusEx(&ms)) s.memMb = (int)(ms.ullTotalPhys / (1024 * 1024));
 
+    ULARGE_INTEGER freeBytes, totalBytes;
+    if (GetDiskFreeSpaceExW(L"C:\\", &freeBytes, &totalBytes, NULL)) s.diskTotalMb = (int)(totalBytes.QuadPart / (1024 * 1024));
+
     s.board = baseboard();
     s.chipset = chipset();
     displayAdapter(s.gpu, s.vramMb);
@@ -357,10 +360,8 @@ DynamicInfo collectDynamic(CpuTracker& cpu)
     if (GlobalMemoryStatusEx(&ms)) d.memFreeMb = (int)(ms.ullAvailPhys / (1024 * 1024));
 
     ULARGE_INTEGER freeBytes, totalBytes;
-    if (GetDiskFreeSpaceExW(L"C:\\", &freeBytes, &totalBytes, NULL)) {
-        d.diskTotalMb = (int)(totalBytes.QuadPart / (1024 * 1024));
+    if (GetDiskFreeSpaceExW(L"C:\\", &freeBytes, &totalBytes, NULL))
         d.diskFreeMb = (int)(freeBytes.QuadPart / (1024 * 1024));
-    }
 
     d.uptimeS = (long long)(tickMs() / 1000);
     return d;

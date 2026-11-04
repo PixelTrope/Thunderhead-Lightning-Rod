@@ -163,6 +163,7 @@ private:
         m.set("cpu_mhz", (long long)info_.cpuMhz);
         m.set("cores", (long long)info_.cores);
         m.set("mem_mb", (long long)info_.memMb);
+        m.set("disk_total_mb", (long long)info_.diskTotalMb);
         m.set("board", info_.board);
         m.set("chipset", info_.chipset);
         m.set("gpu", info_.gpu);
@@ -177,7 +178,6 @@ private:
         Message m("REPORT");
         m.set("cpu_pct", (long long)d.cpuPct);
         m.set("mem_free_mb", (long long)d.memFreeMb);
-        m.set("disk_total_mb", (long long)d.diskTotalMb);
         m.set("disk_free_mb", (long long)d.diskFreeMb);
         m.set("uptime_s", d.uptimeS);
         m.set("lightning", l.running ? "running" : "stopped");
