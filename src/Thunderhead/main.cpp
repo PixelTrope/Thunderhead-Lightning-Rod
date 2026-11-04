@@ -86,10 +86,11 @@ const CommandDef kCommands[] = {
     { IDC_CMD_CHECK_NONE,    L"Check none",          NULL,      true  },
     { IDC_CMD_CHECK_OUTDATED, L"Check outdated",     NULL,      true  },
     { IDC_CMD_UPDATE,        L"Update checked",      NULL,      true  },
+    { IDC_CMD_RENAME,        L"Rename node",         NULL,      true  },
+    { IDC_CMD_RESTART_NODE,  L"Restart node",        "REBOOT",  true  },
+    { IDC_CMD_SHUTDOWN_NODE, L"Shut down node",      "SHUTDOWN", true },
     { IDC_CMD_START61,       L"Start Lightning 6.1", NULL,      false },
     { IDC_CMD_START63,       L"Start Lightning 6.3", NULL,      false },
-    { IDC_CMD_RESTART_NODE,  L"Restart node",        NULL,      false },
-    { IDC_CMD_SHUTDOWN_NODE, L"Shut down node",      NULL,      false },
     { IDC_CMD_START_TV,      L"Start TeamViewer",    NULL,      false },
     { IDC_CMD_MESSAGE,       L"Display message",     NULL,      false },
     { IDC_CMD_SOUND,         L"Play sound",          NULL,      false },
@@ -565,6 +566,84 @@ void sendCommand(const char* verb)
     updateStatusBar(widen(format("|  %s sent to %d of %d checked", verb, sent, (int)targets.size())).c_str());
 }
 
+// REBOOT and SHUTDOWN ask first, since they act on every checked node at once.
+void sendPowerCommand(const char* verb)
+{
+    std::vector<NodeRecord*> targets = checkedNodes();
+    int online = 0;
+    for (size_t i = 0; i < targets.size(); ++i) if (targets[i]->online) ++online;
+    if (online == 0) { updateStatusBar(L"|  no online clients checked"); return; }
+    std::wstring q = widen(format("%s %d checked online client(s)?", strcmp(verb, "REBOOT") == 0 ? "Restart" : "Shut down", online));
+    if (MessageBoxW(g_main, q.c_str(), L"Thunderhead", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return;
+    sendCommand(verb);
+}
+
+// ---------------------------------------------------------------- rename
+
+struct RenameRequest { std::wstring info; std::wstring name; bool reboot; };
+
+INT_PTR CALLBACK renameDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    static RenameRequest* req = NULL;
+    switch (msg) {
+    case WM_INITDIALOG:
+        req = (RenameRequest*)lp;
+        SetDlgItemTextW(dlg, IDC_RENAME_INFO, req->info.c_str());
+        SetDlgItemTextW(dlg, IDC_RENAME_NAME, req->name.c_str());
+        SendDlgItemMessageW(dlg, IDC_RENAME_NAME, EM_LIMITTEXT, 15, 0);
+        SendDlgItemMessageW(dlg, IDC_RENAME_NAME, EM_SETSEL, 0, -1);
+        CheckDlgButton(dlg, IDC_RENAME_REBOOT, req->reboot ? BST_CHECKED : BST_UNCHECKED);
+        SetFocus(GetDlgItem(dlg, IDC_RENAME_NAME));
+        return FALSE;
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDOK) {
+            wchar_t buf[64];
+            GetDlgItemTextW(dlg, IDC_RENAME_NAME, buf, 64);
+            req->name = trim(std::wstring(buf));
+            req->reboot = IsDlgButtonChecked(dlg, IDC_RENAME_REBOOT) == BST_CHECKED;
+            if (req->name.empty()) { MessageBoxW(dlg, L"Enter a name.", L"Rename node", MB_OK | MB_ICONWARNING); return TRUE; }
+            EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDCANCEL || LOWORD(wp) == IDABORT) { EndDialog(dlg, LOWORD(wp)); return TRUE; }
+        break;
+    }
+    return FALSE;
+}
+
+// One dialog per checked online client, in list order; Skip moves on, Stop ends the pass.
+void renameChecked()
+{
+    std::vector<NodeRecord*> targets = checkedNodes();
+    int sent = 0, shown = 0;
+    static bool rebootDefault = true;
+    for (size_t i = 0; i < targets.size(); ++i) {
+        NodeRecord* n = targets[i];
+        if (!n->online) continue;
+        ++shown;
+        RenameRequest req;
+        req.info = L"Node " + widen(n->name) + L"   MAC " + widen(n->mac) + L"   IP " + widen(n->ip) +
+                   widen(format("   (%d of %d)", shown, (int)targets.size()));
+        req.name = widen(n->name);
+        req.reboot = rebootDefault;
+        INT_PTR r = DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_RENAME), g_main, renameDlgProc, (LPARAM)&req);
+        if (r == IDABORT) break;
+        if (r != IDOK) continue;
+        rebootDefault = req.reboot;
+        if (!n->online) continue;          // went offline while the dialog was up
+        Message m("RENAME");
+        m.set("name", narrow(req.name));
+        if (g_server->send(n->conn, m)) {
+            ++sent;
+            n->rebootAfterRename = req.reboot;
+            logEvent(format("RENAME -> %s (%s): new name %s%s", n->name.c_str(), n->mac.c_str(), narrow(req.name).c_str(),
+                            req.reboot ? ", reboot after" : ""));
+            logNode(*n, "-> " + m.oneLine());
+        }
+    }
+    updateStatusBar(widen(format("|  RENAME sent to %d client(s)", sent)).c_str());
+}
+
 void checkAll(bool on)
 {
     int count = (int)SendMessageW(g_list, LVM_GETITEMCOUNT, 0, 0);
@@ -711,6 +790,26 @@ void onNet(NetEvent* e)
                                   n->name.c_str(), ok ? "" : ": ", ok ? "" : e->msg.get("error").c_str());
         logEvent(text);
         updateStatusBar((L"|  " + widen(text)).c_str());
+        if (e->msg.get("cmd") == "RENAME") {
+            if (ok) {
+                std::string newName = e->msg.get("name");
+                if (!newName.empty() && newName != n->name) {
+                    logEvent(format("%s will be %s after its reboot", n->name.c_str(), newName.c_str()));
+                    n->name = newName;          // the per-node log switches to the new name from here
+                    g_store->save();
+                    refreshRow(n);
+                    if (g_staticNode == n) showStaticPane(n);
+                }
+                if (n->rebootAfterRename) {
+                    Message reboot("REBOOT");
+                    if (g_server->send(n->conn, reboot)) {
+                        logEvent("REBOOT -> " + n->name + " (after rename)");
+                        logNode(*n, "-> " + reboot.oneLine());
+                    }
+                }
+            }
+            n->rebootAfterRename = false;
+        }
         break;
     }
     case NetEvent::Pong: {
@@ -889,6 +988,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CMD_CHECK_NONE: checkAll(false); return 0;
         case IDC_CMD_CHECK_OUTDATED: checkOutdated(); return 0;
         case IDC_CMD_UPDATE: updateChecked(); return 0;
+        case IDC_CMD_RENAME: renameChecked(); return 0;
+        case IDC_CMD_RESTART_NODE: sendPowerCommand("REBOOT"); return 0;
+        case IDC_CMD_SHUTDOWN_NODE: sendPowerCommand("SHUTDOWN"); return 0;
         case IDC_FLAG_WOL: case IDC_FLAG_BOOT: case IDC_FLAG_AUTOLOGIN: case IDC_FLAG_AUTOROD: case IDC_FLAG_AUTOLIGHTNING:
             if (HIWORD(wp) == BN_CLICKED) flagClicked(id);
             return 0;

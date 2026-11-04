@@ -2,6 +2,7 @@
 
 #define IDR_MENU                101
 #define IDD_INTERVAL            103
+#define IDD_RENAME              104
 
 #define IDM_FILE_EXIT           1001
 #define IDM_NODE_REMOVE         1105
@@ -39,4 +40,10 @@
 #define IDC_CMD_WOL             3015
 #define IDC_CMD_CHECK_OUTDATED  3016
 #define IDC_CMD_UPDATE          3017
-#define IDC_CMD_LAST            3017
+#define IDC_CMD_RENAME          3018
+#define IDC_CMD_LAST            3018
+
+// rename dialog
+#define IDC_RENAME_INFO         2301
+#define IDC_RENAME_NAME         2302
+#define IDC_RENAME_REBOOT       2303

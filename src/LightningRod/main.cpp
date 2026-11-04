@@ -65,6 +65,40 @@ std::string macOf(const std::string& ip, const StaticInfo& self)
     return format("%02X-%02X-%02X-%02X-%02X-%02X", b[0], b[1], b[2], b[3], b[4], b[5]);
 }
 
+// NetBIOS rules: 1 to 15 characters, letters, digits and hyphens, not all digits.
+std::string validComputerName(const std::string& name)
+{
+    if (name.empty() || name.size() > 15) return "name must be 1 to 15 characters";
+    bool digitsOnly = true;
+    for (size_t i = 0; i < name.size(); ++i) {
+        char c = name[i];
+        bool letter = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+        bool digit = c >= '0' && c <= '9';
+        if (!letter && !digit && c != '-') return "name may contain only letters, digits and hyphens";
+        if (!digit) digitsOnly = false;
+    }
+    if (digitsOnly) return "name cannot be all digits";
+    if (name[0] == '-' || name[name.size() - 1] == '-') return "name cannot start or end with a hyphen";
+    return std::string();
+}
+
+bool enableShutdownPrivilege(std::string& err)
+{
+    HANDLE token;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) {
+        err = lastErrorText((int)GetLastError());
+        return false;
+    }
+    TOKEN_PRIVILEGES tp;
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    bool ok = LookupPrivilegeValueW(NULL, SE_SHUTDOWN_NAME, &tp.Privileges[0].Luid) &&
+              AdjustTokenPrivileges(token, FALSE, &tp, 0, NULL, NULL) && GetLastError() == ERROR_SUCCESS;
+    if (!ok) err = "shutdown privilege: " + lastErrorText((int)GetLastError());
+    CloseHandle(token);
+    return ok;
+}
+
 // Connects with a timeout; returns INVALID_SOCKET on failure.
 SOCKET connectWithTimeout(const sockaddr_in& addr, int timeoutMs)
 {
@@ -331,6 +365,40 @@ private:
             tcp_ = INVALID_SOCKET;
             if (g_singleInstance) { CloseHandle(g_singleInstance); g_singleInstance = NULL; }
             ExitProcess(0);
+        } else if (m.verb == "RENAME") {
+            std::string name = trim(m.get("name"));
+            std::string err = validComputerName(name);
+            bool ok = err.empty();
+            if (ok) {
+                std::wstring wname = widen(name);
+                if (!SetComputerNameExW(ComputerNamePhysicalDnsHostname, wname.c_str())) {
+                    ok = false;
+                    err = lastErrorText((int)GetLastError());
+                }
+            }
+            logLine(format("RENAME to %s: %s%s%s", name.c_str(), ok ? "ok, takes effect at reboot" : "failed",
+                           err.empty() ? "" : " ", err.c_str()));
+            Message ack("ACK");
+            ack.set("cmd", m.verb);
+            ack.set("ok", boolText(ok));
+            ack.set("error", err);
+            ack.set("name", name);
+            sendMessage(ack);
+        } else if (m.verb == "REBOOT" || m.verb == "SHUTDOWN") {
+            bool reboot = m.verb == "REBOOT";
+            std::string err;
+            bool ok = enableShutdownPrivilege(err);
+            if (ok && !InitiateSystemShutdownExW(NULL, (LPWSTR)L"Thunderhead", 5, TRUE, reboot ? TRUE : FALSE,
+                                                 SHTDN_REASON_MAJOR_OTHER | SHTDN_REASON_FLAG_PLANNED)) {
+                ok = false;
+                err = lastErrorText((int)GetLastError());
+            }
+            logLine(format("%s: %s%s%s", m.verb.c_str(), ok ? "ok, in 5 s" : "failed", err.empty() ? "" : " ", err.c_str()));
+            Message ack("ACK");
+            ack.set("cmd", m.verb);
+            ack.set("ok", boolText(ok));
+            ack.set("error", err);
+            sendMessage(ack);
         } else if (m.verb == "EXIT" || m.verb == "RESTART") {
             Message ack("ACK");
             ack.set("cmd", m.verb);

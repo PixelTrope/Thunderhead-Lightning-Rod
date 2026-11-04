@@ -111,8 +111,12 @@ Thunderhead may send at any time:
 | EXIT  |               | reply ACK, then end the agent process                  |
 | RESTART |             | reply ACK, start a new copy of the agent, end this one |
 | UPDATE |              | reply ACK, start the update helper, end this one (see Agent update) |
+| RENAME | name          | set the computer name (takes effect at reboot); reply ACK with the name |
+| REBOOT |               | reply ACK, then restart the node after 5 s, closing programs by force |
+| SHUTDOWN |             | reply ACK, then shut the node down after 5 s, closing programs by force |
 
-The agent replies to START, STOP, EXIT, RESTART and UPDATE with:
+The agent replies to START, STOP, EXIT, RESTART, UPDATE, RENAME, REBOOT and
+SHUTDOWN with (RENAME adds `name=` with the name that was applied):
 
 ```
 ACK
@@ -196,3 +200,19 @@ reconnected after three minutes, Thunderhead drops the Updating state and logs i
 
 This path uses Windows file sharing and therefore covers the Windows 7 nodes;
 the XP nodes need SMB1 on the host or another transfer method, to be decided.
+
+## Rename and reboot
+
+*Rename node* in Thunderhead opens one dialog per checked online client, showing
+its current name, MAC and IP so that freshly cloned nodes with the same name can
+be told apart, with the new name (1 to 15 characters, letters, digits and
+hyphens, not all digits) and a *reboot after rename* option. On a successful
+ACK Thunderhead records the new name at once and, if the option was set, sends
+REBOOT. The node reconnects under its new name after the restart.
+
+RENAME uses SetComputerNameEx and therefore needs the agent to run with
+administrative rights; with UAC enabled the agent must be started elevated
+(for example by a scheduled task with highest privileges) or the ACK reports
+"Access is denied". REBOOT and SHUTDOWN need the shutdown privilege, which
+ordinary users hold on Windows 7, and close running programs by force.
+*Restart node* and *Shut down node* ask for confirmation before sending.
