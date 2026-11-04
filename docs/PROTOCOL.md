@@ -82,7 +82,11 @@ interval=15
 
 The agent then sends a REPORT every `interval` seconds. Only values that change
 during a session are in it; everything fixed for the session is in HELLO and
-is never repeated, and Thunderhead never polls:
+is never repeated, and Thunderhead never polls. The first REPORT after HELLO
+carries every value; each later REPORT carries only the values that differ from
+the previous REPORT and may carry none, in which case the bare verb still
+counts as a report for the offline rule. Thunderhead merges each REPORT into
+the values it holds for the node. A full first report:
 
 ```
 REPORT
@@ -93,6 +97,15 @@ uptime_s=12345
 lightning=running
 lightning_cpu_pct=97
 rendering=yes
+```
+
+A later report when only the load figures moved:
+
+```
+REPORT
+cpu_pct=14
+uptime_s=12360
+lightning_cpu_pct=96
 ```
 
 `lightning` is `running` or `stopped`. `rendering` is `yes` when Lightning.exe

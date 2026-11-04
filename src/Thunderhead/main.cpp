@@ -201,9 +201,14 @@ void setCell(HWND list, int row, int col, const std::wstring& text)
     SendMessageW(list, LVM_SETITEMTEXTW, (WPARAM)row, (LPARAM)&item);
 }
 
+int g_sortCol = -1;                       // column the inventory is sorted by, -1 = arrival order
+bool g_sortAsc = true;
+void applySort();
+
 void refreshRow(NodeRecord* n, int onlyColumn = -1)
 {
     int row = rowOf(n);
+    bool inserted = false;
     if (row < 0) {
         LVITEMW item;
         memset(&item, 0, sizeof(item));
@@ -215,12 +220,14 @@ void refreshRow(NodeRecord* n, int onlyColumn = -1)
         row = (int)SendMessageW(g_list, LVM_INSERTITEMW, 0, (LPARAM)&item);
         if (row < 0) return;
         onlyColumn = -1;
+        inserted = true;
     }
     for (int col = 0; col < ColCount; ++col) {
         if (onlyColumn >= 0 && col != onlyColumn) continue;
         if (g_edit && row == g_editRow && col == g_editCol) continue;   // being edited
         setCell(g_list, row, col, columnText(*n, col));
     }
+    if (inserted) applySort();   // a new row takes its place in the current order
 }
 
 bool isChecked(int row)
@@ -245,6 +252,97 @@ std::vector<NodeRecord*> checkedNodes()
     for (int row = 0; row < count; ++row)
         if (isChecked(row)) { NodeRecord* n = nodeAt(row); if (n) out.push_back(n); }
     return out;
+}
+
+// ---------------------------------------------------------------- column sorting
+
+int compareVersions(const std::string& a, const std::string& b);
+
+// Numeric key of a cell, or false when the column is textual or the cell is blank.
+bool sortNumber(const NodeRecord& n, int col, long long& out)
+{
+    const Message& r = n.report;
+    bool live = n.online && !r.verb.empty();
+    const char* key = NULL;
+    switch (col) {
+    case ColLightningCpu: key = "lightning_cpu_pct"; break;
+    case ColCpuPct:       key = "cpu_pct"; break;
+    case ColMemFree:      key = "mem_free_mb"; break;
+    case ColDiskFree:     key = "disk_free_mb"; break;
+    case ColUptime:       key = "uptime_s"; break;
+    case ColLastReport:
+        if (!n.online || n.lastReportMs == 0) return false;
+        out = (long long)(tickMs() - n.lastReportMs);
+        return true;
+    default: return false;
+    }
+    if (!live || !r.has(key)) return false;
+    out = atoll(r.get(key).c_str());
+    return true;
+}
+
+// Ascending comparison of two rows by column: blank cells after filled ones,
+// numbers by value, the Agent column by version, text without regard to case,
+// ties by name.
+int compareRows(const NodeRecord& a, const NodeRecord& b, int col)
+{
+    int c = 0;
+    if (col == ColAgent) {
+        std::string va = a.hello.get("agent"), vb = b.hello.get("agent");
+        if (va.empty() != vb.empty()) c = va.empty() ? 1 : -1;
+        else c = compareVersions(va, vb);
+    } else {
+        long long na = 0, nb = 0;
+        bool ha = sortNumber(a, col, na), hb = sortNumber(b, col, nb);
+        if (ha || hb) {
+            if (ha != hb) c = ha ? -1 : 1;
+            else c = na < nb ? -1 : (na > nb ? 1 : 0);
+        } else {
+            std::wstring ta = columnText(a, col), tb = columnText(b, col);
+            if (ta.empty() != tb.empty()) c = ta.empty() ? 1 : -1;
+            else c = _wcsicmp(ta.c_str(), tb.c_str());
+        }
+    }
+    if (c == 0 && col != ColName) c = _wcsicmp(columnText(a, ColName).c_str(), columnText(b, ColName).c_str());
+    return c;
+}
+
+int CALLBACK sortCallback(LPARAM a, LPARAM b, LPARAM)
+{
+    int c = compareRows(*(const NodeRecord*)a, *(const NodeRecord*)b, g_sortCol);
+    return g_sortAsc ? c : -c;
+}
+
+void showSortArrow()
+{
+    HWND header = (HWND)SendMessageW(g_list, LVM_GETHEADER, 0, 0);
+    if (!header) return;
+    for (int i = 0; i < ColCount; ++i) {
+        HDITEMW hi;
+        memset(&hi, 0, sizeof(hi));
+        hi.mask = HDI_FORMAT;
+        if (!SendMessageW(header, HDM_GETITEMW, (WPARAM)i, (LPARAM)&hi)) continue;
+        hi.fmt &= ~(HDF_SORTUP | HDF_SORTDOWN);
+        if (i == g_sortCol) hi.fmt |= g_sortAsc ? HDF_SORTUP : HDF_SORTDOWN;
+        SendMessageW(header, HDM_SETITEMW, (WPARAM)i, (LPARAM)&hi);
+    }
+}
+
+void applySort()
+{
+    if (g_sortCol < 0) return;
+    SendMessageW(g_list, LVM_SORTITEMS, 0, (LPARAM)sortCallback);
+}
+
+// A click on a column header sorts by that column, ascending first and then
+// alternating with each further click on the same header.
+void sortByColumn(int col)
+{
+    if (col < 0 || col >= ColCount) return;
+    if (col == g_sortCol) g_sortAsc = !g_sortAsc;
+    else { g_sortCol = col; g_sortAsc = true; }
+    applySort();
+    showSortArrow();
 }
 
 std::wstring g_statusExtra;
@@ -775,7 +873,10 @@ void onNet(NetEvent* e)
     case NetEvent::Report: {
         NodeRecord* n = g_store->findByConn(e->conn);
         if (!n) break;
-        n->report = e->msg;
+        // A REPORT carries only the values that changed since the previous one.
+        n->report.verb = e->msg.verb;
+        for (std::map<std::string, std::string>::const_iterator it = e->msg.fields.begin(); it != e->msg.fields.end(); ++it)
+            n->report.fields[it->first] = it->second;
         n->lastReportMs = now;
         logNode(*n, "<- " + e->msg.oneLine());
         refreshRow(n);
@@ -959,8 +1060,11 @@ void onListNotify(NMHDR* hdr)
         break;
     }
     case LVN_BEGINSCROLL:
+        endEdit(true);
+        break;
     case LVN_COLUMNCLICK:
         endEdit(true);
+        sortByColumn(((NMLISTVIEW*)hdr)->iSubItem);
         break;
     }
 }

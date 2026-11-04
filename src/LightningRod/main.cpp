@@ -224,6 +224,7 @@ private:
                 if (s == INVALID_SOCKET) { logLine("connect failed"); continue; }
                 tcp_ = s;
                 parser_.clear();
+                sent_ = Message();
                 if (!sendHello()) { dropSession("hello send failed"); continue; }
                 std::string hostIp = ipText(from);
                 logLine(format("connected to Thunderhead at %s:%d", hostIp.c_str(), port));
@@ -273,18 +274,27 @@ private:
     {
         DynamicInfo d = collectDynamic(cpu_);
         LightningState l = lightning_.query();
+        Message full("REPORT");
+        full.set("cpu_pct", (long long)d.cpuPct);
+        full.set("mem_free_mb", (long long)d.memFreeMb);
+        full.set("disk_free_mb", (long long)d.diskFreeMb);
+        full.set("uptime_s", d.uptimeS);
+        full.set("lightning", l.running ? "running" : "stopped");
+        full.set("lightning_cpu_pct", (long long)l.cpuPct);
+        full.set("rendering", boolText(l.rendering));
+        // Only values that differ from the last report sent in this session go on
+        // the wire; the first report after HELLO therefore carries everything, and a
+        // report with no values still tells Thunderhead the agent is alive.
         Message m("REPORT");
-        m.set("cpu_pct", (long long)d.cpuPct);
-        m.set("mem_free_mb", (long long)d.memFreeMb);
-        m.set("disk_free_mb", (long long)d.diskFreeMb);
-        m.set("uptime_s", d.uptimeS);
-        m.set("lightning", l.running ? "running" : "stopped");
-        m.set("lightning_cpu_pct", (long long)l.cpuPct);
-        m.set("rendering", boolText(l.rendering));
+        for (std::map<std::string, std::string>::const_iterator it = full.fields.begin(); it != full.fields.end(); ++it) {
+            std::map<std::string, std::string>::const_iterator old = sent_.fields.find(it->first);
+            if (old == sent_.fields.end() || old->second != it->second) m.fields[it->first] = it->second;
+        }
         bool ok = sendMessage(m);
         if (ok) {
+            sent_ = full;
             EnterCriticalSection(&lock_);
-            status_.report = m;
+            status_.report = full;
             status_.haveReport = true;
             status_.intervalSec = intervalSec_;
             GetLocalTime(&status_.lastReportTime);
@@ -476,6 +486,7 @@ private:
     CpuTracker cpu_;
     LightningMonitor lightning_;
     MessageParser parser_;
+    Message sent_;                   // every report value as last sent to this host
     int intervalSec_;
     unsigned long long nextReport_;
     CRITICAL_SECTION lock_;
