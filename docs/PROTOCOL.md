@@ -110,7 +110,7 @@ Thunderhead may send at any time:
 | PING  |               | reply PONG                                             |
 | EXIT  |               | reply ACK, then end the agent process                  |
 | RESTART |             | reply ACK, start a new copy of the agent, end this one |
-| UPDATE |              | reply ACK, write and start update.cmd, end this one (see Agent update) |
+| UPDATE |              | reply ACK, start the update helper, end this one (see Agent update) |
 
 The agent replies to START, STOP, EXIT, RESTART and UPDATE with:
 
@@ -180,13 +180,15 @@ Thunderhead reads the version resource of the agent file it has to push.
 lower. *Update checked* sends UPDATE to each checked online client; the client
 is shown as Updating until its new agent connects.
 
-On UPDATE the agent writes `update.cmd` beside itself, starts it hidden, replies
-ACK and exits. The batch waits until no LightningRod.exe process remains, then
-waits for a file named `update.go` (at most two minutes), deletes it, starts
-`LightningRod.exe` and deletes itself.
+On UPDATE the agent copies itself to `LightningRod.update.exe`, starts that copy
+with `--helper <pid>`, replies ACK and exits. The helper waits for the old
+process to end, then for a file named `update.go` (at most two minutes),
+deletes it, starts `LightningRod.exe` and exits; the next agent start deletes
+the helper copy. Nothing outside the agent is needed on the node.
 
 When the agent's connection closes, Thunderhead copies the agent file to
-`\\NODE\<share_name>\LightningRod.new`, renames it over `LightningRod.exe`
+`\\<node IP>\<share_name>\LightningRod.new`, by address rather than name
+because freshly cloned nodes share a name, renames it over `LightningRod.exe`
 (retrying while the old file is still closing) and then creates `update.go`.
 If the copy or rename fails, `update.go` is still created so the node restarts
 the agent it has; the failure is in the event log. If the node has not

@@ -456,18 +456,18 @@ void checkOutdated()
     updateStatusBar(widen(format("|  %d of %d online clients are older than %s", outdated, online, version.c_str())).c_str());
 }
 
-struct UpdateJob { std::string name; std::wstring source; std::wstring share; };
+struct UpdateJob { std::string name; std::string ip; std::wstring source; std::wstring share; };
 struct UpdateResult { std::string name; bool ok; std::string text; };
 
 // Worker thread: copies the agent over the node's share after the old agent has exited,
-// then drops update.go so update.cmd on the node starts the new one.
+// then drops update.go so the update helper on the node starts the new one.
 DWORD WINAPI updateCopyThread(LPVOID p)
 {
     UpdateJob* job = (UpdateJob*)p;
     UpdateResult* res = new UpdateResult();
     res->name = job->name;
     res->ok = false;
-    std::wstring dir = L"\\\\" + widen(job->name) + L"\\" + job->share + L"\\";
+    std::wstring dir = L"\\\\" + widen(job->ip) + L"\\" + job->share + L"\\";   // by address: clones share a name until renamed
     std::wstring staged = dir + L"LightningRod.new";
     std::wstring target = dir + L"LightningRod.exe";
     if (!CopyFileW(job->source.c_str(), staged.c_str(), FALSE)) {
@@ -499,6 +499,7 @@ void startUpdateCopy(NodeRecord* n)
 {
     UpdateJob* job = new UpdateJob();
     job->name = n->name;
+    job->ip = n->ip;
     job->source = pushFilePath();
     job->share = widen(g_store->settings.shareName);
     logEvent(n->name + " update: agent stopped, copying " + narrow(job->source));

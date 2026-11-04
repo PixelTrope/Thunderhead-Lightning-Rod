@@ -300,31 +300,16 @@ private:
             sendMessage(Message("PONG"));
         } else if (m.verb == "UPDATE") {
             // Thunderhead replaces LightningRod.exe through the node's share once this
-            // process has exited; update.cmd waits for the exit, then for update.go (or
-            // two minutes), and starts whatever LightningRod.exe is then in the folder.
+            // process has exited. A copy of this executable, LightningRod.update.exe,
+            // waits for that exit, then for update.go (or two minutes), and starts
+            // whatever LightningRod.exe is then in the folder. No other tool is needed.
             std::wstring dir = exeDirectory();
-            std::wstring script = dir + L"\\update.cmd";
-            FILE* f = _wfopen(script.c_str(), L"wb");
-            bool ok = f != NULL;
-            if (f) {
-                fputs("@echo off\r\n"
-                      "cd /d \"%~dp0\"\r\n"
-                      ":waitexit\r\n"
-                      "tasklist /FI \"IMAGENAME eq LightningRod.exe\" | find /I \"LightningRod.exe\" >nul\r\n"
-                      "if not errorlevel 1 (ping -n 2 127.0.0.1 >nul & goto waitexit)\r\n"
-                      "set /a n=0\r\n"
-                      ":waitgo\r\n"
-                      "if exist update.go goto go\r\n"
-                      "set /a n+=1\r\n"
-                      "if %n% GEQ 120 goto go\r\n"
-                      "ping -n 2 127.0.0.1 >nul\r\n"
-                      "goto waitgo\r\n"
-                      ":go\r\n"
-                      "del update.go >nul 2>&1\r\n"
-                      "start \"\" \"LightningRod.exe\"\r\n"
-                      "del \"%~f0\"\r\n", f);
-                fclose(f);
-                std::wstring cmd = L"cmd.exe /c \"\"" + script + L"\"\"";
+            std::wstring helper = dir + L"\\LightningRod.update.exe";
+            wchar_t self[MAX_PATH];
+            DWORD n = GetModuleFileNameW(NULL, self, MAX_PATH);
+            bool ok = n > 0 && CopyFileW(self, helper.c_str(), FALSE) != 0;
+            if (ok) {
+                std::wstring cmd = L"\"" + helper + L"\" --helper " + widen(format("%lu", (unsigned long)GetCurrentProcessId()));
                 std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
                 cmdBuf.push_back(L'\0');
                 STARTUPINFOW si;
@@ -332,7 +317,7 @@ private:
                 memset(&si, 0, sizeof(si));
                 si.cb = sizeof(si);
                 memset(&pi, 0, sizeof(pi));
-                ok = CreateProcessW(NULL, &cmdBuf[0], NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, dir.c_str(), &si, &pi) != 0;
+                ok = CreateProcessW(helper.c_str(), &cmdBuf[0], NULL, NULL, FALSE, 0, NULL, dir.c_str(), &si, &pi) != 0;
                 if (ok) { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
             }
             Message ack("ACK");
@@ -340,8 +325,8 @@ private:
             ack.set("ok", boolText(ok));
             ack.set("error", ok ? "" : lastErrorText((int)GetLastError()));
             sendMessage(ack);
-            if (!ok) { logLine("UPDATE: could not start update.cmd"); return; }
-            logLine("UPDATE received, update.cmd started, stopping for replacement");
+            if (!ok) { logLine("UPDATE: could not start the update helper"); return; }
+            logLine("UPDATE received, helper started, stopping for replacement");
             closesocket(tcp_);
             tcp_ = INVALID_SOCKET;
             if (g_singleInstance) { CloseHandle(g_singleInstance); g_singleInstance = NULL; }
@@ -614,17 +599,51 @@ bool createWindow(HINSTANCE inst, const std::string& nodeName)
     return true;
 }
 
+// Update helper mode: wait for the old agent (pid) to exit, then for update.go or
+// two minutes, then start LightningRod.exe from this folder.
+int runUpdateHelper(DWORD pid)
+{
+    std::wstring dir = exeDirectory();
+    HANDLE old = OpenProcess(SYNCHRONIZE, FALSE, pid);
+    if (old) { WaitForSingleObject(old, 60000); CloseHandle(old); }
+    std::wstring go = dir + L"\\update.go";
+    for (int i = 0; i < 240; ++i) {
+        if (GetFileAttributesW(go.c_str()) != INVALID_FILE_ATTRIBUTES) break;
+        Sleep(500);
+    }
+    DeleteFileW(go.c_str());
+    std::wstring exe = dir + L"\\LightningRod.exe";
+    std::wstring cmd = L"\"" + exe + L"\"";
+    std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
+    cmdBuf.push_back(L'\0');
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    memset(&pi, 0, sizeof(pi));
+    for (int attempt = 0; attempt < 20; ++attempt) {       // the new file may still be arriving
+        if (CreateProcessW(exe.c_str(), &cmdBuf[0], NULL, NULL, FALSE, 0, NULL, dir.c_str(), &si, &pi)) {
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            return 0;
+        }
+        Sleep(1000);
+    }
+    return 1;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
 {
-    (void)argc; (void)argv;
+    if (argc >= 3 && strcmp(argv[1], "--helper") == 0) return runUpdateHelper((DWORD)strtoul(argv[2], NULL, 10));
     g_singleInstance = CreateMutexW(NULL, TRUE, L"Local\\LightningRodAgent");
     if (g_singleInstance && GetLastError() == ERROR_ALREADY_EXISTS) return 0;
 
     GetLocalTime(&g_started);
     g_startedMs = tickMs();
     g_log.open(exeDirectory(), L"LightningRod");
+    DeleteFileW((exeDirectory() + L"\\LightningRod.update.exe").c_str());   // left by the previous update
     if (!netInit()) { logLine("WSAStartup failed"); return 1; }
 
     INITCOMMONCONTROLSEX icc;
