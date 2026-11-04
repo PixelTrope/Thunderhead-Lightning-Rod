@@ -1,26 +1,40 @@
 #pragma once
 
 #define IDR_MENU                101
-#define IDD_NODE                102
 #define IDD_INTERVAL            103
 
 #define IDM_FILE_EXIT           1001
-#define IDM_NODE_START          1101
-#define IDM_NODE_STOP           1102
-#define IDM_NODE_PING           1103
-#define IDM_NODE_EDIT           1104
 #define IDM_NODE_REMOVE         1105
 #define IDM_SETTINGS_INTERVAL   1201
 #define IDM_HELP_ABOUT          1301
 
-#define IDC_NODE_NAME           2001
-#define IDC_NODE_MAC            2002
-#define IDC_NODE_GROUP          2003
-#define IDC_NODE_WOL            2004
-#define IDC_NODE_BOOT           2005
-#define IDC_NODE_AUTOLOGIN      2006
-#define IDC_NODE_AUTOROD        2007
-#define IDC_NODE_AUTOLIGHTNING  2008
-#define IDC_NODE_COMMENT        2009
-
 #define IDC_INTERVAL_COMBO      2101
+
+// static pane
+#define IDC_STATIC_TITLE        2201
+#define IDC_FLAG_WOL            2202
+#define IDC_FLAG_BOOT           2203
+#define IDC_FLAG_AUTOLOGIN      2204
+#define IDC_FLAG_AUTOROD        2205
+#define IDC_FLAG_AUTOLIGHTNING  2206
+#define IDC_STATIC_LIST         2207
+
+// command pane buttons
+#define IDC_CMD_FIRST           3000
+#define IDC_CMD_START71         3000
+#define IDC_CMD_STOP            3001
+#define IDC_CMD_PING            3002
+#define IDC_CMD_RESTART_LR      3003
+#define IDC_CMD_EXIT_LR         3004
+#define IDC_CMD_CHECK_ALL       3005
+#define IDC_CMD_CHECK_NONE      3006
+#define IDC_CMD_START61         3007
+#define IDC_CMD_START63         3008
+#define IDC_CMD_RESTART_NODE    3009
+#define IDC_CMD_SHUTDOWN_NODE   3010
+#define IDC_CMD_START_TV        3011
+#define IDC_CMD_MESSAGE         3012
+#define IDC_CMD_SOUND           3013
+#define IDC_CMD_BATCH           3014
+#define IDC_CMD_WOL             3015
+#define IDC_CMD_LAST            3015

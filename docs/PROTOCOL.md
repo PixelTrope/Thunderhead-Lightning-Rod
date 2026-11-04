@@ -72,11 +72,12 @@ gpu=AMD Radeon HD 6310 Graphics
 vram_mb=384
 ```
 
-Thunderhead replies with the report interval in seconds (multiple of 5):
+Thunderhead replies with the report interval in seconds (5 to 60 in steps of 5,
+default 15):
 
 ```
 SET
-interval=5
+interval=15
 ```
 
 The agent then sends a REPORT every `interval` seconds. Only values that change
@@ -107,8 +108,10 @@ Thunderhead may send at any time:
 | START |               | start `C:\Program Files\DAZ 3D\BryceLightning7\Lightning.exe` |
 | STOP  |               | terminate Lightning.exe                                |
 | PING  |               | reply PONG                                             |
+| EXIT  |               | reply ACK, then end the agent process                  |
+| RESTART |             | reply ACK, start a new copy of the agent, end this one |
 
-The agent replies to START and STOP with:
+The agent replies to START, STOP, EXIT and RESTART with:
 
 ```
 ACK
@@ -133,7 +136,7 @@ All files live beside Thunderhead.exe.
 `settings.txt`
 
 ```
-interval=5
+interval=15
 tcp_port=42002
 ```
 
@@ -158,4 +161,7 @@ comment=fan noisy
 ## Agent files
 
 The agent lives in `C:\LANCMD` on each node and writes
-`C:\LANCMD\LightningRod-YYYY-MM-DD.log`. It keeps no other state.
+`C:\LANCMD\LightningRod-YYYY-MM-DD.log`. It keeps no other state. Its window
+shows the Thunderhead it reports to (name, IP, MAC), its own start time and
+running time, and every value it has sent, refreshed at each report; closing
+the window stops the agent.

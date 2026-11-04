@@ -9,7 +9,7 @@ namespace tlr {
 const unsigned short kDiscoveryPort         = 42001; // UDP, Thunderhead listens
 const unsigned short kDefaultTcpPort        = 42002; // TCP, Thunderhead listens
 const int            kAnnounceIntervalSec   = 5;
-const int            kDefaultReportInterval = 5;
+const int            kDefaultReportInterval = 15;
 const int            kMissedReportsOffline  = 3;
 const int            kOfflineGraceSec       = 2;
 const size_t         kMaxMessageBytes       = 65536;
