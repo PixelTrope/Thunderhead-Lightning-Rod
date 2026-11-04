@@ -110,8 +110,9 @@ Thunderhead may send at any time:
 | PING  |               | reply PONG                                             |
 | EXIT  |               | reply ACK, then end the agent process                  |
 | RESTART |             | reply ACK, start a new copy of the agent, end this one |
+| UPDATE |              | reply ACK, write and start update.cmd, end this one (see Agent update) |
 
-The agent replies to START, STOP, EXIT and RESTART with:
+The agent replies to START, STOP, EXIT, RESTART and UPDATE with:
 
 ```
 ACK
@@ -138,7 +139,13 @@ All files live beside Thunderhead.exe.
 ```
 interval=15
 tcp_port=42002
+agent_file=
+share_name=LightningRod
 ```
+
+`agent_file` is the LightningRod.exe to push to nodes; empty means the one beside
+Thunderhead.exe. `share_name` is the share on every node that maps to the
+agent's folder.
 
 `nodes.txt`, one block per node, keyed by MAC; the user-edited fields are kept
 here and survive re-imaging of the node:
@@ -160,8 +167,30 @@ comment=fan noisy
 
 ## Agent files
 
-The agent lives in `C:\LANCMD` on each node and writes
-`C:\LANCMD\LightningRod-YYYY-MM-DD.log`. It keeps no other state. Its window
+The agent lives in `C:\LightningRod` on each node, shared as `\\NODE\LightningRod`,
+and writes `C:\LightningRod\LightningRod-YYYY-MM-DD.log`. It keeps no other state. Its window
 shows the Thunderhead it reports to (name, IP, MAC), its own start time and
 running time, and every value it has sent, refreshed at each report; closing
 the window stops the agent.
+
+## Agent update
+
+Thunderhead reads the version resource of the agent file it has to push.
+*Check outdated* checks every online client whose reported `agent` version is
+lower. *Update checked* sends UPDATE to each checked online client; the client
+is shown as Updating until its new agent connects.
+
+On UPDATE the agent writes `update.cmd` beside itself, starts it hidden, replies
+ACK and exits. The batch waits until no LightningRod.exe process remains, then
+waits for a file named `update.go` (at most two minutes), deletes it, starts
+`LightningRod.exe` and deletes itself.
+
+When the agent's connection closes, Thunderhead copies the agent file to
+`\\NODE\<share_name>\LightningRod.new`, renames it over `LightningRod.exe`
+(retrying while the old file is still closing) and then creates `update.go`.
+If the copy or rename fails, `update.go` is still created so the node restarts
+the agent it has; the failure is in the event log. If the node has not
+reconnected after three minutes, Thunderhead drops the Updating state and logs it.
+
+This path uses Windows file sharing and therefore covers the Windows 7 nodes;
+the XP nodes need SMB1 on the host or another transfer method, to be decided.

@@ -37,4 +37,6 @@
 #define IDC_CMD_SOUND           3013
 #define IDC_CMD_BATCH           3014
 #define IDC_CMD_WOL             3015
-#define IDC_CMD_LAST            3015
+#define IDC_CMD_CHECK_OUTDATED  3016
+#define IDC_CMD_UPDATE          3017
+#define IDC_CMD_LAST            3017

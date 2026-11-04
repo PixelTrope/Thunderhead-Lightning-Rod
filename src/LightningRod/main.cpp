@@ -298,6 +298,54 @@ private:
             nextReport_ = tickMs() + (unsigned long long)intervalSec_ * 1000;
         } else if (m.verb == "PING") {
             sendMessage(Message("PONG"));
+        } else if (m.verb == "UPDATE") {
+            // Thunderhead replaces LightningRod.exe through the node's share once this
+            // process has exited; update.cmd waits for the exit, then for update.go (or
+            // two minutes), and starts whatever LightningRod.exe is then in the folder.
+            std::wstring dir = exeDirectory();
+            std::wstring script = dir + L"\\update.cmd";
+            FILE* f = _wfopen(script.c_str(), L"wb");
+            bool ok = f != NULL;
+            if (f) {
+                fputs("@echo off\r\n"
+                      "cd /d \"%~dp0\"\r\n"
+                      ":waitexit\r\n"
+                      "tasklist /FI \"IMAGENAME eq LightningRod.exe\" | find /I \"LightningRod.exe\" >nul\r\n"
+                      "if not errorlevel 1 (ping -n 2 127.0.0.1 >nul & goto waitexit)\r\n"
+                      "set /a n=0\r\n"
+                      ":waitgo\r\n"
+                      "if exist update.go goto go\r\n"
+                      "set /a n+=1\r\n"
+                      "if %n% GEQ 120 goto go\r\n"
+                      "ping -n 2 127.0.0.1 >nul\r\n"
+                      "goto waitgo\r\n"
+                      ":go\r\n"
+                      "del update.go >nul 2>&1\r\n"
+                      "start \"\" \"LightningRod.exe\"\r\n"
+                      "del \"%~f0\"\r\n", f);
+                fclose(f);
+                std::wstring cmd = L"cmd.exe /c \"\"" + script + L"\"\"";
+                std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
+                cmdBuf.push_back(L'\0');
+                STARTUPINFOW si;
+                PROCESS_INFORMATION pi;
+                memset(&si, 0, sizeof(si));
+                si.cb = sizeof(si);
+                memset(&pi, 0, sizeof(pi));
+                ok = CreateProcessW(NULL, &cmdBuf[0], NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, dir.c_str(), &si, &pi) != 0;
+                if (ok) { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
+            }
+            Message ack("ACK");
+            ack.set("cmd", m.verb);
+            ack.set("ok", boolText(ok));
+            ack.set("error", ok ? "" : lastErrorText((int)GetLastError()));
+            sendMessage(ack);
+            if (!ok) { logLine("UPDATE: could not start update.cmd"); return; }
+            logLine("UPDATE received, update.cmd started, stopping for replacement");
+            closesocket(tcp_);
+            tcp_ = INVALID_SOCKET;
+            if (g_singleInstance) { CloseHandle(g_singleInstance); g_singleInstance = NULL; }
+            ExitProcess(0);
         } else if (m.verb == "EXIT" || m.verb == "RESTART") {
             Message ack("ACK");
             ack.set("cmd", m.verb);

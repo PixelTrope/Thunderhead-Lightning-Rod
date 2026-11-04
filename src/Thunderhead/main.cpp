@@ -28,6 +28,7 @@ using namespace tlr;
 namespace {
 
 const UINT WM_NET = WM_APP + 1;
+const UINT WM_UPDATE_DONE = WM_APP + 2;   // lParam: UpdateResult*
 const UINT_PTR kTimerId = 1;
 
 HINSTANCE g_inst = NULL;
@@ -49,7 +50,7 @@ std::map<std::string, Logger*> g_nodeLogs;
 // ---------------------------------------------------------------- inventory columns
 
 enum Column {
-    ColName, ColStatus, ColRendering, ColLightning, ColLightningCpu, ColCpuPct, ColMemFree, ColDiskFree,
+    ColName, ColStatus, ColAgent, ColRendering, ColLightning, ColLightningCpu, ColCpuPct, ColMemFree, ColDiskFree,
     ColUptime, ColLastReport, ColGroup, ColComment, ColCount
 };
 
@@ -57,7 +58,8 @@ struct ColumnDef { const wchar_t* title; int width; int align; };
 
 const ColumnDef kColumns[ColCount] = {
     { L"Name",         130, LVCFMT_LEFT },
-    { L"Status",        60, LVCFMT_LEFT },
+    { L"Status",        65, LVCFMT_LEFT },
+    { L"Agent",         50, LVCFMT_LEFT },
     { L"Rendering",     70, LVCFMT_LEFT },
     { L"Lightning",     70, LVCFMT_LEFT },
     { L"Lightning %",   75, LVCFMT_RIGHT },
@@ -82,6 +84,8 @@ const CommandDef kCommands[] = {
     { IDC_CMD_EXIT_LR,       L"Exit LR",             "EXIT",    true  },
     { IDC_CMD_CHECK_ALL,     L"Check all",           NULL,      true  },
     { IDC_CMD_CHECK_NONE,    L"Check none",          NULL,      true  },
+    { IDC_CMD_CHECK_OUTDATED, L"Check outdated",     NULL,      true  },
+    { IDC_CMD_UPDATE,        L"Update checked",      NULL,      true  },
     { IDC_CMD_START61,       L"Start Lightning 6.1", NULL,      false },
     { IDC_CMD_START63,       L"Start Lightning 6.3", NULL,      false },
     { IDC_CMD_RESTART_NODE,  L"Restart node",        NULL,      false },
@@ -146,7 +150,8 @@ std::wstring columnText(const NodeRecord& n, int col)
     bool live = n.online && !r.verb.empty();
     switch (col) {
     case ColName:         return widen(n.name.empty() ? n.mac : n.name);
-    case ColStatus:       return n.online ? L"Online" : L"Offline";
+    case ColStatus:       return n.updating ? L"Updating" : (n.online ? L"Online" : L"Offline");
+    case ColAgent:        return widen(n.hello.get("agent"));
     case ColRendering:    return !live ? L"" : (parseBool(r.get("rendering")) ? L"Yes" : L"No");
     case ColLightning:    return !live ? L"" : (r.get("lightning") == "running" ? L"Running" : L"Stopped");
     case ColLightningCpu: return !live ? L"" : widen(r.get("lightning_cpu_pct"));
@@ -393,6 +398,152 @@ void beginEdit(int row, int col)
     SetFocus(g_edit);
 }
 
+// ---------------------------------------------------------------- agent update
+
+// The file to push: settings agent_file, or LightningRod.exe beside Thunderhead.exe.
+std::wstring pushFilePath()
+{
+    if (!g_store->settings.agentFile.empty()) return widen(g_store->settings.agentFile);
+    return g_dir + L"\\LightningRod.exe";
+}
+
+// "major.minor.patch" from the file's version resource; empty if absent.
+std::string fileVersion(const std::wstring& path)
+{
+    DWORD handle = 0;
+    DWORD size = GetFileVersionInfoSizeW(path.c_str(), &handle);
+    if (size == 0) return std::string();
+    std::vector<BYTE> buf(size);
+    if (!GetFileVersionInfoW(path.c_str(), 0, size, &buf[0])) return std::string();
+    VS_FIXEDFILEINFO* info = NULL;
+    UINT len = 0;
+    if (!VerQueryValueW(&buf[0], L"\\", (LPVOID*)&info, &len) || !info) return std::string();
+    return format("%u.%u.%u", (unsigned)HIWORD(info->dwFileVersionMS), (unsigned)LOWORD(info->dwFileVersionMS),
+                  (unsigned)HIWORD(info->dwFileVersionLS));
+}
+
+// Numeric comparison of dotted versions: <0, 0, >0.
+int compareVersions(const std::string& a, const std::string& b)
+{
+    std::vector<std::string> pa = split(a, '.'), pb = split(b, '.');
+    for (size_t i = 0; i < 3; ++i) {
+        int x = i < pa.size() ? atoi(pa[i].c_str()) : 0;
+        int y = i < pb.size() ? atoi(pb[i].c_str()) : 0;
+        if (x != y) return x < y ? -1 : 1;
+    }
+    return 0;
+}
+
+void checkOutdated()
+{
+    std::wstring file = pushFilePath();
+    std::string version = fileVersion(file);
+    if (version.empty()) {
+        MessageBoxW(g_main, (L"No agent file with a version resource at\n" + file +
+                    L"\n\nPut the LightningRod.exe to push beside Thunderhead.exe, or set agent_file in settings.txt.").c_str(),
+                    L"Thunderhead", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    int outdated = 0, online = 0;
+    int count = (int)SendMessageW(g_list, LVM_GETITEMCOUNT, 0, 0);
+    for (int row = 0; row < count; ++row) {
+        NodeRecord* n = nodeAt(row);
+        bool old = n && n->online && !n->updating && compareVersions(n->hello.get("agent"), version) < 0;
+        if (n && n->online) ++online;
+        if (old) ++outdated;
+        setChecked(row, old);
+    }
+    updateStatusBar(widen(format("|  %d of %d online clients are older than %s", outdated, online, version.c_str())).c_str());
+}
+
+struct UpdateJob { std::string name; std::wstring source; std::wstring share; };
+struct UpdateResult { std::string name; bool ok; std::string text; };
+
+// Worker thread: copies the agent over the node's share after the old agent has exited,
+// then drops update.go so update.cmd on the node starts the new one.
+DWORD WINAPI updateCopyThread(LPVOID p)
+{
+    UpdateJob* job = (UpdateJob*)p;
+    UpdateResult* res = new UpdateResult();
+    res->name = job->name;
+    res->ok = false;
+    std::wstring dir = L"\\\\" + widen(job->name) + L"\\" + job->share + L"\\";
+    std::wstring staged = dir + L"LightningRod.new";
+    std::wstring target = dir + L"LightningRod.exe";
+    if (!CopyFileW(job->source.c_str(), staged.c_str(), FALSE)) {
+        res->text = "copy to " + narrow(dir) + " failed: " + lastErrorText((int)GetLastError());
+    } else {
+        bool moved = false;
+        for (int attempt = 0; attempt < 40 && !moved; ++attempt) {    // the old exe may still be closing
+            moved = MoveFileExW(staged.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+            if (!moved) Sleep(500);
+        }
+        if (!moved) {
+            res->text = "replace of LightningRod.exe failed: " + lastErrorText((int)GetLastError());
+            DeleteFileW(staged.c_str());
+        } else {
+            res->ok = true;
+            res->text = "LightningRod.exe replaced through " + narrow(dir);
+        }
+    }
+    // Always signal, so the node restarts whatever agent file it has.
+    HANDLE go = CreateFileW((dir + L"update.go").c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (go != INVALID_HANDLE_VALUE) CloseHandle(go);
+    else res->text += "; update.go could not be written (" + lastErrorText((int)GetLastError()) + "), the node restarts the agent after 2 minutes";
+    delete job;
+    if (!PostMessageW(g_main, WM_UPDATE_DONE, 0, (LPARAM)res)) delete res;
+    return 0;
+}
+
+void startUpdateCopy(NodeRecord* n)
+{
+    UpdateJob* job = new UpdateJob();
+    job->name = n->name;
+    job->source = pushFilePath();
+    job->share = widen(g_store->settings.shareName);
+    logEvent(n->name + " update: agent stopped, copying " + narrow(job->source));
+    HANDLE t = CreateThread(NULL, 0, updateCopyThread, job, 0, NULL);
+    if (t) CloseHandle(t);
+    else { delete job; logEvent(n->name + " update: could not start the copy thread"); }
+}
+
+void onUpdateDone(UpdateResult* r)
+{
+    std::string text = r->name + " update: " + r->text;
+    logEvent(text);
+    NodeRecord* n = NULL;
+    std::vector<NodeRecord*>& nodes = g_store->nodes();
+    for (size_t i = 0; i < nodes.size(); ++i) if (nodes[i]->name == r->name) n = nodes[i];
+    if (n && !r->ok) { n->updating = false; refreshRow(n); }
+    updateStatusBar((L"|  " + widen(text)).c_str());
+}
+
+void updateChecked()
+{
+    std::wstring file = pushFilePath();
+    std::string version = fileVersion(file);
+    if (version.empty()) {
+        MessageBoxW(g_main, (L"No agent file with a version resource at\n" + file).c_str(), L"Thunderhead", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    std::vector<NodeRecord*> targets = checkedNodes();
+    int sent = 0;
+    for (size_t i = 0; i < targets.size(); ++i) {
+        NodeRecord* n = targets[i];
+        if (!n->online || n->updating) continue;
+        Message m("UPDATE");
+        if (g_server->send(n->conn, m)) {
+            ++sent;
+            n->updating = true;
+            n->updateStartMs = tickMs();
+            logEvent(format("UPDATE -> %s (agent %s, pushing %s)", n->name.c_str(), n->hello.get("agent").c_str(), version.c_str()));
+            logNode(*n, "-> " + m.oneLine());
+            refreshRow(n);
+        }
+    }
+    updateStatusBar(widen(format("|  UPDATE sent to %d of %d checked", sent, (int)targets.size())).c_str());
+}
+
 // ---------------------------------------------------------------- commands
 
 void sendCommand(const char* verb)
@@ -529,6 +680,10 @@ void onNet(NetEvent* e)
         n->report = Message();
         n->lastReportMs = now;
         n->onlineSinceMs = now;
+        if (n->updating) {
+            n->updating = false;
+            logEvent(format("%s update finished: agent %s is back", n->name.c_str(), e->msg.get("agent").c_str()));
+        }
         logEvent(format("%s online from %s, agent %s%s", n->name.c_str(), n->ip.c_str(),
                         e->msg.get("agent").c_str(), isNew ? " (new client)" : ""));
         logNode(*n, "<- " + e->msg.oneLine());
@@ -567,7 +722,10 @@ void onNet(NetEvent* e)
     }
     case NetEvent::Disconnected: {
         NodeRecord* n = g_store->findByConn(e->conn);
-        if (n) setOffline(n, e->text);
+        if (n) {
+            setOffline(n, e->text);
+            if (n->updating) startUpdateCopy(n);
+        }
         break;
     }
     case NetEvent::Info:
@@ -586,6 +744,11 @@ void onTimer()
     std::vector<NodeRecord*>& nodes = g_store->nodes();
     for (size_t i = 0; i < nodes.size(); ++i) {
         NodeRecord* n = nodes[i];
+        if (n->updating && !n->online && now - n->updateStartMs > 180000) {
+            n->updating = false;
+            logEvent(n->name + " update: the agent did not come back within 3 minutes");
+            refreshRow(n);
+        }
         if (!n->online) continue;
         if (now - n->lastReportMs > limit) {
             setOffline(n, format("no report for %llu s", (now - n->lastReportMs) / 1000));
@@ -723,6 +886,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         case IDC_CMD_CHECK_ALL: checkAll(true); return 0;
         case IDC_CMD_CHECK_NONE: checkAll(false); return 0;
+        case IDC_CMD_CHECK_OUTDATED: checkOutdated(); return 0;
+        case IDC_CMD_UPDATE: updateChecked(); return 0;
         case IDC_FLAG_WOL: case IDC_FLAG_BOOT: case IDC_FLAG_AUTOLOGIN: case IDC_FLAG_AUTOROD: case IDC_FLAG_AUTOLIGHTNING:
             if (HIWORD(wp) == BN_CLICKED) flagClicked(id);
             return 0;
@@ -736,6 +901,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_TIMER: if (wp == kTimerId) onTimer(); return 0;
     case WM_NET: { NetEvent* e = (NetEvent*)lp; onNet(e); delete e; return 0; }
+    case WM_UPDATE_DONE: { UpdateResult* r = (UpdateResult*)lp; onUpdateDone(r); delete r; return 0; }
     case WM_NOTIFY: {
         NMHDR* hdr = (NMHDR*)lp;
         if (hdr->hwndFrom == g_list) onListNotify(hdr);

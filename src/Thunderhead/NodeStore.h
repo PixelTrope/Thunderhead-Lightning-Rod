@@ -24,16 +24,20 @@ struct NodeRecord {
     Message report;                  // latest REPORT
     unsigned long long lastReportMs; // tickMs() of the latest REPORT
     unsigned long long onlineSinceMs;
+    bool updating;                   // UPDATE sent, waiting for the new agent to connect
+    unsigned long long updateStartMs;
 
     NodeRecord()
         : wol(false), boot(false), autoLogin(false), autoRod(false), autoLightning(false),
-          online(false), conn(-1), lastReportMs(0), onlineSinceMs(0) {}
+          online(false), conn(-1), lastReportMs(0), onlineSinceMs(0), updating(false), updateStartMs(0) {}
 };
 
 struct Settings {
     int intervalSec;
     int tcpPort;
-    Settings() : intervalSec(kDefaultReportInterval), tcpPort(kDefaultTcpPort) {}
+    std::string agentFile;    // LightningRod.exe to push; empty = beside Thunderhead.exe
+    std::string shareName;    // share on each node that maps to the agent's folder
+    Settings() : intervalSec(kDefaultReportInterval), tcpPort(kDefaultTcpPort), shareName("LightningRod") {}
 };
 
 class NodeStore {

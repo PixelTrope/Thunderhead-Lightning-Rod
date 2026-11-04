@@ -1,0 +1,26 @@
+#include <windows.h>
+#include "../common/Version.h"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     TLR_VERSION_MAJOR, TLR_VERSION_MINOR, TLR_VERSION_PATCH, 0
+PRODUCTVERSION  TLR_VERSION_MAJOR, TLR_VERSION_MINOR, TLR_VERSION_PATCH, 0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "Lightning Rod render node agent"
+            VALUE "FileVersion", TLR_VERSION_STRING
+            VALUE "InternalName", "LightningRod"
+            VALUE "OriginalFilename", "LightningRod.exe"
+            VALUE "ProductName", "Thunderhead / Lightning Rod"
+            VALUE "ProductVersion", TLR_VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

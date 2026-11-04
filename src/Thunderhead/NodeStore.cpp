@@ -45,7 +45,10 @@ void NodeStore::load()
         std::string key = trim(line.substr(0, eq)), value = trim(line.substr(eq + 1));
         if (key == "interval") settings.intervalSec = atoi(value.c_str());
         else if (key == "tcp_port") settings.tcpPort = atoi(value.c_str());
+        else if (key == "agent_file") settings.agentFile = value;
+        else if (key == "share_name") settings.shareName = value;
     }
+    if (settings.shareName.empty()) settings.shareName = "LightningRod";
     if (settings.intervalSec < 5) settings.intervalSec = kDefaultReportInterval;
     if (settings.tcpPort < 1 || settings.tcpPort > 65535) settings.tcpPort = kDefaultTcpPort;
 
@@ -98,6 +101,8 @@ void NodeStore::save()
 void NodeStore::saveSettings()
 {
     std::string out = format("interval=%d\r\ntcp_port=%d\r\n", settings.intervalSec, settings.tcpPort);
+    out += "agent_file=" + settings.agentFile + "\r\n";
+    out += "share_name=" + settings.shareName + "\r\n";
     writeFile(dir_ + L"\\settings.txt", out);
 }
 

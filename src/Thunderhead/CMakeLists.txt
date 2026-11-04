@@ -4,4 +4,4 @@ add_executable(Thunderhead WIN32
     Server.cpp
     Thunderhead.rc
 )
-target_link_libraries(Thunderhead PRIVATE common comctl32)
+target_link_libraries(Thunderhead PRIVATE common comctl32 version)

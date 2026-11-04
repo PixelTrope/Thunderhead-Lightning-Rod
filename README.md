@@ -34,6 +34,8 @@ no runtime installed, so it is the one to deploy.
 
 ## Deploy (version 1)
 
-Copy `LightningRod.exe` to `C:\LANCMD` on each node and start it at logon with
-a shortcut in the Startup folder or a Run registry entry. Thunderhead runs from
-any folder; it writes `settings.txt`, `nodes.txt` and `logs\` beside itself.
+Copy `LightningRod.exe` to `C:\LightningRod` on each node, share that folder as
+`LightningRod`, and start the agent at logon with a shortcut in the Startup folder
+or a Run registry entry. Thunderhead runs from any folder; it writes
+`settings.txt`, `nodes.txt` and `logs\` beside itself, and pushes the
+`LightningRod.exe` placed beside `Thunderhead.exe` when *Update checked* is used.
