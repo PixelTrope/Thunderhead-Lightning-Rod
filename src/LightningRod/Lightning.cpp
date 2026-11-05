@@ -11,6 +11,21 @@ namespace tlr {
 
 const wchar_t* const kLightningPath = L"C:\\Program Files\\DAZ 3D\\BryceLightning7\\Lightning.exe";
 
+std::wstring lightningPath()
+{
+    // A 32-bit process sees ProgramFiles as Program Files (x86) on 64-bit Windows;
+    // the other two variables exist only there and cover an install either side.
+    const wchar_t* const vars[] = { L"ProgramFiles(x86)", L"ProgramFiles", L"ProgramW6432" };
+    for (int i = 0; i < 3; ++i) {
+        wchar_t base[MAX_PATH];
+        DWORD n = GetEnvironmentVariableW(vars[i], base, MAX_PATH);
+        if (n == 0 || n >= MAX_PATH) continue;
+        std::wstring path = std::wstring(base, n) + L"\\DAZ 3D\\BryceLightning7\\Lightning.exe";
+        if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) return path;
+    }
+    return kLightningPath;
+}
+
 // GetExtendedTcpTable arrived with Windows XP SP2; it is resolved at run time so
 // the agent loads on every node and the structures are declared here because the
 // Windows 7.1A SDK hides them below _WIN32_WINNT 0x0502.
@@ -121,13 +136,13 @@ bool startLightning(std::string& error)
 {
     error.clear();
     if (findLightningPid() != 0) { error = "already running"; return false; }
-    if (GetFileAttributesW(kLightningPath) == INVALID_FILE_ATTRIBUTES) {
-        error = "not installed at " + narrow(kLightningPath);
+    std::wstring path = lightningPath();
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        error = "not installed at " + narrow(path) + " or under Program Files (x86)";
         return false;
     }
-    std::wstring dir(kLightningPath);
-    dir = dir.substr(0, dir.rfind(L'\\'));
-    std::wstring cmd = std::wstring(L"\"") + kLightningPath + L"\"";
+    std::wstring dir = path.substr(0, path.rfind(L'\\'));
+    std::wstring cmd = std::wstring(L"\"") + path + L"\"";
     std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
     cmdBuf.push_back(L'\0');
 
@@ -136,7 +151,7 @@ bool startLightning(std::string& error)
     memset(&si, 0, sizeof(si));
     si.cb = sizeof(si);
     memset(&pi, 0, sizeof(pi));
-    if (!CreateProcessW(kLightningPath, &cmdBuf[0], NULL, NULL, FALSE, 0, NULL, dir.c_str(), &si, &pi)) {
+    if (!CreateProcessW(path.c_str(), &cmdBuf[0], NULL, NULL, FALSE, 0, NULL, dir.c_str(), &si, &pi)) {
         error = lastErrorText((int)GetLastError());
         return false;
     }

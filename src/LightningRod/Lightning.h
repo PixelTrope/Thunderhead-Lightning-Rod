@@ -7,6 +7,10 @@ namespace tlr {
 
 // Fixed location of the version 1 client; see docs/PROTOCOL.md.
 extern const wchar_t* const kLightningPath;
+// Where Lightning is installed on this node: Lightning is a 32-bit program, so
+// it lives under Program Files (x86) on 64-bit Windows and under Program Files
+// on 32-bit Windows. Falls back to kLightningPath when neither exists.
+std::wstring lightningPath();
 
 struct LightningState {
     bool running;

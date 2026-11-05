@@ -125,7 +125,7 @@ Thunderhead may send at any time:
 | Verb  | Fields        | Agent action                                           |
 |-------|---------------|--------------------------------------------------------|
 | SET   | interval      | change the report interval                             |
-| START |               | start `C:\Program Files\DAZ 3D\BryceLightning7\Lightning.exe` |
+| START |               | start `DAZ 3D\BryceLightning7\Lightning.exe` under Program Files (x86) on 64-bit Windows, under Program Files on 32-bit Windows |
 | STOP  |               | terminate Lightning.exe                                |
 | PING  |               | reply PONG                                             |
 | EXIT  |               | reply ACK, then end the agent process                  |
