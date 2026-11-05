@@ -54,7 +54,7 @@ std::map<std::string, Logger*> g_nodeLogs;
 // ---------------------------------------------------------------- inventory columns
 
 enum Column {
-    ColName, ColStatus, ColAgent, ColRendering, ColLightning, ColLightningCpu, ColCpuPct, ColMemFree, ColDiskFree,
+    ColName, ColStatus, ColAgent, ColRendering, ColLightning, ColLightningCpu, ColCpuPct, ColCpuTemp, ColMemFree, ColDiskFree,
     ColUptime, ColLastReport, ColAutoShutdown, ColGroup, ColComment, ColCount
 };
 
@@ -68,6 +68,7 @@ const ColumnDef kColumns[ColCount] = {
     { L"Lightning",     70, LVCFMT_LEFT },
     { L"Lightning %",   75, LVCFMT_RIGHT },
     { L"CPU %",         50, LVCFMT_RIGHT },
+    { L"CPU temp",     110, LVCFMT_RIGHT },
     { L"Mem free MB",   80, LVCFMT_RIGHT },
     { L"C: free MB",    75, LVCFMT_RIGHT },
     { L"Uptime",        90, LVCFMT_RIGHT },
@@ -96,6 +97,7 @@ const CommandDef kCommands[] = {
     { IDC_CMD_SHUTDOWN_NODE, L"Shut down node",      "SHUTDOWN", true },
     { IDC_CMD_OPEN_SHARE,    L"Open Client's Shared Folder", NULL, true },
     { IDC_CMD_COPY,          L"Copy files or folder to Client", NULL, true },
+    { IDC_CMD_PRIORITY,      L"Change Render Priority", NULL, true },
     { IDC_CMD_START61,       L"Start Lightning 6.1", NULL,      false },
     { IDC_CMD_START63,       L"Start Lightning 6.3", NULL,      false },
     { IDC_CMD_START_TV,      L"Start TeamViewer",    NULL,      false },
@@ -164,6 +166,15 @@ std::wstring columnText(const NodeRecord& n, int col)
     case ColLightning:    return !live ? L"" : (r.get("lightning") == "running" ? L"Running" : L"Stopped");
     case ColLightningCpu: return !live ? L"" : widen(r.get("lightning_cpu_pct"));
     case ColCpuPct:       return !live ? L"" : widen(r.get("cpu_pct"));
+    case ColCpuTemp: {
+        if (!live) return L"";
+        if (r.get("cpu_temp_c").empty()) return L"n/a";   // the node has no ACPI thermal zone
+        double c = atof(r.get("cpu_temp_c").c_str());
+        wchar_t buf[48];
+        _snwprintf(buf, 47, L"%.1f \u00B0C / %.1f \u00B0F", c, c * 9 / 5 + 32);
+        buf[47] = L'\0';
+        return buf;
+    }
     case ColMemFree:      return !live ? L"" : widen(r.get("mem_free_mb"));
     case ColDiskFree:     return !live ? L"" : widen(r.get("disk_free_mb"));
     case ColUptime:       return !live ? L"" : durationText(atoll(r.get("uptime_s").c_str()));
@@ -283,6 +294,10 @@ bool sortNumber(const NodeRecord& n, int col, long long& out)
         out = (long long)(tickMs() - n.lastReportMs);
         return true;
     case ColAutoShutdown: out = n.autoShutdown ? 1 : 0; return true;
+    case ColCpuTemp:
+        if (!live || r.get("cpu_temp_c").empty()) return false;
+        out = (long long)(atof(r.get("cpu_temp_c").c_str()) * 10 + 0.5);
+        return true;
     default: return false;
     }
     if (!live || !r.has(key)) return false;
@@ -666,7 +681,7 @@ void updateChecked()
 
 // ---------------------------------------------------------------- commands
 
-void sendCommand(const char* verb)
+void sendCommandMessage(const Message& m)
 {
     std::vector<NodeRecord*> targets = checkedNodes();
     if (targets.empty()) { updateStatusBar(L"|  no clients checked"); return; }
@@ -674,14 +689,18 @@ void sendCommand(const char* verb)
     for (size_t i = 0; i < targets.size(); ++i) {
         NodeRecord* n = targets[i];
         if (!n->online) continue;
-        Message m(verb);
         if (g_server->send(n->conn, m)) {
             ++sent;
-            logEvent(format("%s -> %s", verb, n->name.c_str()));
+            logEvent(format("%s -> %s", m.oneLine().c_str(), n->name.c_str()));
             logNode(*n, std::string("-> ") + m.oneLine());
         }
     }
-    updateStatusBar(widen(format("|  %s sent to %d of %d checked", verb, sent, (int)targets.size())).c_str());
+    updateStatusBar(widen(format("|  %s sent to %d of %d checked", m.verb.c_str(), sent, (int)targets.size())).c_str());
+}
+
+void sendCommand(const char* verb)
+{
+    sendCommandMessage(Message(verb));
 }
 
 // REBOOT and SHUTDOWN ask first, since they act on every checked node at once.
@@ -694,6 +713,65 @@ void sendPowerCommand(const char* verb)
     std::wstring q = widen(format("%s %d checked online client(s)?", strcmp(verb, "REBOOT") == 0 ? "Restart" : "Shut down", online));
     if (MessageBoxW(g_main, q.c_str(), L"Thunderhead", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return;
     sendCommand(verb);
+}
+
+// Asks for a priority class, confirms the two that carry a cost, and sends
+// PRIORITY to every checked client, which applies it to its Lightning.exe.
+void changeRenderPriority()
+{
+    std::vector<NodeRecord*> nodes = checkedNodes();
+    if (nodes.empty()) {
+        MessageBoxW(g_main, L"Check the clients to change first.", L"Change Render Priority", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    static const char* const kLevels[6] = { "RealTime", "High", "AboveNormal", "Normal", "BelowNormal", "Low" };
+    std::wstring labels[6];
+    TASKDIALOG_BUTTON radios[6];
+    for (int i = 0; i < 6; ++i) {
+        labels[i] = widen(kLevels[i]);
+        radios[i].nButtonID = 200 + i;
+        radios[i].pszButtonText = labels[i].c_str();
+    }
+    std::wstring content = widen(format("The priority class of Lightning.exe is changed on %u checked client(s).", (unsigned)nodes.size()));
+    TASKDIALOGCONFIG tc;
+    memset(&tc, 0, sizeof(tc));
+    tc.cbSize = sizeof(tc);
+    tc.hwndParent = g_main;
+    tc.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+    tc.dwCommonButtons = TDCBF_OK_BUTTON | TDCBF_CANCEL_BUTTON;
+    tc.pszWindowTitle = L"Change Render Priority";
+    tc.pszMainInstruction = L"Select the priority for Lightning";
+    tc.pszContent = content.c_str();
+    tc.pRadioButtons = radios;
+    tc.cRadioButtons = 6;
+    tc.nDefaultRadioButton = 203;   // Normal
+    int pressed = 0, radio = 0;
+    if (FAILED(TaskDialogIndirect(&tc, &pressed, &radio, NULL)) || pressed != IDOK || radio < 200 || radio > 205) return;
+    const char* level = kLevels[radio - 200];
+
+    const wchar_t* warning = NULL;
+    if (radio == 200) warning = L"Setting priority to Realtime may cause the render client to stop responding, Lightning Rod to stop reporting, or cause issues with Windows itself.  Are you ABSOLUTELY sure you want to proceed?";
+    else if (radio == 201) warning = L"Setting priority to High may cause CPU temperatures to rise. Are you sure you want to proceed?";
+    if (warning) {
+        TASKDIALOG_BUTTON buttons[2] = { { 300, L"Yes, Proceed" }, { 301, L"No, Cancel" } };
+        TASKDIALOGCONFIG cc;
+        memset(&cc, 0, sizeof(cc));
+        cc.cbSize = sizeof(cc);
+        cc.hwndParent = g_main;
+        cc.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+        cc.pszWindowTitle = L"Change Render Priority";
+        cc.pszMainIcon = TD_WARNING_ICON;
+        cc.pszMainInstruction = L"Confirm the priority change";
+        cc.pszContent = warning;
+        cc.pButtons = buttons;
+        cc.cButtons = 2;
+        cc.nDefaultButton = 301;
+        int answer = 0;
+        if (FAILED(TaskDialogIndirect(&cc, &answer, NULL, NULL)) || answer != 300) return;
+    }
+    Message m("PRIORITY");
+    m.set("level", std::string(level));
+    sendCommandMessage(m);
 }
 
 // ---------------------------------------------------------------- rename
@@ -1296,6 +1374,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CMD_RENAME: renameChecked(); return 0;
         case IDC_CMD_OPEN_SHARE: openSharedFolders(); return 0;
         case IDC_CMD_COPY: copyToClients(); return 0;
+        case IDC_CMD_PRIORITY: changeRenderPriority(); return 0;
         case IDC_CMD_RESTART_NODE: sendPowerCommand("REBOOT"); return 0;
         case IDC_CMD_SHUTDOWN_NODE: sendPowerCommand("SHUTDOWN"); return 0;
         case IDC_FLAG_WOL: case IDC_FLAG_BOOT: case IDC_FLAG_AUTOLOGIN: case IDC_FLAG_AUTOROD: case IDC_FLAG_AUTOLIGHTNING:

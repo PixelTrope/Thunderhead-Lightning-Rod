@@ -159,4 +159,43 @@ bool stopLightning(std::string& error)
     return ok;
 }
 
+// Priority class names as Thunderhead sends them.
+struct PriorityName { const char* name; DWORD cls; };
+const PriorityName kPriorities[] = {
+    { "RealTime",    REALTIME_PRIORITY_CLASS },
+    { "High",        HIGH_PRIORITY_CLASS },
+    { "AboveNormal", ABOVE_NORMAL_PRIORITY_CLASS },
+    { "Normal",      NORMAL_PRIORITY_CLASS },
+    { "BelowNormal", BELOW_NORMAL_PRIORITY_CLASS },
+    { "Low",         IDLE_PRIORITY_CLASS },
+};
+const int kPriorityCount = sizeof(kPriorities) / sizeof(kPriorities[0]);
+
+bool setLightningPriority(const std::string& level, std::string& applied, std::string& error)
+{
+    error.clear();
+    applied.clear();
+    DWORD cls = 0;
+    for (int i = 0; i < kPriorityCount; ++i)
+        if (_stricmp(level.c_str(), kPriorities[i].name) == 0) cls = kPriorities[i].cls;
+    if (cls == 0) { error = "unknown priority " + level; return false; }
+    DWORD pid = findLightningPid();
+    if (pid == 0) { error = "not running"; return false; }
+    HANDLE h = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!h) { error = lastErrorText((int)GetLastError()); return false; }
+    bool ok = SetPriorityClass(h, cls) != 0;
+    if (!ok) {
+        error = lastErrorText((int)GetLastError());
+    } else {
+        // Windows grants High in place of RealTime when the caller lacks the
+        // increase-base-priority privilege, without an error.
+        DWORD now = GetPriorityClass(h);
+        for (int i = 0; i < kPriorityCount; ++i)
+            if (kPriorities[i].cls == now) applied = kPriorities[i].name;
+        if (now != cls) { ok = false; error = "Windows applied " + applied + " instead (RealTime needs administrator rights)"; }
+    }
+    CloseHandle(h);
+    return ok;
+}
+
 } // namespace tlr

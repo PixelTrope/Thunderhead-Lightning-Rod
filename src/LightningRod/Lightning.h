@@ -30,5 +30,8 @@ private:
 DWORD findLightningPid();
 bool  startLightning(std::string& error);
 bool  stopLightning(std::string& error);
+// level is RealTime, High, AboveNormal, Normal, BelowNormal or Low (case does not
+// matter); applied receives the class Windows reports afterwards.
+bool  setLightningPriority(const std::string& level, std::string& applied, std::string& error);
 
 } // namespace tlr

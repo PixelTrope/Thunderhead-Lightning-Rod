@@ -23,6 +23,7 @@ accepted. Values contain no line breaks. A message is at most 65536 bytes.
 ```
 REPORT
 cpu_pct=12
+cpu_temp_c=41.5
 mem_free_mb=2900
 
 ```
@@ -91,6 +92,7 @@ the values it holds for the node. A full first report:
 ```
 REPORT
 cpu_pct=12
+cpu_temp_c=41.5
 mem_free_mb=2900
 disk_free_mb=1040
 uptime_s=12345
@@ -112,6 +114,11 @@ lightning_cpu_pct=96
 owns an established TCP connection (a job from the Bryce host), otherwise `no`.
 `lightning_cpu_pct` is Lightning's share of the whole machine over the last
 interval.
+`cpu_temp_c` is the hottest ACPI thermal zone (WMI class
+`MSAcpi_ThermalZoneTemperature` in `root\WMI`) in degrees Celsius with one
+decimal, or empty when the node exposes no zone; Thunderhead shows it in
+Celsius and Fahrenheit, or `n/a` when it is empty. The zone is whatever the
+board firmware reports and is not always the processor itself.
 
 Thunderhead may send at any time:
 
@@ -125,11 +132,15 @@ Thunderhead may send at any time:
 | RESTART |             | reply ACK, start a new copy of the agent, end this one |
 | UPDATE |              | reply ACK, start the update helper, end this one (see Agent update) |
 | RENAME | name          | set the computer name (takes effect at reboot); reply ACK with the name |
+| PRIORITY | level       | set the priority class of Lightning.exe: RealTime, High, AboveNormal, Normal, BelowNormal or Low; reply ACK |
 | REBOOT |               | reply ACK, then restart the node after 5 s, closing programs by force |
 | SHUTDOWN |             | reply ACK, then shut the node down after 5 s, closing programs by force |
 
-The agent replies to START, STOP, EXIT, RESTART, UPDATE, RENAME, REBOOT and
-SHUTDOWN with (RENAME adds `name=` with the name that was applied):
+The agent replies to START, STOP, PRIORITY, EXIT, RESTART, UPDATE, RENAME, REBOOT
+and SHUTDOWN with (RENAME adds `name=` with the name that was applied; PRIORITY
+adds `level=` as requested and `applied=` with the class Windows reports
+afterwards, and answers `ok=no` when the two differ, as when RealTime is
+requested without administrator rights and Windows grants High):
 
 ```
 ACK

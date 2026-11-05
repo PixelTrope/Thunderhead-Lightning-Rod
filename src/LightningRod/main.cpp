@@ -12,9 +12,11 @@
 #include "Version.h"
 #include "SysInfo.h"
 #include "Lightning.h"
+#include "Thermal.h"
 
 #include <commctrl.h>
 #include <iphlpapi.h>
+#include <objbase.h>
 #include <cstring>
 #include <vector>
 
@@ -282,6 +284,16 @@ private:
         full.set("lightning", l.running ? "running" : "stopped");
         full.set("lightning_cpu_pct", (long long)l.cpuPct);
         full.set("rendering", boolText(l.rendering));
+        // ACPI thermal zone; empty when the board exposes none, which Thunderhead shows as n/a.
+        int tenths = 0;
+        bool haveTemp = thermal_.read(tenths);
+        full.set("cpu_temp_c", haveTemp ? format("%d.%d", tenths / 10, tenths % 10) : std::string());
+        static bool tempLogged = false;
+        if (!tempLogged) {
+            tempLogged = true;
+            logLine(haveTemp ? format("CPU temperature from the ACPI thermal zone: %d.%d C", tenths / 10, tenths % 10)
+                             : std::string("CPU temperature: no ACPI thermal zone reports a value, sending n/a"));
+        }
         // Only values that differ from the last report sent in this session go on
         // the wire; the first report after HELLO therefore carries everything, and a
         // report with no values still tells Thunderhead the agent is alive.
@@ -340,6 +352,17 @@ private:
             sendMessage(ack);
             sendReport();
             nextReport_ = tickMs() + (unsigned long long)intervalSec_ * 1000;
+        } else if (m.verb == "PRIORITY") {
+            std::string level = trim(m.get("level")), applied, err;
+            bool ok = setLightningPriority(level, applied, err);
+            logLine(format("PRIORITY %s: %s%s%s", level.c_str(), ok ? "ok" : "failed", err.empty() ? "" : " ", err.c_str()));
+            Message ack("ACK");
+            ack.set("cmd", m.verb);
+            ack.set("ok", boolText(ok));
+            ack.set("error", err);
+            ack.set("level", level);
+            ack.set("applied", applied);
+            sendMessage(ack);
         } else if (m.verb == "PING") {
             sendMessage(Message("PONG"));
         } else if (m.verb == "UPDATE") {
@@ -485,6 +508,7 @@ private:
     StaticInfo info_;
     CpuTracker cpu_;
     LightningMonitor lightning_;
+    ThermalReader thermal_;
     MessageParser parser_;
     Message sent_;                   // every report value as last sent to this host
     int intervalSec_;
@@ -497,6 +521,8 @@ Agent* g_agent = NULL;
 
 DWORD WINAPI agentThread(LPVOID)
 {
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);   // WMI, for the thermal zone
+    CoInitializeSecurity(NULL, -1, NULL, NULL, RPC_C_AUTHN_LEVEL_DEFAULT, RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE, NULL);
     g_agent->run();
     return 0;
 }
@@ -576,6 +602,7 @@ void refreshAll()
     const StaticInfo& i = s.info;
     int row = 0;
     setRow(row++, L"CPU load %",          s.haveReport ? widen(r.get("cpu_pct")) : L"");
+    setRow(row++, L"CPU temp C",          !s.haveReport ? std::wstring() : (r.get("cpu_temp_c").empty() ? std::wstring(L"n/a") : widen(r.get("cpu_temp_c"))));
     setRow(row++, L"Memory free MB",      s.haveReport ? widen(r.get("mem_free_mb")) : L"");
     setRow(row++, L"C: free MB",          s.haveReport ? widen(r.get("disk_free_mb")) : L"");
     setRow(row++, L"Uptime",              s.haveReport ? durationText((unsigned long long)atoll(r.get("uptime_s").c_str())) : L"");
