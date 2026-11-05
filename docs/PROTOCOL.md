@@ -213,22 +213,31 @@ another, so the usual progress window and overwrite prompts appear.
 
 Thunderhead reads the version resource of the agent file it has to push.
 *Check outdated* checks every online client whose reported `agent` version is
-lower. *Update checked* sends UPDATE to each checked online client; the client
-is shown as Updating until its new agent connects.
+lower. *Update checked* updates each checked online client; the client is
+shown as Updating until its new agent connects.
+
+Thunderhead first copies the agent file to
+`\\<node IP>\<share_name>\LightningRod.new` while the old agent is still
+running, so a share that cannot be written is reported in the event log
+before anything on the node is stopped. The copy goes by address rather than
+name because freshly cloned nodes share a name; when the address is refused
+and the name resolves to that address, `\\<node name>\<share_name>\` is
+tried as well, since some nodes accept the host's credentials only under their
+name. Only when the file is in place is UPDATE sent.
 
 On UPDATE the agent copies itself to `LightningRod.update.exe`, starts that copy
 with `--helper <pid>`, replies ACK and exits. The helper waits for the old
-process to end, then for a file named `update.go` (at most two minutes),
-deletes it, starts `LightningRod.exe` and exits; the next agent start deletes
-the helper copy. Nothing outside the agent is needed on the node.
+process to end, renames `LightningRod.new` over `LightningRod.exe` (retrying
+while the old file is still closing), starts `LightningRod.exe` and exits; the
+next agent start deletes the helper copy. The swap is local to the node, so it
+does not depend on the network or on how fast the node is. Nothing outside the
+agent is needed on the node.
 
-When the agent's connection closes, Thunderhead copies the agent file to
-`\\<node IP>\<share_name>\LightningRod.new`, by address rather than name
-because freshly cloned nodes share a name, renames it over `LightningRod.exe`
-(retrying while the old file is still closing) and then creates `update.go`.
-If the copy or rename fails, `update.go` is still created so the node restarts
-the agent it has; the failure is in the event log. If the node has not
-reconnected after three minutes, Thunderhead drops the Updating state and logs it.
+For an agent older than 0.2.5, whose helper instead waits for a file named
+`update.go` (at most five minutes from 0.2.5, two minutes before), Thunderhead
+renames `LightningRod.new` over `LightningRod.exe` through the share once the
+agent's connection has closed and then creates `update.go`. If the node has not
+reconnected after ten minutes, Thunderhead drops the Updating state and logs it.
 
 This path uses Windows file sharing and therefore covers the Windows 7 nodes;
 the XP nodes need SMB1 on the host or another transfer method, to be decided.

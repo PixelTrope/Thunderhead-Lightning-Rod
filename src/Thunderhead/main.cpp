@@ -590,67 +590,136 @@ void checkOutdated()
     updateStatusBar(widen(format("|  %d of %d online clients are older than %s", outdated, online, version.c_str())).c_str());
 }
 
-struct UpdateJob { std::string name; std::string ip; std::wstring source; std::wstring share; };
-struct UpdateResult { std::string name; bool ok; std::string text; };
+struct UpdateJob { std::string name; std::string ip; std::wstring source; std::wstring share; std::wstring dir; };
+struct UpdateResult { std::string name; int phase; bool ok; std::string text; std::wstring dir; };
 
-// Worker thread: copies the agent over the node's share after the old agent has exited,
-// then drops update.go so the update helper on the node starts the new one.
-DWORD WINAPI updateCopyThread(LPVOID p)
+// \\NAME\share is tried after \\IP\share, but only when NAME resolves to that
+// address, because freshly cloned nodes share a name. Some nodes accept the
+// host's credentials only under their name.
+bool nameResolvesTo(const std::string& name, const std::string& ip)
+{
+    addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    addrinfo* res = NULL;
+    if (getaddrinfo(name.c_str(), NULL, &hints, &res) != 0) return false;
+    bool match = false;
+    for (addrinfo* a = res; a; a = a->ai_next)
+        if (a->ai_addr && ipText(*(const sockaddr_in*)a->ai_addr) == ip) match = true;
+    freeaddrinfo(res);
+    return match;
+}
+
+// Phase 1, worker thread: places the agent file beside the running agent as
+// LightningRod.new while everything on the node is still running, so a share
+// that cannot be written is reported before anything is stopped.
+DWORD WINAPI updateStageThread(LPVOID p)
 {
     UpdateJob* job = (UpdateJob*)p;
     UpdateResult* res = new UpdateResult();
     res->name = job->name;
+    res->phase = 1;
     res->ok = false;
-    std::wstring dir = L"\\\\" + widen(job->ip) + L"\\" + job->share + L"\\";   // by address: clones share a name until renamed
-    std::wstring staged = dir + L"LightningRod.new";
-    std::wstring target = dir + L"LightningRod.exe";
-    if (!CopyFileW(job->source.c_str(), staged.c_str(), FALSE)) {
-        res->text = "copy to " + narrow(dir) + " failed: " + lastErrorText((int)GetLastError());
-    } else {
-        bool moved = false;
-        for (int attempt = 0; attempt < 40 && !moved; ++attempt) {    // the old exe may still be closing
-            moved = MoveFileExW(staged.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
-            if (!moved) Sleep(500);
-        }
-        if (!moved) {
-            res->text = "replace of LightningRod.exe failed: " + lastErrorText((int)GetLastError());
-            DeleteFileW(staged.c_str());
-        } else {
+    std::vector<std::wstring> dirs;
+    dirs.push_back(L"\\\\" + widen(job->ip) + L"\\" + job->share + L"\\");
+    if (nameResolvesTo(job->name, job->ip)) dirs.push_back(L"\\\\" + widen(job->name) + L"\\" + job->share + L"\\");
+    std::string errors;
+    for (size_t i = 0; i < dirs.size() && !res->ok; ++i) {
+        if (CopyFileW(job->source.c_str(), (dirs[i] + L"LightningRod.new").c_str(), FALSE)) {
             res->ok = true;
-            res->text = "LightningRod.exe replaced through " + narrow(dir);
+            res->dir = dirs[i];
+            res->text = "agent staged as LightningRod.new in " + narrow(dirs[i]);
+        } else {
+            errors += std::string(errors.empty() ? "" : "; ") + "copy to " + narrow(dirs[i]) + " failed: " + lastErrorText((int)GetLastError());
         }
     }
-    // Always signal, so the node restarts whatever agent file it has.
-    HANDLE go = CreateFileW((dir + L"update.go").c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (go != INVALID_HANDLE_VALUE) CloseHandle(go);
-    else res->text += "; update.go could not be written (" + lastErrorText((int)GetLastError()) + "), the node restarts the agent after 2 minutes";
+    if (!res->ok) res->text = errors;
     delete job;
     if (!PostMessageW(g_main, WM_UPDATE_DONE, 0, (LPARAM)res)) delete res;
     return 0;
 }
 
-void startUpdateCopy(NodeRecord* n)
+// Phase 2, worker thread, after the old agent has closed its connection. An
+// agent from 0.2.5 on swaps LightningRod.new in by itself as soon as the old
+// file closes; for older agents Thunderhead does the swap over the share and
+// then drops update.go, which their helper waits for.
+DWORD WINAPI updateFinishThread(LPVOID p)
+{
+    UpdateJob* job = (UpdateJob*)p;
+    UpdateResult* res = new UpdateResult();
+    res->name = job->name;
+    res->phase = 2;
+    res->ok = false;
+    std::wstring staged = job->dir + L"LightningRod.new";
+    std::wstring target = job->dir + L"LightningRod.exe";
+    bool swappedHere = false;
+    for (int attempt = 0; attempt < 120 && !res->ok; ++attempt) {    // the old exe may still be closing
+        if (GetFileAttributesW(staged.c_str()) == INVALID_FILE_ATTRIBUTES && GetLastError() == ERROR_FILE_NOT_FOUND) {
+            res->ok = true;
+            res->text = "the node swapped the staged agent in by itself";
+        } else if (MoveFileExW(staged.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+            res->ok = true;
+            swappedHere = true;
+            res->text = "LightningRod.exe replaced through " + narrow(job->dir);
+        } else {
+            Sleep(500);
+        }
+    }
+    if (!res->ok) res->text = "replace of LightningRod.exe failed: " + lastErrorText((int)GetLastError());
+    if (swappedHere || !res->ok) {
+        // The helper of an agent before 0.2.5 starts LightningRod.exe when this file appears.
+        HANDLE go = CreateFileW((job->dir + L"update.go").c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (go != INVALID_HANDLE_VALUE) CloseHandle(go);
+        else res->text += "; update.go could not be written (" + lastErrorText((int)GetLastError()) + ")";
+    }
+    delete job;
+    if (!PostMessageW(g_main, WM_UPDATE_DONE, 0, (LPARAM)res)) delete res;
+    return 0;
+}
+
+void startUpdateThread(NodeRecord* n, LPTHREAD_START_ROUTINE fn, const char* what)
 {
     UpdateJob* job = new UpdateJob();
     job->name = n->name;
     job->ip = n->ip;
     job->source = pushFilePath();
     job->share = widen(g_store->settings.shareName);
-    logEvent(n->name + " update: agent stopped, copying " + narrow(job->source));
-    HANDLE t = CreateThread(NULL, 0, updateCopyThread, job, 0, NULL);
-    if (t) CloseHandle(t);
-    else { delete job; logEvent(n->name + " update: could not start the copy thread"); }
+    job->dir = n->updateDir;
+    HANDLE t = CreateThread(NULL, 0, fn, job, 0, NULL);
+    if (t) { CloseHandle(t); return; }
+    delete job;
+    n->updating = false;
+    refreshRow(n);
+    logEvent(n->name + " update: could not start the " + what + " thread");
 }
 
 void onUpdateDone(UpdateResult* r)
 {
     std::string text = r->name + " update: " + r->text;
     logEvent(text);
+    updateStatusBar((L"|  " + widen(text)).c_str());
     NodeRecord* n = NULL;
     std::vector<NodeRecord*>& nodes = g_store->nodes();
     for (size_t i = 0; i < nodes.size(); ++i) if (nodes[i]->name == r->name) n = nodes[i];
-    if (n && !r->ok) { n->updating = false; refreshRow(n); }
-    updateStatusBar((L"|  " + widen(text)).c_str());
+    if (!n || !n->updating) return;
+    if (r->phase == 1 && r->ok && n->online) {
+        n->updateDir = r->dir;
+        n->updateStaged = true;
+        Message m("UPDATE");
+        if (g_server->send(n->conn, m)) {
+            logEvent(format("UPDATE -> %s (agent %s)", n->name.c_str(), n->hello.get("agent").c_str()));
+            logNode(*n, "-> " + m.oneLine());
+            return;
+        }
+        logEvent(n->name + " update: UPDATE could not be sent");
+    } else if (r->phase == 1 && r->ok) {
+        logEvent(n->name + " update: the node went offline before UPDATE was sent");
+    } else if (r->phase == 2 && r->ok) {
+        return;   // Updating stays until the new agent connects
+    }
+    n->updating = false;
+    n->updateStaged = false;
+    refreshRow(n);
 }
 
 void updateChecked()
@@ -666,17 +735,16 @@ void updateChecked()
     for (size_t i = 0; i < targets.size(); ++i) {
         NodeRecord* n = targets[i];
         if (!n->online || n->updating) continue;
-        Message m("UPDATE");
-        if (g_server->send(n->conn, m)) {
-            ++sent;
-            n->updating = true;
-            n->updateStartMs = tickMs();
-            logEvent(format("UPDATE -> %s (agent %s, pushing %s)", n->name.c_str(), n->hello.get("agent").c_str(), version.c_str()));
-            logNode(*n, "-> " + m.oneLine());
-            refreshRow(n);
-        }
+        ++sent;
+        n->updating = true;
+        n->updateStaged = false;
+        n->updateDir.clear();
+        n->updateStartMs = tickMs();
+        logEvent(format("%s update: agent %s, staging %s from %s", n->name.c_str(), n->hello.get("agent").c_str(), version.c_str(), narrow(file).c_str()));
+        refreshRow(n);
+        startUpdateThread(n, updateStageThread, "staging");
     }
-    updateStatusBar(widen(format("|  UPDATE sent to %d of %d checked", sent, (int)targets.size())).c_str());
+    updateStatusBar(widen(format("|  update started for %d of %d checked", sent, (int)targets.size())).c_str());
 }
 
 // ---------------------------------------------------------------- commands
@@ -1135,6 +1203,11 @@ void onNet(NetEvent* e)
                                   n->name.c_str(), ok ? "" : ": ", ok ? "" : e->msg.get("error").c_str());
         logEvent(text);
         updateStatusBar((L"|  " + widen(text)).c_str());
+        if (e->msg.get("cmd") == "UPDATE" && !ok && n->updating) {
+            n->updating = false;
+            n->updateStaged = false;
+            refreshRow(n);
+        }
         if (e->msg.get("cmd") == "RENAME") {
             if (ok) {
                 std::string newName = e->msg.get("name");
@@ -1169,7 +1242,13 @@ void onNet(NetEvent* e)
         NodeRecord* n = g_store->findByConn(e->conn);
         if (n) {
             setOffline(n, e->text);
-            if (n->updating) startUpdateCopy(n);
+            if (n->updating && n->updateStaged) {
+                startUpdateThread(n, updateFinishThread, "finish");
+            } else if (n->updating) {
+                n->updating = false;
+                refreshRow(n);
+                logEvent(n->name + " update: the node went offline while the agent was being staged");
+            }
         }
         break;
     }
@@ -1189,9 +1268,10 @@ void onTimer()
     std::vector<NodeRecord*>& nodes = g_store->nodes();
     for (size_t i = 0; i < nodes.size(); ++i) {
         NodeRecord* n = nodes[i];
-        if (n->updating && !n->online && now - n->updateStartMs > 180000) {
+        if (n->updating && !n->online && now - n->updateStartMs > 600000) {
             n->updating = false;
-            logEvent(n->name + " update: the agent did not come back within 3 minutes");
+            n->updateStaged = false;
+            logEvent(n->name + " update: the agent did not come back within 10 minutes");
             refreshRow(n);
         }
         if (!n->online) continue;

@@ -712,14 +712,25 @@ int runUpdateHelper(DWORD pid)
 {
     std::wstring dir = exeDirectory();
     HANDLE old = OpenProcess(SYNCHRONIZE, FALSE, pid);
-    if (old) { WaitForSingleObject(old, 60000); CloseHandle(old); }
+    if (old) { WaitForSingleObject(old, 120000); CloseHandle(old); }
+    std::wstring staged = dir + L"\\LightningRod.new";
+    std::wstring exe = dir + L"\\LightningRod.exe";
     std::wstring go = dir + L"\\update.go";
-    for (int i = 0; i < 240; ++i) {
-        if (GetFileAttributesW(go.c_str()) != INVALID_FILE_ATTRIBUTES) break;
+    // Thunderhead 0.2.5 and later stage the new agent as LightningRod.new before
+    // they send UPDATE, so it is swapped in here, locally, as soon as the old file
+    // closes; nothing then depends on the network or on how fast this node is.
+    // Older Thunderheads replace LightningRod.exe over the share after the
+    // connection drops and then create update.go; that is waited for, at most
+    // five minutes, after which whatever LightningRod.exe is present starts.
+    for (int i = 0; i < 600; ++i) {
+        if (GetFileAttributesW(staged.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            if (MoveFileExW(staged.c_str(), exe.c_str(), MOVEFILE_REPLACE_EXISTING)) break;
+        } else if (GetFileAttributesW(go.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            break;
+        }
         Sleep(500);
     }
     DeleteFileW(go.c_str());
-    std::wstring exe = dir + L"\\LightningRod.exe";
     std::wstring cmd = L"\"" + exe + L"\"";
     std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
     cmdBuf.push_back(L'\0');
@@ -728,7 +739,7 @@ int runUpdateHelper(DWORD pid)
     memset(&si, 0, sizeof(si));
     si.cb = sizeof(si);
     memset(&pi, 0, sizeof(pi));
-    for (int attempt = 0; attempt < 20; ++attempt) {       // the new file may still be arriving
+    for (int attempt = 0; attempt < 60; ++attempt) {       // the new file may still be closing
         if (CreateProcessW(exe.c_str(), &cmdBuf[0], NULL, NULL, FALSE, 0, NULL, dir.c_str(), &si, &pi)) {
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);
@@ -751,6 +762,8 @@ int main(int argc, char** argv)
     g_startedMs = tickMs();
     g_log.open(exeDirectory(), L"LightningRod");
     DeleteFileW((exeDirectory() + L"\\LightningRod.update.exe").c_str());   // left by the previous update
+    DeleteFileW((exeDirectory() + L"\\update.go").c_str());
+    DeleteFileW((exeDirectory() + L"\\LightningRod.new").c_str());
     if (!netInit()) { logLine("WSAStartup failed"); return 1; }
 
     INITCOMMONCONTROLSEX icc;

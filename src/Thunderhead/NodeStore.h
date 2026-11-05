@@ -25,13 +25,15 @@ struct NodeRecord {
     Message report;                  // latest REPORT
     unsigned long long lastReportMs; // tickMs() of the latest REPORT
     unsigned long long onlineSinceMs;
-    bool updating;                   // UPDATE sent, waiting for the new agent to connect
+    bool updating;                   // update in progress: staging, then UPDATE sent, until the new agent connects
+    bool updateStaged;               // LightningRod.new is on the node and UPDATE has been sent
+    std::wstring updateDir;          // the share path the staging used
     unsigned long long updateStartMs;
     bool rebootAfterRename;          // send REBOOT when the RENAME is acknowledged
 
     NodeRecord()
         : wol(false), boot(false), autoLogin(false), autoRod(false), autoLightning(false), autoShutdown(false),
-          online(false), conn(-1), lastReportMs(0), onlineSinceMs(0), updating(false), updateStartMs(0),
+          online(false), conn(-1), lastReportMs(0), onlineSinceMs(0), updating(false), updateStaged(false), updateStartMs(0),
           rebootAfterRename(false) {}
 };
 
