@@ -41,7 +41,8 @@
 #define IDC_CMD_CHECK_OUTDATED  3016
 #define IDC_CMD_UPDATE          3017
 #define IDC_CMD_RENAME          3018
-#define IDC_CMD_LAST            3018
+#define IDC_CMD_OPEN_SHARE      3019
+#define IDC_CMD_LAST            3019
 
 // rename dialog
 #define IDC_RENAME_INFO         2301

@@ -188,7 +188,8 @@ The agent lives in `C:\LightningRod` on each node, shared as `\\NODE\LightningRo
 and writes `C:\LightningRod\LightningRod-YYYY-MM-DD.log`. It keeps no other state. Its window
 shows the Thunderhead it reports to (name, IP, MAC), its own start time and
 running time, and every value it has sent, refreshed at each report; closing
-the window stops the agent.
+the window stops the agent. *Open Client's Shared Folder* in Thunderhead opens
+`\\NAME\<share_name>\` of every checked client in Windows Explorer.
 
 ## Agent update
 

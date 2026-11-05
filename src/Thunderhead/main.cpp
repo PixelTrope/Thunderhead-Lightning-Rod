@@ -17,6 +17,7 @@
 #include "resource.h"
 
 #include <commctrl.h>
+#include <shellapi.h>
 #include <map>
 #include <string>
 #include <vector>
@@ -89,6 +90,7 @@ const CommandDef kCommands[] = {
     { IDC_CMD_RENAME,        L"Rename node",         NULL,      true  },
     { IDC_CMD_RESTART_NODE,  L"Restart node",        "REBOOT",  true  },
     { IDC_CMD_SHUTDOWN_NODE, L"Shut down node",      "SHUTDOWN", true },
+    { IDC_CMD_OPEN_SHARE,    L"Open Client's Shared Folder", NULL, true },
     { IDC_CMD_START61,       L"Start Lightning 6.1", NULL,      false },
     { IDC_CMD_START63,       L"Start Lightning 6.3", NULL,      false },
     { IDC_CMD_START_TV,      L"Start TeamViewer",    NULL,      false },
@@ -710,6 +712,41 @@ INT_PTR CALLBACK renameDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 }
 
 // One dialog per checked online client, in list order; Skip moves on, Stop ends the pass.
+// Opens \NAME\<share_name>\ of every checked client in Windows Explorer. The
+// name is used rather than the address so that the window title shows the node.
+// ShellExecute does not return until the name is resolved and the share found,
+// which takes up to a minute for a node that is off, so the opens run on a
+// thread of their own and the window stays usable.
+DWORD WINAPI openSharedFoldersThread(LPVOID param)
+{
+    std::vector<std::string>* paths = (std::vector<std::string>*)param;
+    for (size_t i = 0; i < paths->size(); ++i) {
+        const std::string& path = (*paths)[i];
+        HINSTANCE r = ShellExecuteW(NULL, L"open", widen(path).c_str(), NULL, NULL, SW_SHOWNORMAL);
+        if ((INT_PTR)r <= 32) logEvent(format("open %s failed (ShellExecute %d)", path.c_str(), (int)(INT_PTR)r));
+        else logEvent("opened " + path);
+    }
+    delete paths;
+    return 0;
+}
+
+void openSharedFolders()
+{
+    std::vector<NodeRecord*> nodes = checkedNodes();
+    if (nodes.empty()) { logEvent("Open shared folder: no clients checked"); return; }
+    std::vector<std::string>* paths = new std::vector<std::string>();
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        NodeRecord* n = nodes[i];
+        if (n->name.empty()) { logEvent(format("%s has no name yet; shared folder not opened", n->mac.c_str())); continue; }
+        paths->push_back("\\\\" + n->name + "\\" + g_store->settings.shareName + "\\");
+    }
+    if (paths->empty()) { delete paths; return; }
+    logEvent(format("opening the shared folder of %u client(s)", (unsigned)paths->size()));
+    HANDLE t = CreateThread(NULL, 0, openSharedFoldersThread, paths, 0, NULL);
+    if (t) CloseHandle(t);
+    else { logEvent("Open shared folder: could not start a thread"); delete paths; }
+}
+
 void renameChecked()
 {
     std::vector<NodeRecord*> targets = checkedNodes();
@@ -1093,6 +1130,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CMD_CHECK_OUTDATED: checkOutdated(); return 0;
         case IDC_CMD_UPDATE: updateChecked(); return 0;
         case IDC_CMD_RENAME: renameChecked(); return 0;
+        case IDC_CMD_OPEN_SHARE: openSharedFolders(); return 0;
         case IDC_CMD_RESTART_NODE: sendPowerCommand("REBOOT"); return 0;
         case IDC_CMD_SHUTDOWN_NODE: sendPowerCommand("SHUTDOWN"); return 0;
         case IDC_FLAG_WOL: case IDC_FLAG_BOOT: case IDC_FLAG_AUTOLOGIN: case IDC_FLAG_AUTOROD: case IDC_FLAG_AUTOLIGHTNING:
