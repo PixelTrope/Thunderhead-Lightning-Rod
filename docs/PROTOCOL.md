@@ -189,7 +189,10 @@ and writes `C:\LightningRod\LightningRod-YYYY-MM-DD.log`. It keeps no other stat
 shows the Thunderhead it reports to (name, IP, MAC), its own start time and
 running time, and every value it has sent, refreshed at each report; closing
 the window stops the agent. *Open Client's Shared Folder* in Thunderhead opens
-`\\NAME\<share_name>\` of every checked client in Windows Explorer.
+`\\NAME\<share_name>\` of every checked client in Windows Explorer. *Copy files or
+folder to Client* asks for files or one folder, then copies the selection to that
+folder on every checked client with the Windows shell copy, one client after
+another, so the usual progress window and overwrite prompts appear.
 
 ## Agent update
 

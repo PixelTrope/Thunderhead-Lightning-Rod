@@ -18,6 +18,8 @@
 
 #include <commctrl.h>
 #include <shellapi.h>
+#include <shobjidl.h>
+#include <objbase.h>
 #include <map>
 #include <string>
 #include <vector>
@@ -91,6 +93,7 @@ const CommandDef kCommands[] = {
     { IDC_CMD_RESTART_NODE,  L"Restart node",        "REBOOT",  true  },
     { IDC_CMD_SHUTDOWN_NODE, L"Shut down node",      "SHUTDOWN", true },
     { IDC_CMD_OPEN_SHARE,    L"Open Client's Shared Folder", NULL, true },
+    { IDC_CMD_COPY,          L"Copy files or folder to Client", NULL, true },
     { IDC_CMD_START61,       L"Start Lightning 6.1", NULL,      false },
     { IDC_CMD_START63,       L"Start Lightning 6.3", NULL,      false },
     { IDC_CMD_START_TV,      L"Start TeamViewer",    NULL,      false },
@@ -747,6 +750,117 @@ void openSharedFolders()
     else { logEvent("Open shared folder: could not start a thread"); delete paths; }
 }
 
+// ---------------------------------------------------------------- copy to clients
+
+struct CopyJob {
+    std::vector<std::wstring> sources;                        // files, or one folder
+    std::vector<std::pair<std::string, std::wstring> > targets; // client name, \\NAME\<share>
+};
+
+// One Windows shell copy per client, so the usual progress window and the
+// overwrite and permission prompts appear exactly as they do in Explorer.
+// Runs on its own thread because an unreachable client can take a minute.
+DWORD WINAPI copyToClientsThread(LPVOID param)
+{
+    CopyJob* job = (CopyJob*)param;
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    std::wstring from;
+    for (size_t i = 0; i < job->sources.size(); ++i) { from += job->sources[i]; from.push_back(L'\0'); }
+    from.push_back(L'\0');
+    for (size_t i = 0; i < job->targets.size(); ++i) {
+        const std::string& name = job->targets[i].first;
+        std::wstring to = job->targets[i].second;
+        to.push_back(L'\0');
+        to.push_back(L'\0');
+        SHFILEOPSTRUCTW op;
+        memset(&op, 0, sizeof(op));
+        op.wFunc = FO_COPY;
+        op.pFrom = from.c_str();
+        op.pTo = to.c_str();
+        op.fFlags = FOF_NOCONFIRMMKDIR;
+        int r = SHFileOperationW(&op);
+        if (r == 0 && !op.fAnyOperationsAborted) logEvent(format("copied %u item(s) to %s", (unsigned)job->sources.size(), name.c_str()));
+        else if (op.fAnyOperationsAborted) logEvent(format("copy to %s cancelled", name.c_str()));
+        else logEvent(format("copy to %s failed (shell error %d)", name.c_str(), r));
+    }
+    CoUninitialize();
+    delete job;
+    return 0;
+}
+
+// Asks for files or a folder, lets the user pick them, and copies them to the
+// shared folder of every checked client.
+void copyToClients()
+{
+    std::vector<NodeRecord*> nodes = checkedNodes();
+    if (nodes.empty()) {
+        MessageBoxW(g_main, L"Check the clients to copy to first.", L"Copy files or folder to Client", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    std::wstring content = widen(format("The selection is copied to \\\\NAME\\%s\\ of %u checked client(s).",
+                                        g_store->settings.shareName.c_str(), (unsigned)nodes.size()));
+    TASKDIALOG_BUTTON buttons[2] = { { 100, L"Files..." }, { 101, L"A folder..." } };
+    TASKDIALOGCONFIG tc;
+    memset(&tc, 0, sizeof(tc));
+    tc.cbSize = sizeof(tc);
+    tc.hwndParent = g_main;
+    tc.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_USE_COMMAND_LINKS;
+    tc.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+    tc.pszWindowTitle = L"Copy files or folder to Client";
+    tc.pszMainInstruction = L"What do you want to copy?";
+    tc.pszContent = content.c_str();
+    tc.pButtons = buttons;
+    tc.cButtons = 2;
+    tc.nDefaultButton = 100;
+    int pressed = 0;
+    if (FAILED(TaskDialogIndirect(&tc, &pressed, NULL, NULL)) || (pressed != 100 && pressed != 101)) return;
+    bool folder = pressed == 101;
+
+    std::vector<std::wstring> sources;
+    IFileOpenDialog* dlg = NULL;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg))) || !dlg) {
+        MessageBoxW(g_main, L"The file dialog could not be created.", L"Copy files or folder to Client", MB_OK | MB_ICONERROR);
+        return;
+    }
+    DWORD opts = 0;
+    dlg->GetOptions(&opts);
+    opts |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_FILEMUSTEXIST | (folder ? FOS_PICKFOLDERS : FOS_ALLOWMULTISELECT);
+    dlg->SetOptions(opts);
+    dlg->SetTitle(folder ? L"Select the folder to copy" : L"Select the files to copy");
+    dlg->SetOkButtonLabel(L"Copy");
+    if (SUCCEEDED(dlg->Show(g_main))) {
+        IShellItemArray* items = NULL;
+        if (SUCCEEDED(dlg->GetResults(&items)) && items) {
+            DWORD count = 0;
+            items->GetCount(&count);
+            for (DWORD i = 0; i < count; ++i) {
+                IShellItem* item = NULL;
+                if (FAILED(items->GetItemAt(i, &item)) || !item) continue;
+                PWSTR path = NULL;
+                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) { sources.push_back(path); CoTaskMemFree(path); }
+                item->Release();
+            }
+            items->Release();
+        }
+    }
+    dlg->Release();
+    if (sources.empty()) return;
+
+    CopyJob* job = new CopyJob;
+    job->sources = sources;
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        NodeRecord* n = nodes[i];
+        if (n->name.empty()) { logEvent(format("%s has no name yet; nothing copied to it", n->mac.c_str())); continue; }
+        job->targets.push_back(std::make_pair(n->name, L"\\\\" + widen(n->name) + L"\\" + widen(g_store->settings.shareName)));
+    }
+    if (job->targets.empty()) { delete job; return; }
+    logEvent(format("copying %u item(s) from %s to %u client(s)", (unsigned)sources.size(),
+                    narrow(sources[0]).c_str(), (unsigned)job->targets.size()));
+    HANDLE t = CreateThread(NULL, 0, copyToClientsThread, job, 0, NULL);
+    if (t) CloseHandle(t);
+    else { logEvent("copy to clients: could not start a thread"); delete job; }
+}
+
 void renameChecked()
 {
     std::vector<NodeRecord*> targets = checkedNodes();
@@ -1131,6 +1245,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CMD_UPDATE: updateChecked(); return 0;
         case IDC_CMD_RENAME: renameChecked(); return 0;
         case IDC_CMD_OPEN_SHARE: openSharedFolders(); return 0;
+        case IDC_CMD_COPY: copyToClients(); return 0;
         case IDC_CMD_RESTART_NODE: sendPowerCommand("REBOOT"); return 0;
         case IDC_CMD_SHUTDOWN_NODE: sendPowerCommand("SHUTDOWN"); return 0;
         case IDC_FLAG_WOL: case IDC_FLAG_BOOT: case IDC_FLAG_AUTOLOGIN: case IDC_FLAG_AUTOROD: case IDC_FLAG_AUTOLIGHTNING:
@@ -1282,6 +1397,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show)
     icc.dwSize = sizeof(icc);
     icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES | ICC_STANDARD_CLASSES;
     InitCommonControlsEx(&icc);
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);   // file dialogs
     if (!netInit()) { MessageBoxW(NULL, L"Winsock failed to start.", L"Thunderhead", MB_OK | MB_ICONERROR); return 1; }
 
     NodeStore store(g_dir);
