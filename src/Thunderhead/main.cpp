@@ -1413,6 +1413,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show)
     wc.hInstance = inst;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(IDI_APP));
     wc.lpszClassName = L"ThunderheadMain";
     wc.lpszMenuName = MAKEINTRESOURCEW(IDR_MENU);
     RegisterClassW(&wc);

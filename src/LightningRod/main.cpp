@@ -645,6 +645,7 @@ bool createWindow(HINSTANCE inst, const std::string& nodeName)
     wc.hInstance = inst;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
     wc.lpszClassName = L"LightningRodMain";
     RegisterClassW(&wc);
 

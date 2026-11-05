@@ -2,6 +2,8 @@
 #include "resource.h"
 #include "../common/Version.h"
 
+IDI_APP ICON "Thunderhead.ico"
+
 IDR_MENU MENU
 BEGIN
     POPUP "&File"

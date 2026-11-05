@@ -1,5 +1,6 @@
 #pragma once
 
+#define IDI_APP                 1     // first icon = the one Explorer shows
 #define IDR_MENU                101
 #define IDD_INTERVAL            103
 #define IDD_RENAME              104
