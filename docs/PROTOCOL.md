@@ -176,8 +176,12 @@ boot=yes
 autologin=yes
 autostart_rod=yes
 autostart_lightning=no
+auto_shutdown=no
 comment=fan noisy
 ```
+
+`auto_shutdown` is the *Auto Shutdown* check box column of the Client Inventory. It
+is only stored for now; the shutdown daemon that will act on it is not designed yet.
 
 `logs\thunderhead-YYYY-MM-DD.log` holds every event with a timestamp.
 `logs\nodes\NAME-YYYY-MM-DD.log` holds every message to and from that node.

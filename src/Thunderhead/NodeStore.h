@@ -15,6 +15,7 @@ struct NodeRecord {
     std::string name;
     std::string group;
     bool wol, boot, autoLogin, autoRod, autoLightning;
+    bool autoShutdown;               // Auto Shutdown column; stored only, the shutdown daemon is not designed yet
     std::string comment;
     // live
     bool online;
@@ -29,7 +30,7 @@ struct NodeRecord {
     bool rebootAfterRename;          // send REBOOT when the RENAME is acknowledged
 
     NodeRecord()
-        : wol(false), boot(false), autoLogin(false), autoRod(false), autoLightning(false),
+        : wol(false), boot(false), autoLogin(false), autoRod(false), autoLightning(false), autoShutdown(false),
           online(false), conn(-1), lastReportMs(0), onlineSinceMs(0), updating(false), updateStartMs(0),
           rebootAfterRename(false) {}
 };

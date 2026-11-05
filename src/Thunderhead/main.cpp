@@ -2,7 +2,8 @@
 // See docs/PROTOCOL.md for the wire protocol and files.
 //
 // Window layout: the left half is the Client Inventory (one row per node with a
-// check box, the per-cycle values, Group and Comment editable in place); the top
+// check box, the per-cycle values, an Auto Shutdown check box, Group and Comment
+// editable in place); the top
 // right is the static pane for the clicked node (HELLO data and the five flags);
 // the bottom right is the command pane, a grid of push buttons that act on every
 // checked node.
@@ -54,7 +55,7 @@ std::map<std::string, Logger*> g_nodeLogs;
 
 enum Column {
     ColName, ColStatus, ColAgent, ColRendering, ColLightning, ColLightningCpu, ColCpuPct, ColMemFree, ColDiskFree,
-    ColUptime, ColLastReport, ColGroup, ColComment, ColCount
+    ColUptime, ColLastReport, ColAutoShutdown, ColGroup, ColComment, ColCount
 };
 
 struct ColumnDef { const wchar_t* title; int width; int align; };
@@ -71,6 +72,7 @@ const ColumnDef kColumns[ColCount] = {
     { L"C: free MB",    75, LVCFMT_RIGHT },
     { L"Uptime",        90, LVCFMT_RIGHT },
     { L"Last report",   80, LVCFMT_RIGHT },
+    { L"Auto Shutdown", 95, LVCFMT_CENTER },
     { L"Group",        100, LVCFMT_LEFT },
     { L"Comment",      220, LVCFMT_LEFT },
 };
@@ -173,6 +175,7 @@ std::wstring columnText(const NodeRecord& n, int col)
         buf[31] = L'\0';
         return buf;
     }
+    case ColAutoShutdown: return L"";   // painted as a check box by onListCustomDraw
     case ColGroup:        return widen(n.group);
     case ColComment:      return widen(n.comment);
     }
@@ -279,6 +282,7 @@ bool sortNumber(const NodeRecord& n, int col, long long& out)
         if (!n.online || n.lastReportMs == 0) return false;
         out = (long long)(tickMs() - n.lastReportMs);
         return true;
+    case ColAutoShutdown: out = n.autoShutdown ? 1 : 0; return true;
     default: return false;
     }
     if (!live || !r.has(key)) return false;
@@ -438,6 +442,17 @@ void flagClicked(int id)
     }
     g_store->save();
     logEvent(format("%s %s=%s", n->name.c_str(), name, boolText(on)));
+}
+
+// The Auto Shutdown cell of a row was clicked: flip the flag, save it and repaint the row.
+void toggleAutoShutdown(int row)
+{
+    NodeRecord* n = nodeAt(row);
+    if (!n) return;
+    n->autoShutdown = !n->autoShutdown;
+    g_store->save();
+    logEvent(format("%s auto_shutdown=%s", n->name.c_str(), boolText(n->autoShutdown)));
+    SendMessageW(g_list, LVM_REDRAWITEMS, (WPARAM)row, (LPARAM)row);
 }
 
 // ---------------------------------------------------------------- in-place editing
@@ -1187,9 +1202,42 @@ LRESULT CALLBACK paneProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-void onListNotify(NMHDR* hdr)
+// Paints the Auto Shutdown cell of one row as a check box after the list has drawn
+// the row, using the list's own state images so it matches the row check box.
+void drawAutoShutdownCell(HDC dc, int row, bool on)
+{
+    RECT rc;
+    rc.top = ColAutoShutdown;
+    rc.left = LVIR_BOUNDS;
+    if (!SendMessageW(g_list, LVM_GETSUBITEMRECT, (WPARAM)row, (LPARAM)&rc)) return;
+    HIMAGELIST il = (HIMAGELIST)SendMessageW(g_list, LVM_GETIMAGELIST, LVSIL_STATE, 0);
+    int cx = 0, cy = 0;
+    if (!il || !ImageList_GetIconSize(il, &cx, &cy)) return;
+    int saved = SaveDC(dc);
+    IntersectClipRect(dc, rc.left, rc.top, rc.right, rc.bottom);
+    ImageList_Draw(il, on ? 1 : 0, dc, rc.left + (rc.right - rc.left - cx) / 2, rc.top + (rc.bottom - rc.top - cy) / 2, ILD_TRANSPARENT);
+    RestoreDC(dc, saved);
+}
+
+LRESULT onListCustomDraw(NMLVCUSTOMDRAW* cd)
+{
+    switch (cd->nmcd.dwDrawStage) {
+    case CDDS_PREPAINT:     return CDRF_NOTIFYITEMDRAW;
+    case CDDS_ITEMPREPAINT: return CDRF_NOTIFYPOSTPAINT;
+    case CDDS_ITEMPOSTPAINT: {
+        const NodeRecord* n = (const NodeRecord*)cd->nmcd.lItemlParam;
+        if (n) drawAutoShutdownCell(cd->nmcd.hdc, (int)cd->nmcd.dwItemSpec, n->autoShutdown);
+        return CDRF_DODEFAULT;
+    }
+    }
+    return CDRF_DODEFAULT;
+}
+
+LRESULT onListNotify(NMHDR* hdr)
 {
     switch (hdr->code) {
+    case NM_CUSTOMDRAW:
+        return onListCustomDraw((NMLVCUSTOMDRAW*)hdr);
     case NM_CLICK: {
         NMITEMACTIVATE* ia = (NMITEMACTIVATE*)hdr;
         LVHITTESTINFO ht;
@@ -1200,6 +1248,7 @@ void onListNotify(NMHDR* hdr)
             beginEdit(ht.iItem, ht.iSubItem);
         } else {
             endEdit(true);
+            if (ht.iItem >= 0 && ht.iSubItem == ColAutoShutdown && (ht.flags & LVHT_ONITEM)) toggleAutoShutdown(ht.iItem);
         }
         if (ht.iItem >= 0) showStaticPane(nodeAt(ht.iItem));
         break;
@@ -1218,6 +1267,7 @@ void onListNotify(NMHDR* hdr)
         sortByColumn(((NMLISTVIEW*)hdr)->iSubItem);
         break;
     }
+    return 0;
 }
 
 LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -1264,7 +1314,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_UPDATE_DONE: { UpdateResult* r = (UpdateResult*)lp; onUpdateDone(r); delete r; return 0; }
     case WM_NOTIFY: {
         NMHDR* hdr = (NMHDR*)lp;
-        if (hdr->hwndFrom == g_list) onListNotify(hdr);
+        if (hdr->hwndFrom == g_list) return onListNotify(hdr);
         return 0;
     }
     case WM_DESTROY:

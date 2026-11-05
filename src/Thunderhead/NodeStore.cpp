@@ -76,6 +76,7 @@ void NodeStore::load()
         else if (key == "autologin") cur->autoLogin = parseBool(value);
         else if (key == "autostart_rod") cur->autoRod = parseBool(value);
         else if (key == "autostart_lightning") cur->autoLightning = parseBool(value);
+        else if (key == "auto_shutdown") cur->autoShutdown = parseBool(value);
         else if (key == "comment") cur->comment = value;
     }
 }
@@ -93,6 +94,7 @@ void NodeStore::save()
         out += std::string("autologin=") + boolText(n.autoLogin) + "\r\n";
         out += std::string("autostart_rod=") + boolText(n.autoRod) + "\r\n";
         out += std::string("autostart_lightning=") + boolText(n.autoLightning) + "\r\n";
+        out += std::string("auto_shutdown=") + boolText(n.autoShutdown) + "\r\n";
         out += "comment=" + n.comment + "\r\n";
     }
     writeFile(dir_ + L"\\nodes.txt", out);
