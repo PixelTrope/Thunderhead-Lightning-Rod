@@ -93,8 +93,8 @@ const CommandDef kCommands[] = {
     { IDC_CMD_CHECK_OUTDATED, L"Check outdated",     NULL,      true  },
     { IDC_CMD_UPDATE,        L"Update checked",      NULL,      true  },
     { IDC_CMD_RENAME,        L"Rename node",         NULL,      true  },
-    { IDC_CMD_RESTART_NODE,  L"Restart node",        "REBOOT",  true  },
-    { IDC_CMD_SHUTDOWN_NODE, L"Shut down node",      "SHUTDOWN", true },
+    { IDC_CMD_SHUTDOWN_NODE, L"Shutdown Node",       NULL,      true  },
+    { IDC_CMD_ABORT_SHUTDOWN, L"Abort Shutdown",     NULL,      true  },
     { IDC_CMD_OPEN_SHARE,    L"Open Client's Shared Folder", NULL, true },
     { IDC_CMD_COPY,          L"Copy files or folder to Client", NULL, true },
     { IDC_CMD_PRIORITY,      L"Change Render Priority", NULL, true },
@@ -771,16 +771,71 @@ void sendCommand(const char* verb)
     sendCommandMessage(Message(verb));
 }
 
-// REBOOT and SHUTDOWN ask first, since they act on every checked node at once.
-void sendPowerCommand(const char* verb)
+// First agent version that knows POWER; older agents ignore the verb.
+const char* const kPowerAgent = "0.2.6";
+
+// Sends POWER with the given action to every checked online client. Agents
+// older than kPowerAgent are skipped with a line in the event log.
+void sendPower(const char* action)
+{
+    std::vector<NodeRecord*> targets = checkedNodes();
+    Message m("POWER");
+    m.set("action", std::string(action));
+    int online = 0, sent = 0, old = 0;
+    for (size_t i = 0; i < targets.size(); ++i) {
+        NodeRecord* n = targets[i];
+        if (!n->online) continue;
+        ++online;
+        std::string agent = n->hello.get("agent");
+        if (compareVersions(agent, kPowerAgent) < 0) {
+            ++old;
+            logEvent(format("%s not sent to %s: agent %s is older than %s, update it first",
+                            m.oneLine().c_str(), n->name.c_str(), agent.c_str(), kPowerAgent));
+            continue;
+        }
+        if (g_server->send(n->conn, m)) {
+            ++sent;
+            logEvent(format("%s -> %s", m.oneLine().c_str(), n->name.c_str()));
+            logNode(*n, std::string("-> ") + m.oneLine());
+        }
+    }
+    if (online == 0) { updateStatusBar(L"|  no online clients checked"); return; }
+    std::string status = format("|  %s sent to %d of %d checked", m.oneLine().c_str(), sent, (int)targets.size());
+    if (old) status += format(", %d skipped: agent older than %s", old, kPowerAgent);
+    updateStatusBar(widen(status).c_str());
+}
+
+// Shutdown Node, the one button for shutting down and restarting: asks which
+// shutdown.exe action the checked clients are to run.
+// The dialog is also the confirmation. Every action goes out with /f and /t 66,
+// so Abort Shutdown can cancel it during the 66 seconds.
+void shutdownChecked()
 {
     std::vector<NodeRecord*> targets = checkedNodes();
     int online = 0;
     for (size_t i = 0; i < targets.size(); ++i) if (targets[i]->online) ++online;
     if (online == 0) { updateStatusBar(L"|  no online clients checked"); return; }
-    std::wstring q = widen(format("%s %d checked online client(s)?", strcmp(verb, "REBOOT") == 0 ? "Restart" : "Shut down", online));
-    if (MessageBoxW(g_main, q.c_str(), L"Thunderhead", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return;
-    sendCommand(verb);
+    static const char* const kActions[3] = { "shutdown", "restart", "coldrestart" };
+    TASKDIALOG_BUTTON radios[3] = { { 400, L"Shutdown (/s)" }, { 401, L"Restart (/r)" }, { 402, L"Cold restart (/g)" } };
+    std::wstring content = widen(format("%d checked online client(s) will close all programs by force (/f) and act after "
+                                        "66 seconds (/t 66). Abort Shutdown cancels the action during that time.", online));
+    TASKDIALOGCONFIG tc;
+    memset(&tc, 0, sizeof(tc));
+    tc.cbSize = sizeof(tc);
+    tc.hwndParent = g_main;
+    tc.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+    tc.dwCommonButtons = TDCBF_OK_BUTTON | TDCBF_CANCEL_BUTTON;
+    tc.pszWindowTitle = L"Shutdown Node";
+    tc.pszMainIcon = TD_WARNING_ICON;
+    tc.pszMainInstruction = L"Select the action for the checked clients";
+    tc.pszContent = content.c_str();
+    tc.pRadioButtons = radios;
+    tc.cRadioButtons = 3;
+    tc.nDefaultRadioButton = 400;   // Shutdown
+    tc.nDefaultButton = IDCANCEL;
+    int pressed = 0, radio = 0;
+    if (FAILED(TaskDialogIndirect(&tc, &pressed, &radio, NULL)) || pressed != IDOK || radio < 400 || radio > 402) return;
+    sendPower(kActions[radio - 400]);
 }
 
 // Asks for a priority class, confirms the two that carry a cost, and sends
@@ -1199,7 +1254,9 @@ void onNet(NetEvent* e)
         if (!n) break;
         logNode(*n, "<- " + e->msg.oneLine());
         bool ok = parseBool(e->msg.get("ok"));
-        std::string text = format("%s %s on %s%s%s", e->msg.get("cmd").c_str(), ok ? "ok" : "failed",
+        std::string cmd = e->msg.get("cmd");
+        if (cmd == "POWER") cmd += " " + e->msg.get("action");
+        std::string text = format("%s %s on %s%s%s", cmd.c_str(), ok ? "ok" : "failed",
                                   n->name.c_str(), ok ? "" : ": ", ok ? "" : e->msg.get("error").c_str());
         logEvent(text);
         updateStatusBar((L"|  " + widen(text)).c_str());
@@ -1455,8 +1512,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CMD_OPEN_SHARE: openSharedFolders(); return 0;
         case IDC_CMD_COPY: copyToClients(); return 0;
         case IDC_CMD_PRIORITY: changeRenderPriority(); return 0;
-        case IDC_CMD_RESTART_NODE: sendPowerCommand("REBOOT"); return 0;
-        case IDC_CMD_SHUTDOWN_NODE: sendPowerCommand("SHUTDOWN"); return 0;
+        case IDC_CMD_SHUTDOWN_NODE: shutdownChecked(); return 0;
+        case IDC_CMD_ABORT_SHUTDOWN: sendPower("abort"); return 0;
         case IDC_FLAG_WOL: case IDC_FLAG_BOOT: case IDC_FLAG_AUTOLOGIN: case IDC_FLAG_AUTOROD: case IDC_FLAG_AUTOLIGHTNING:
             if (HIWORD(wp) == BN_CLICKED) flagClicked(id);
             return 0;

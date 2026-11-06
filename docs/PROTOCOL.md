@@ -134,13 +134,16 @@ Thunderhead may send at any time:
 | RENAME | name          | set the computer name (takes effect at reboot); reply ACK with the name |
 | PRIORITY | level       | set the priority class of Lightning.exe: RealTime, High, AboveNormal, Normal, BelowNormal or Low; reply ACK |
 | REBOOT |               | reply ACK, then restart the node after 5 s, closing programs by force |
-| SHUTDOWN |             | reply ACK, then shut the node down after 5 s, closing programs by force |
+| SHUTDOWN |             | reply ACK, then shut the node down after 5 s, closing programs by force (no longer sent by Thunderhead, which uses POWER) |
+| POWER | action        | run Windows' `shutdown.exe` and reply ACK with the action: `shutdown` (`-s`), `restart` (`-r`) or `coldrestart` (`-g`), each with `-f -t 66`, or `abort` (`-a`); agents from 0.2.6 |
 
-The agent replies to START, STOP, PRIORITY, EXIT, RESTART, UPDATE, RENAME, REBOOT
-and SHUTDOWN with (RENAME adds `name=` with the name that was applied; PRIORITY
-adds `level=` as requested and `applied=` with the class Windows reports
+The agent replies to START, STOP, PRIORITY, EXIT, RESTART, UPDATE, RENAME, REBOOT,
+SHUTDOWN and POWER with (RENAME adds `name=` with the name that was applied;
+PRIORITY adds `level=` as requested and `applied=` with the class Windows reports
 afterwards, and answers `ok=no` when the two differ, as when RealTime is
-requested without administrator rights and Windows grants High):
+requested without administrator rights and Windows grants High; POWER adds
+`action=` and answers `ok=no` with the exit code of `shutdown.exe` when that
+is not 0):
 
 ```
 ACK
@@ -256,4 +259,26 @@ administrative rights; with UAC enabled the agent must be started elevated
 (for example by a scheduled task with highest privileges) or the ACK reports
 "Access is denied". REBOOT and SHUTDOWN need the shutdown privilege, which
 ordinary users hold on Windows 7, and close running programs by force.
-*Restart node* and *Shut down node* ask for confirmation before sending.
+Thunderhead sends REBOOT only after a rename with the reboot option; restarts
+asked for by the operator go through *Shutdown Node*.
+
+## Shut down and abort
+
+*Shutdown Node* is the one button for shutting down and restarting. It opens a
+dialog with three radio buttons, OK and Cancel for the checked online
+clients, which is also the confirmation: *Shutdown (/s)*, *Restart (/r)* and
+*Cold restart (/g)*. Thunderhead sends POWER with `action=shutdown`, `restart`
+or `coldrestart`, and the agent runs `shutdown.exe` from the system directory
+with `-s`, `-r` or `-g`, always followed by `-f -t 66`: programs are closed by
+force and the node acts 66 seconds later. *Abort Shutdown* sends POWER with
+`action=abort` to the checked clients, which run `shutdown.exe -a`; that
+cancels the action while the 66 seconds are still counting.
+
+The agent waits for `shutdown.exe` (30 s at most) and reports its exit code,
+which is a Win32 error code: 0 is `ok=yes`, anything else is `ok=no` with the
+code and its text, for example 1116 when an abort finds no shutdown in
+progress, or 1190 when a shutdown is already scheduled. `-g` (full shutdown
+and restart, then restart of registered applications) does not exist on
+Windows XP, where `coldrestart` is answered with `ok=no`. Agents older than
+0.2.6 do not know POWER; Thunderhead does not send it to them and writes a
+line to the event log instead.

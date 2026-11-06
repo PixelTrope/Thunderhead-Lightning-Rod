@@ -101,6 +101,36 @@ bool enableShutdownPrivilege(std::string& err)
     return ok;
 }
 
+// Runs Windows' own shutdown.exe with the given switches and waits for it. Its
+// exit code is a Win32 error code: 0 when the request was accepted, otherwise
+// for example 1116 when an abort finds no shutdown in progress.
+bool runShutdownExe(const std::wstring& args, std::string& err)
+{
+    wchar_t sys[MAX_PATH];
+    UINT n = GetSystemDirectoryW(sys, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) { err = "system directory: " + lastErrorText((int)GetLastError()); return false; }
+    std::wstring exe = std::wstring(sys, n) + L"\\shutdown.exe";
+    std::wstring cmd = L"\"" + exe + L"\" " + args;
+    std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
+    cmdBuf.push_back(L'\0');
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    memset(&pi, 0, sizeof(pi));
+    if (!CreateProcessW(exe.c_str(), &cmdBuf[0], NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        err = "shutdown.exe could not be started: " + lastErrorText((int)GetLastError());
+        return false;
+    }
+    CloseHandle(pi.hThread);
+    DWORD code = 0;
+    bool done = WaitForSingleObject(pi.hProcess, 30000) == WAIT_OBJECT_0 && GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    if (!done) { err = "shutdown.exe did not finish within 30 s"; return false; }
+    if (code != 0) { err = format("shutdown.exe exit code %u: ", (unsigned)code) + lastErrorText((int)code); return false; }
+    return true;
+}
+
 // Connects with a timeout; returns INVALID_SOCKET on failure.
 SOCKET connectWithTimeout(const sockaddr_in& addr, int timeoutMs)
 {
@@ -431,6 +461,29 @@ private:
             ack.set("cmd", m.verb);
             ack.set("ok", boolText(ok));
             ack.set("error", err);
+            sendMessage(ack);
+        } else if (m.verb == "POWER") {
+            // Windows' shutdown.exe does the work. The three actions are its -s, -r
+            // and -g switches, always with -f (close programs by force) and -t 66
+            // (act after 66 seconds); abort is -a, which cancels a shutdown that is
+            // still counting down. The dash form is the one every Windows version
+            // from XP on accepts.
+            std::string action = trim(m.get("action")), err;
+            const wchar_t* args = NULL;
+            if (action == "shutdown") args = L"-s -f -t 66";
+            else if (action == "restart") args = L"-r -f -t 66";
+            else if (action == "coldrestart") args = L"-g -f -t 66";
+            else if (action == "abort") args = L"-a";
+            bool ok = args != NULL;
+            if (!ok) err = "unknown action " + action;
+            else ok = runShutdownExe(args, err);
+            logLine(format("POWER %s (shutdown.exe %s): %s%s%s", action.c_str(), args ? narrow(args).c_str() : "",
+                           ok ? "ok" : "failed", err.empty() ? "" : " ", err.c_str()));
+            Message ack("ACK");
+            ack.set("cmd", m.verb);
+            ack.set("ok", boolText(ok));
+            ack.set("error", err);
+            ack.set("action", action);
             sendMessage(ack);
         } else if (m.verb == "EXIT" || m.verb == "RESTART") {
             Message ack("ACK");

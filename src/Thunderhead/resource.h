@@ -32,7 +32,6 @@
 #define IDC_CMD_CHECK_NONE      3006
 #define IDC_CMD_START61         3007
 #define IDC_CMD_START63         3008
-#define IDC_CMD_RESTART_NODE    3009
 #define IDC_CMD_SHUTDOWN_NODE   3010
 #define IDC_CMD_START_TV        3011
 #define IDC_CMD_MESSAGE         3012
@@ -45,7 +44,8 @@
 #define IDC_CMD_OPEN_SHARE      3019
 #define IDC_CMD_COPY            3020
 #define IDC_CMD_PRIORITY        3021
-#define IDC_CMD_LAST            3021
+#define IDC_CMD_ABORT_SHUTDOWN  3022
+#define IDC_CMD_LAST            3022
 
 // rename dialog
 #define IDC_RENAME_INFO         2301
