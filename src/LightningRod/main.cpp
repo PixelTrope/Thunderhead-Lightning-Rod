@@ -526,7 +526,11 @@ private:
             ack.set("applied", applied);
             sendMessage(ack);
         } else if (m.verb == "PING") {
-            sendMessage(Message("PONG"));
+            // Report at once, with every value rather than only the changed ones,
+            // and restart the report timer from here. Agents before 0.2.11 sent PONG.
+            sent_ = Message();
+            sendReport();
+            nextReport_ = tickMs() + (unsigned long long)intervalSec_ * 1000;
         } else if (m.verb == "UPDATE") {
             // Thunderhead replaces LightningRod.exe through the node's share once this
             // process has exited. A copy of this executable, LightningRod.update.exe,

@@ -30,11 +30,13 @@ struct NodeRecord {
     std::wstring updateDir;          // the share path the staging used
     unsigned long long updateStartMs;
     bool rebootAfterRename;          // send REBOOT when the RENAME is acknowledged
+    bool pingPending;                // PING sent, no report or PONG yet
+    unsigned long long pingSentMs;   // tickMs() of that PING
 
     NodeRecord()
         : wol(false), boot(false), autoLogin(false), autoRod(false), autoLightning(false), autoShutdown(false),
           online(false), conn(-1), lastReportMs(0), onlineSinceMs(0), updating(false), updateStaged(false), updateStartMs(0),
-          rebootAfterRename(false) {}
+          rebootAfterRename(false), pingPending(false), pingSentMs(0) {}
 };
 
 struct Settings {

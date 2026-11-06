@@ -4,7 +4,8 @@
 // Window layout: the left half is the Client Inventory (one row per node with a
 // check box, the per-cycle values, an Auto Shutdown check box, Group and Comment
 // editable in place); the top
-// right is the static pane for the clicked node (HELLO data and the five flags);
+// right is the detail pane for the clicked node (stored data, HELLO data, the
+// latest report and the five flags);
 // the bottom right is the command pane, a grid of push buttons that act on every
 // checked node.
 
@@ -54,7 +55,7 @@ std::map<std::string, Logger*> g_nodeLogs;
 // ---------------------------------------------------------------- inventory columns
 
 enum Column {
-    ColName, ColStatus, ColAgent, ColRendering, ColLightning, ColLightningCpu, ColCpuPct, ColCpuTemp, ColMemFree, ColDiskFree,
+    ColName, ColIp, ColMac, ColStatus, ColAgent, ColRendering, ColLightning, ColLightningCpu, ColCpuPct, ColCpuTemp, ColMemFree, ColDiskFree,
     ColUptime, ColLastReport, ColAutoShutdown, ColGroup, ColComment, ColCount
 };
 
@@ -62,6 +63,8 @@ struct ColumnDef { const wchar_t* title; int width; int align; };
 
 const ColumnDef kColumns[ColCount] = {
     { L"Name",         130, LVCFMT_LEFT },
+    { L"IP",           100, LVCFMT_LEFT },
+    { L"MAC",          118, LVCFMT_LEFT },
     { L"Status",        65, LVCFMT_LEFT },
     { L"Agent",         50, LVCFMT_LEFT },
     { L"Rendering",     70, LVCFMT_LEFT },
@@ -85,7 +88,7 @@ struct CommandDef { int id; const wchar_t* label; const char* verb; bool live; }
 const CommandDef kCommands[] = {
     { IDC_CMD_START71,       L"Start Lightning 7.1", "START",   true  },
     { IDC_CMD_STOP,          L"Stop Lightning",      "STOP",    true  },
-    { IDC_CMD_PING,          L"Ping",                "PING",    true  },
+    { IDC_CMD_PING,          L"Ping",                NULL,      true  },
     { IDC_CMD_RESTART_LR,    L"Restart LR",          "RESTART", true  },
     { IDC_CMD_EXIT_LR,       L"Exit LR",             "EXIT",    true  },
     { IDC_CMD_CHECK_ALL,     L"Check all",           NULL,      true  },
@@ -100,6 +103,8 @@ const CommandDef kCommands[] = {
     { IDC_CMD_PRIORITY,      L"Change Render Priority", NULL, true },
     { IDC_CMD_BATCH,         L"Run Remote Batch File", NULL, true },
     { IDC_CMD_WOL,           L"Send Wake On LAN Magic Packet", NULL, true },
+    { IDC_CMD_VIEW_LOCAL_LOG, L"View Local Log",     NULL,      true  },
+    { IDC_CMD_VIEW_REMOTE_LOG, L"View Remote Log(s)", NULL,     true  },
     { IDC_CMD_START61,       L"Start Lightning 6.1", NULL,      false },
     { IDC_CMD_START63,       L"Start Lightning 6.3", NULL,      false },
     { IDC_CMD_START_TV,      L"Start TeamViewer",    NULL,      false },
@@ -154,27 +159,39 @@ std::wstring durationText(long long seconds)
     return buf;
 }
 
+// cpu_temp_c as sent, in both scales; empty means the node has no ACPI thermal zone.
+std::wstring tempText(const std::string& celsius)
+{
+    if (celsius.empty()) return L"n/a";
+    double c = atof(celsius.c_str());
+    wchar_t buf[48];
+    _snwprintf(buf, 47, L"%.1f \u00B0C / %.1f \u00B0F", c, c * 9 / 5 + 32);
+    buf[47] = L'\0';
+    return buf;
+}
+
+// The address a node is reached at: that of its connection, else the one its
+// HELLO carried (an offline node keeps the last one seen).
+std::string nodeIp(const NodeRecord& n)
+{
+    return n.ip.empty() ? n.hello.get("ip") : n.ip;
+}
+
 std::wstring columnText(const NodeRecord& n, int col)
 {
     const Message& r = n.report;
     bool live = n.online && !r.verb.empty();
     switch (col) {
     case ColName:         return widen(n.name.empty() ? n.mac : n.name);
+    case ColIp:           return widen(nodeIp(n));
+    case ColMac:          return widen(n.mac);
     case ColStatus:       return n.updating ? L"Updating" : (n.online ? L"Online" : L"Offline");
     case ColAgent:        return widen(n.hello.get("agent"));
     case ColRendering:    return !live ? L"" : (parseBool(r.get("rendering")) ? L"Yes" : L"No");
     case ColLightning:    return !live ? L"" : (r.get("lightning") == "running" ? L"Running" : L"Stopped");
     case ColLightningCpu: return !live ? L"" : widen(r.get("lightning_cpu_pct"));
     case ColCpuPct:       return !live ? L"" : widen(r.get("cpu_pct"));
-    case ColCpuTemp: {
-        if (!live) return L"";
-        if (r.get("cpu_temp_c").empty()) return L"n/a";   // the node has no ACPI thermal zone
-        double c = atof(r.get("cpu_temp_c").c_str());
-        wchar_t buf[48];
-        _snwprintf(buf, 47, L"%.1f \u00B0C / %.1f \u00B0F", c, c * 9 / 5 + 32);
-        buf[47] = L'\0';
-        return buf;
-    }
+    case ColCpuTemp:      return !live ? L"" : tempText(r.get("cpu_temp_c"));
     case ColMemFree:      return !live ? L"" : widen(r.get("mem_free_mb"));
     case ColDiskFree:     return !live ? L"" : widen(r.get("disk_free_mb"));
     case ColUptime:       return !live ? L"" : durationText(atoll(r.get("uptime_s").c_str()));
@@ -294,6 +311,22 @@ bool sortNumber(const NodeRecord& n, int col, long long& out)
         out = (long long)(tickMs() - n.lastReportMs);
         return true;
     case ColAutoShutdown: out = n.autoShutdown ? 1 : 0; return true;
+    case ColIp: {
+        // a.b.c.d as one number, so that 42.32.22.107 sorts before 42.32.22.158
+        std::string ip = nodeIp(n);
+        long long key = 0;
+        int parts = 0, digits = 0;
+        unsigned value = 0;
+        for (size_t i = 0; i <= ip.size(); ++i) {
+            char ch = i < ip.size() ? ip[i] : '.';
+            if (ch >= '0' && ch <= '9') { value = value * 10 + (unsigned)(ch - '0'); ++digits; if (value > 255) return false; }
+            else if (ch == '.' && digits > 0 && parts < 4) { key = (key << 8) | value; value = 0; digits = 0; ++parts; }
+            else return false;
+        }
+        if (parts != 4) return false;
+        out = key;
+        return true;
+    }
     case ColCpuTemp:
         if (!live || r.get("cpu_temp_c").empty()) return false;
         out = (long long)(atof(r.get("cpu_temp_c").c_str()) * 10 + 0.5);
@@ -399,7 +432,8 @@ void showStaticPane(NodeRecord* n)
     g_staticNode = n;
     if (!n) { ShowWindow(g_staticPane, SW_HIDE); return; }
     const Message& h = n->hello;
-    std::wstring title = L"Static data: " + widen(n->name.empty() ? n->mac : n->name) +
+    const Message& r = n->report;
+    std::wstring title = L"Client details: " + widen(n->name.empty() ? n->mac : n->name) +
                          (n->online ? L"" : L"  (offline, last known values)");
     SetWindowTextW(g_staticTitle, title.c_str());
     CheckDlgButton(g_staticPane, IDC_FLAG_WOL, n->wol ? BST_CHECKED : BST_UNCHECKED);
@@ -408,35 +442,70 @@ void showStaticPane(NodeRecord* n)
     CheckDlgButton(g_staticPane, IDC_FLAG_AUTOROD, n->autoRod ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(g_staticPane, IDC_FLAG_AUTOLIGHTNING, n->autoLightning ? BST_CHECKED : BST_UNCHECKED);
 
-    struct Row { const wchar_t* item; std::wstring value; };
-    Row rows[] = {
-        { L"Name",       widen(n->name) },
-        { L"MAC",        widen(n->mac) },
-        { L"IP",         widen(n->ip.empty() ? h.get("ip") : n->ip) },
-        { L"Agent",      widen(h.get("agent")) },
-        { L"OS",         widen(h.get("os")) },
-        { L"CPU",        widen(h.get("cpu")) },
-        { L"MHz",        widen(h.get("cpu_mhz")) },
-        { L"Cores",      widen(h.get("cores")) },
-        { L"Memory MB",  widen(h.get("mem_mb")) },
-        { L"C: MB",      widen(h.get("disk_total_mb")) },
-        { L"Board",      widen(h.get("board")) },
-        { L"Chipset",    widen(h.get("chipset")) },
-        { L"GPU",        widen(h.get("gpu")) },
-        { L"VRAM MB",    widen(h.get("vram_mb")) },
-    };
-    const int count = sizeof(rows) / sizeof(rows[0]);
+    // Every field there is: the stored record, the connection, the HELLO, the
+    // latest report (kept for an offline node), then any field of HELLO or
+    // REPORT that has no row of its own, as a newer agent may send one.
+    std::vector<std::pair<std::wstring, std::wstring> > rows;
+    auto add = [&rows](const wchar_t* item, const std::wstring& value) { rows.push_back(std::make_pair(std::wstring(item), value)); };
+    add(L"Name", widen(n->name));
+    if (!h.get("name").empty() && h.get("name") != n->name) add(L"Reported name", widen(h.get("name")));
+    add(L"MAC", widen(n->mac));
+    add(L"IP", widen(nodeIp(*n)));
+    add(L"Status", columnText(*n, ColStatus));
+    add(L"Connected for", n->online ? durationText((long long)((tickMs() - n->onlineSinceMs) / 1000)) : std::wstring());
+    add(L"Last report", columnText(*n, ColLastReport));
+    add(L"Group", widen(n->group));
+    add(L"Comment", widen(n->comment));
+    add(L"Auto Shutdown", n->autoShutdown ? L"Yes" : L"No");
+    add(L"Agent", widen(h.get("agent")));
+    add(L"OS", widen(h.get("os")));
+    add(L"CPU", widen(h.get("cpu")));
+    add(L"MHz", widen(h.get("cpu_mhz")));
+    add(L"Cores", widen(h.get("cores")));
+    add(L"Memory MB", widen(h.get("mem_mb")));
+    add(L"C: MB", widen(h.get("disk_total_mb")));
+    add(L"Board", widen(h.get("board")));
+    add(L"Chipset", widen(h.get("chipset")));
+    add(L"GPU", widen(h.get("gpu")));
+    add(L"VRAM MB", widen(h.get("vram_mb")));
+    bool reported = !r.verb.empty();
+    add(L"Rendering", !r.has("rendering") ? std::wstring() : (parseBool(r.get("rendering")) ? L"Yes" : L"No"));
+    add(L"Lightning", !r.has("lightning") ? std::wstring() : (r.get("lightning") == "running" ? L"Running" : L"Stopped"));
+    add(L"Lightning CPU %", widen(r.get("lightning_cpu_pct")));
+    add(L"CPU %", widen(r.get("cpu_pct")));
+    add(L"CPU temp", !reported ? std::wstring() : tempText(r.get("cpu_temp_c")));
+    add(L"Mem free MB", widen(r.get("mem_free_mb")));
+    add(L"C: free MB", widen(r.get("disk_free_mb")));
+    add(L"Uptime", !r.has("uptime_s") ? std::wstring() : durationText(atoll(r.get("uptime_s").c_str())));
+    static const char* const knownHello[] = { "agent", "os", "cpu", "cpu_mhz", "cores", "mem_mb", "disk_total_mb", "board",
+                                              "chipset", "gpu", "vram_mb", "ip", "mac", "name" };
+    static const char* const knownReport[] = { "cpu_pct", "cpu_temp_c", "disk_free_mb", "lightning", "lightning_cpu_pct",
+                                               "mem_free_mb", "rendering", "uptime_s" };
+    for (std::map<std::string, std::string>::const_iterator it = h.fields.begin(); it != h.fields.end(); ++it) {
+        bool known = false;
+        for (size_t k = 0; k < sizeof(knownHello) / sizeof(knownHello[0]); ++k) if (it->first == knownHello[k]) known = true;
+        if (!known) add((L"HELLO " + widen(it->first)).c_str(), widen(it->second));
+    }
+    for (std::map<std::string, std::string>::const_iterator it = r.fields.begin(); it != r.fields.end(); ++it) {
+        bool known = false;
+        for (size_t k = 0; k < sizeof(knownReport) / sizeof(knownReport[0]); ++k) if (it->first == knownReport[k]) known = true;
+        if (!known) add((L"REPORT " + widen(it->first)).c_str(), widen(it->second));
+    }
+    const int count = (int)rows.size();
     int have = (int)SendMessageW(g_staticList, LVM_GETITEMCOUNT, 0, 0);
+    while (have > count) SendMessageW(g_staticList, LVM_DELETEITEM, (WPARAM)--have, 0);
     for (int i = 0; i < count; ++i) {
         if (i >= have) {
             LVITEMW item;
             memset(&item, 0, sizeof(item));
             item.mask = LVIF_TEXT;
             item.iItem = i;
-            item.pszText = (LPWSTR)rows[i].item;
+            item.pszText = (LPWSTR)rows[i].first.c_str();
             SendMessageW(g_staticList, LVM_INSERTITEMW, 0, (LPARAM)&item);
+        } else {
+            setCell(g_staticList, i, 0, rows[i].first);
         }
-        setCell(g_staticList, i, 1, rows[i].value);
+        setCell(g_staticList, i, 1, rows[i].second);
     }
     ShowWindow(g_staticPane, SW_SHOW);
 }
@@ -769,6 +838,58 @@ void sendCommandMessage(const Message& m)
 void sendCommand(const char* verb)
 {
     sendCommandMessage(Message(verb));
+}
+
+// Ping: every checked client is told to report at once. An agent from 0.2.11
+// answers with a full REPORT, an older one with PONG; a client that sends
+// neither within kPingWaitMs is marked offline by onTimer. A checked client
+// that is offline already gets a line in the event log instead of a PING.
+const char* const kPingReportAgent = "0.2.11";
+const unsigned long long kPingWaitMs = 5000;
+int g_pingChecked = 0, g_pingSent = 0, g_pingReplied = 0, g_pingNoReply = 0, g_pingOffline = 0;
+
+void pingStatus()
+{
+    updateStatusBar(widen(format("|  PING: %d checked, %d sent, %d replied, %d no reply, %d offline", g_pingChecked, g_pingSent,
+                                 g_pingReplied, g_pingNoReply, g_pingOffline)).c_str());
+}
+
+void pingChecked()
+{
+    std::vector<NodeRecord*> targets = checkedNodes();
+    if (targets.empty()) { updateStatusBar(L"|  no clients checked"); return; }
+    g_pingChecked = (int)targets.size();
+    g_pingSent = g_pingReplied = g_pingNoReply = g_pingOffline = 0;
+    unsigned long long now = tickMs();
+    for (size_t i = 0; i < targets.size(); ++i) {
+        NodeRecord* n = targets[i];
+        if (!n->online) {
+            ++g_pingOffline;
+            logEvent(n->name + " is offline, not pinged");
+            continue;
+        }
+        Message m("PING");
+        if (!g_server->send(n->conn, m)) {
+            ++g_pingNoReply;
+            logEvent("PING could not be sent to " + n->name);
+            continue;
+        }
+        ++g_pingSent;
+        n->pingPending = true;
+        n->pingSentMs = now;
+        logEvent("PING -> " + n->name);
+        logNode(*n, "-> PING");
+    }
+    pingStatus();
+}
+
+// Called for the first REPORT or PONG after a PING; what says which.
+void pingReplied(NodeRecord* n, const std::string& what)
+{
+    n->pingPending = false;
+    ++g_pingReplied;
+    logEvent(format("%s from %s %llu ms after PING", what.c_str(), n->name.c_str(), tickMs() - n->pingSentMs));
+    pingStatus();
 }
 
 // First agent version that knows POWER; older agents ignore the verb.
@@ -1212,6 +1333,279 @@ void runRemoteBatch()
                             g_batchFront ? ", to the front" : ""), kBatchAgent);
 }
 
+// ---------------------------------------------------------------- log viewer
+
+// View Local Log and View Remote Log(s): a top-level window per log with a
+// read-only, scrollable text control holding the file. The file is read on a
+// worker thread, so a share that does not answer stalls only its own window.
+// Refresh, or F5 in the text, reads it again; the view opens scrolled to the
+// end; Ctrl+A selects everything for copying. Nothing can be typed into it.
+const UINT WM_LOG_LOADED = WM_APP + 3;   // lParam: LogText*
+const int IDC_LOG_TEXT = 2501, IDC_LOG_REFRESH = 2502, IDC_LOG_INFO = 2503;
+const unsigned long long kLogShowBytes = 4u << 20;   // at most the last 4 MB of a file are shown
+
+// What a log window reads: the newest file matching pattern in the first of
+// dirs that has one. For a remote log, \\NAME\share\ is appended to dirs on
+// the worker thread when name resolves to ip, as the agent update does.
+struct LogSource {
+    std::vector<std::wstring> dirs;
+    std::string name, ip;
+    std::wstring share, pattern;
+};
+struct LogView { std::wstring title; LogSource src; HWND text, refresh, info; bool loading; };
+struct LogJob { HWND window; LogSource src; };
+struct LogText { bool ok; std::wstring file, text, info; };
+HFONT g_logFont = NULL;
+
+// The newest file matching pattern in dir, by name, which carries the date.
+std::wstring newestFile(const std::wstring& dir, const std::wstring& pattern, std::string& err)
+{
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + pattern).c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) { err = lastErrorText((int)GetLastError()); return std::wstring(); }
+    std::wstring best;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && (best.empty() || _wcsicmp(fd.cFileName, best.c_str()) > 0))
+            best = fd.cFileName;
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    if (best.empty()) { err = "no such file"; return std::wstring(); }
+    return dir + best;
+}
+
+// Reads a UTF-8 log file into text with CR LF line ends for the edit control.
+// A file above kLogShowBytes is cut to its last kLogShowBytes at a line end.
+bool readLogFile(const std::wstring& path, std::wstring& text, std::wstring& info, std::string& err)
+{
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                           OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) { err = lastErrorText((int)GetLastError()); return false; }
+    LARGE_INTEGER size;
+    if (!GetFileSizeEx(h, &size)) { err = lastErrorText((int)GetLastError()); CloseHandle(h); return false; }
+    unsigned long long total = (unsigned long long)size.QuadPart, skip = 0;
+    if (total > kLogShowBytes) {
+        skip = total - kLogShowBytes;
+        LARGE_INTEGER pos;
+        pos.QuadPart = (LONGLONG)skip;
+        SetFilePointerEx(h, pos, NULL, FILE_BEGIN);
+    }
+    std::string bytes((size_t)(total - skip), '\0');
+    size_t got = 0;
+    while (got < bytes.size()) {
+        DWORD n = 0;
+        if (!ReadFile(h, &bytes[got], (DWORD)(bytes.size() - got), &n, NULL)) {
+            err = lastErrorText((int)GetLastError());
+            CloseHandle(h);
+            return false;
+        }
+        if (n == 0) break;
+        got += n;
+    }
+    CloseHandle(h);
+    bytes.resize(got);
+    if (skip) {
+        size_t nl = bytes.find('\n');
+        bytes = nl == std::string::npos ? std::string() : bytes.substr(nl + 1);
+    }
+    std::string fixed;
+    fixed.reserve(bytes.size() + bytes.size() / 16);
+    for (size_t i = 0; i < bytes.size(); ++i) {
+        if (bytes[i] == '\r') continue;
+        if (bytes[i] == '\n') fixed += "\r\n"; else fixed += bytes[i];
+    }
+    text = widen(fixed);
+    if (skip) text = L"[the first " + widen(format("%llu", skip)) + L" bytes of the file are not shown]\r\n" + text;
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    info = widen(format("%llu bytes, read at %02d:%02d:%02d", total, st.wHour, st.wMinute, st.wSecond));
+    return true;
+}
+
+DWORD WINAPI logLoadThread(LPVOID p)
+{
+    LogJob* job = (LogJob*)p;
+    HWND window = job->window;
+    LogText* res = new LogText();
+    res->ok = false;
+    std::vector<std::wstring> dirs = job->src.dirs;
+    if (!job->src.name.empty() && (job->src.ip.empty() || nameResolvesTo(job->src.name, job->src.ip)))
+        dirs.push_back(L"\\\\" + widen(job->src.name) + L"\\" + job->src.share + L"\\");
+    std::string errors;
+    for (size_t i = 0; i < dirs.size() && !res->ok; ++i) {
+        std::string err;
+        std::wstring file = newestFile(dirs[i], job->src.pattern, err);
+        if (file.empty()) {
+            errors += (errors.empty() ? "" : "\r\n") + narrow(dirs[i] + job->src.pattern) + ": " + err;
+        } else if (readLogFile(file, res->text, res->info, err)) {
+            res->ok = true;
+            res->file = file;
+        } else {
+            errors += (errors.empty() ? "" : "\r\n") + narrow(file) + ": " + err;
+        }
+    }
+    if (!res->ok) res->text = widen(errors.empty() ? std::string("nowhere to look for the log") : errors);
+    delete job;
+    if (!PostMessageW(window, WM_LOG_LOADED, 0, (LPARAM)res)) delete res;   // the window is gone
+    return 0;
+}
+
+void startLogLoad(HWND hwnd, LogView* v)
+{
+    if (v->loading) return;
+    v->loading = true;
+    SetWindowTextW(v->info, L"reading...");
+    LogJob* job = new LogJob();
+    job->window = hwnd;
+    job->src = v->src;
+    HANDLE t = CreateThread(NULL, 0, logLoadThread, job, 0, NULL);
+    if (t) CloseHandle(t);
+    else { delete job; v->loading = false; SetWindowTextW(v->info, L"could not start a thread"); }
+}
+
+// F5 in the text reads the file again; Ctrl+A selects everything.
+LRESULT CALLBACK logEditProc(HWND w, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
+{
+    if (msg == WM_KEYDOWN && wp == VK_F5) { PostMessageW(GetParent(w), WM_COMMAND, IDC_LOG_REFRESH, 0); return 0; }
+    if (msg == WM_CHAR && wp == 1) { SendMessageW(w, EM_SETSEL, 0, -1); return 0; }
+    return DefSubclassProc(w, msg, wp, lp);
+}
+
+void layoutLogView(HWND hwnd, LogView* v)
+{
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    const int bar = 32, margin = 6;
+    MoveWindow(v->text, 0, 0, rc.right, rc.bottom - bar, TRUE);
+    MoveWindow(v->refresh, margin, rc.bottom - bar + 4, 100, 24, TRUE);
+    MoveWindow(v->info, margin + 110, rc.bottom - bar + 8, rc.right - margin - 116, 20, TRUE);
+}
+
+LRESULT CALLBACK logViewProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    LogView* v = (LogView*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (msg == WM_CREATE) {
+        v = (LogView*)((CREATESTRUCTW*)lp)->lpCreateParams;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)v);
+        v->text = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                  WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_READONLY |
+                                  ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_NOHIDESEL,
+                                  0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)IDC_LOG_TEXT, g_inst, NULL);
+        SendMessageW(v->text, EM_SETLIMITTEXT, 0, 0);   // no limit beyond memory
+        if (!g_logFont) {
+            HDC dc = GetDC(hwnd);
+            g_logFont = CreateFontW(-MulDiv(10, GetDeviceCaps(dc, LOGPIXELSY), 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                    FIXED_PITCH | FF_MODERN, L"Consolas");
+            ReleaseDC(hwnd, dc);
+        }
+        SendMessageW(v->text, WM_SETFONT, (WPARAM)g_logFont, TRUE);
+        SetWindowSubclass(v->text, logEditProc, 1, 0);
+        v->refresh = CreateWindowExW(0, L"BUTTON", L"Refresh (F5)", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                     0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)IDC_LOG_REFRESH, g_inst, NULL);
+        SendMessageW(v->refresh, WM_SETFONT, (WPARAM)g_font, TRUE);
+        v->info = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP | SS_ENDELLIPSIS,
+                                  0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)IDC_LOG_INFO, g_inst, NULL);
+        SendMessageW(v->info, WM_SETFONT, (WPARAM)g_font, TRUE);
+        v->loading = false;
+        startLogLoad(hwnd, v);
+        return 0;
+    }
+    if (!v) return DefWindowProcW(hwnd, msg, wp, lp);
+    switch (msg) {
+    case WM_SIZE: layoutLogView(hwnd, v); return 0;
+    case WM_SETFOCUS: SetFocus(v->text); return 0;
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDC_LOG_REFRESH) startLogLoad(hwnd, v);
+        return 0;
+    case WM_LOG_LOADED: {
+        LogText* r = (LogText*)lp;
+        v->loading = false;
+        SetWindowTextW(v->text, r->text.c_str());
+        if (r->ok) {
+            SetWindowTextW(hwnd, (v->title + L"   " + r->file).c_str());
+            SetWindowTextW(v->info, (r->file + L"   " + r->info).c_str());
+            int len = GetWindowTextLengthW(v->text);
+            SendMessageW(v->text, EM_SETSEL, len, len);
+            SendMessageW(v->text, EM_SCROLLCARET, 0, 0);
+        } else {
+            SetWindowTextW(hwnd, (v->title + L"   not read").c_str());
+            SetWindowTextW(v->info, L"the log could not be read; the text gives the reason");
+        }
+        delete r;
+        return 0;
+    }
+    case WM_DESTROY:
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        delete v;
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+void openLogView(const std::wstring& title, const LogSource& src)
+{
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSW wc;
+        memset(&wc, 0, sizeof(wc));
+        wc.lpfnWndProc = logViewProc;
+        wc.hInstance = g_inst;
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.hIcon = LoadIconW(g_inst, MAKEINTRESOURCEW(IDI_APP));
+        wc.lpszClassName = L"ThunderheadLogView";
+        RegisterClassW(&wc);
+        registered = true;
+    }
+    LogView* v = new LogView();
+    v->title = title;
+    v->src = src;
+    v->text = v->refresh = v->info = NULL;
+    v->loading = false;
+    HWND w = CreateWindowExW(0, L"ThunderheadLogView", (title + L"   reading").c_str(), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+                             CW_USEDEFAULT, CW_USEDEFAULT, 1000, 600, NULL, NULL, g_inst, v);
+    if (!w) { logEvent("log window could not be created: " + lastErrorText((int)GetLastError())); return; }
+    ShowWindow(w, SW_SHOW);
+}
+
+// View Local Log: the current Thunderhead event log, logs\thunderhead-YYYY-MM-DD.log.
+void viewLocalLog()
+{
+    LogSource src;
+    src.dirs.push_back(g_dir + L"\\logs\\");
+    src.pattern = L"thunderhead-*.log";
+    openLogView(L"Thunderhead log", src);
+}
+
+// View Remote Log(s): the agent's own log of every checked client, which it
+// writes as LightningRod-YYYY-MM-DD.log beside itself, in the root of the
+// node's share. The share is read under the address the client last reported
+// from and under its name, as the update does. A client that is offline is
+// tried as well, since its share may answer when its agent does not.
+void viewRemoteLogs()
+{
+    std::vector<NodeRecord*> targets = checkedNodes();
+    if (targets.empty()) { updateStatusBar(L"|  no clients checked"); return; }
+    int opened = 0;
+    for (size_t i = 0; i < targets.size(); ++i) {
+        NodeRecord* n = targets[i];
+        if (n->ip.empty() && n->name.empty()) { logEvent(n->mac + " has no name or address yet; log not opened"); continue; }
+        LogSource src;
+        if (!n->ip.empty()) src.dirs.push_back(L"\\\\" + widen(n->ip) + L"\\" + widen(g_store->settings.shareName) + L"\\");
+        src.name = n->name;
+        src.ip = n->ip;
+        src.share = widen(g_store->settings.shareName);
+        src.pattern = L"LightningRod-*.log";
+        std::string label = n->name.empty() ? n->mac : n->name;
+        openLogView(widen(label) + L" log", src);
+        ++opened;
+        logEvent(format("View Remote Log: %s, \\\\%s\\%s\\LightningRod-*.log%s", label.c_str(),
+                        n->ip.empty() ? n->name.c_str() : n->ip.c_str(), g_store->settings.shareName.c_str(),
+                        n->online ? "" : " (offline, last known address)"));
+    }
+    updateStatusBar(widen(format("|  %d log window(s) opened", opened)).c_str());
+}
+
 // ---------------------------------------------------------------- rename
 
 struct RenameRequest { std::wstring info; std::wstring name; bool reboot; };
@@ -1435,6 +1829,7 @@ void setOffline(NodeRecord* n, const std::string& reason)
 {
     if (!n->online) return;
     n->online = false;
+    n->pingPending = false;
     if (n->conn >= 0) g_server->close(n->conn);
     n->conn = -1;
     logEvent(format("%s offline: %s", n->name.c_str(), reason.c_str()));
@@ -1561,7 +1956,9 @@ void onNet(NetEvent* e)
             n->report.fields[it->first] = it->second;
         n->lastReportMs = now;
         logNode(*n, "<- " + e->msg.oneLine());
+        if (n->pingPending) pingReplied(n, "report");
         refreshRow(n);
+        if (g_staticNode == n) showStaticPane(n);
         break;
     }
     case NetEvent::Ack: {
@@ -1616,8 +2013,9 @@ void onNet(NetEvent* e)
         NodeRecord* n = g_store->findByConn(e->conn);
         if (!n) break;
         logNode(*n, "<- PONG");
-        logEvent("PONG from " + n->name);
-        updateStatusBar((L"|  PONG from " + widen(n->name)).c_str());
+        if (n->pingPending)
+            pingReplied(n, format("PONG (agent %s is older than %s, no report)", n->hello.get("agent").c_str(), kPingReportAgent));
+        else logEvent("PONG from " + n->name);
         break;
     }
     case NetEvent::Disconnected: {
@@ -1657,12 +2055,19 @@ void onTimer()
             refreshRow(n);
         }
         if (!n->online) continue;
+        if (n->pingPending && now - n->pingSentMs > kPingWaitMs) {
+            ++g_pingNoReply;
+            setOffline(n, format("no report within %d s of PING", (int)(kPingWaitMs / 1000)));
+            pingStatus();
+            continue;
+        }
         if (now - n->lastReportMs > limit) {
             setOffline(n, format("no report for %llu s", (now - n->lastReportMs) / 1000));
             continue;
         }
         refreshRow(n, ColLastReport);
     }
+    if (g_staticNode) showStaticPane(g_staticNode);   // Connected for, Last report
     updateStatusBar();
 }
 
@@ -1686,7 +2091,7 @@ void layoutStaticPane()
     }
     y += line + 6;
     MoveWindow(g_staticList, margin, y, rc.right - 2 * margin, rc.bottom - y - margin, TRUE);
-    int valueWidth = rc.right - 2 * margin - 90 - GetSystemMetrics(SM_CXVSCROLL) - 4;
+    int valueWidth = rc.right - 2 * margin - 112 - GetSystemMetrics(SM_CXVSCROLL) - 4;
     if (valueWidth < 120) valueWidth = 120;
     SendMessageW(g_staticList, LVM_SETCOLUMNWIDTH, 1, (LPARAM)valueWidth);
 }
@@ -1839,6 +2244,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CMD_PRIORITY: changeRenderPriority(); return 0;
         case IDC_CMD_BATCH: runRemoteBatch(); return 0;
         case IDC_CMD_WOL: sendWakeOnLan(); return 0;
+        case IDC_CMD_PING: pingChecked(); return 0;
+        case IDC_CMD_VIEW_LOCAL_LOG: viewLocalLog(); return 0;
+        case IDC_CMD_VIEW_REMOTE_LOG: viewRemoteLogs(); return 0;
         case IDC_CMD_SHUTDOWN_NODE: shutdownChecked(); return 0;
         case IDC_CMD_ABORT_SHUTDOWN: sendPower("abort"); return 0;
         case IDC_FLAG_WOL: case IDC_FLAG_BOOT: case IDC_FLAG_AUTOLOGIN: case IDC_FLAG_AUTOROD: case IDC_FLAG_AUTOLIGHTNING:
@@ -1912,7 +2320,7 @@ HWND createKeyValueList(HWND parent, int id)
     memset(&col, 0, sizeof(col));
     col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
     col.pszText = (LPWSTR)L"Item";
-    col.cx = 90;
+    col.cx = 112;
     col.iSubItem = 0;
     SendMessageW(h, LVM_INSERTCOLUMNW, 0, (LPARAM)&col);
     col.pszText = (LPWSTR)L"Value";

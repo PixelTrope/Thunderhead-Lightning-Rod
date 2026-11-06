@@ -366,3 +366,32 @@ starts only when Wake on LAN is enabled in its firmware and its network adapter
 is set to wake on a magic packet; on Windows 8 and 10 Fast Startup usually has
 to be off as well, because an adapter often does not wake from the hybrid
 shutdown.
+
+## Ping
+
+*Ping* tells every checked client to report at once. Thunderhead sends PING
+to each checked client it holds as online and writes "NAME is offline, not
+pinged" for the others. An agent from 0.2.11 answers with a REPORT that
+carries every value, not only the changed ones, and restarts its report timer
+from that moment; the event log then reads "report from NAME N ms after
+PING". An older agent answers PONG, which the event log notes as such with
+the agent version. A client that sends neither within 5 s is marked offline
+with "no report within 5 s of PING", as it would be after three missed
+reports, and reconnects by itself when its agent is alive. The status bar
+keeps the count: checked, sent, replied, no reply, offline.
+
+## Log viewers
+
+*View Local Log* opens the current Thunderhead event log,
+`logs\thunderhead-YYYY-MM-DD.log`, in a window of its own. *View Remote Log(s)*
+opens one window per checked client with the agent's own log, which the agent
+writes as `LightningRod-YYYY-MM-DD.log` beside itself, in the root of the
+node's share: Thunderhead reads `\\IP\<share_name>\` under the address the
+client last reported from, then `\\NAME\<share_name>\` when the name resolves
+to that address, and takes the newest file by name. A client that is offline
+is tried too, because its share may answer when its agent does not; the window
+shows the error when nothing does. The windows are read-only text, scrolled
+to the end when opened, with a Refresh button (or F5) that reads the file
+again and Ctrl+A to select the text for copying. A file above 4 MB is shown
+from its last 4 MB. The windows are independent of the main window and are
+not updated as the log grows.

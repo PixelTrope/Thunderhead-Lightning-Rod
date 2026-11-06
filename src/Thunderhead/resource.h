@@ -46,7 +46,9 @@
 #define IDC_CMD_COPY            3020
 #define IDC_CMD_PRIORITY        3021
 #define IDC_CMD_ABORT_SHUTDOWN  3022
-#define IDC_CMD_LAST            3022
+#define IDC_CMD_VIEW_LOCAL_LOG  3023
+#define IDC_CMD_VIEW_REMOTE_LOG 3024
+#define IDC_CMD_LAST            3024
 
 // rename dialog
 #define IDC_RENAME_INFO         2301
