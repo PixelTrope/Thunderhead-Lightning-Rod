@@ -48,7 +48,8 @@
 #define IDC_CMD_ABORT_SHUTDOWN  3022
 #define IDC_CMD_VIEW_LOCAL_LOG  3023
 #define IDC_CMD_VIEW_REMOTE_LOG 3024
-#define IDC_CMD_LAST            3024
+#define IDC_CMD_SET_TIME        3025
+#define IDC_CMD_LAST            3025
 
 // rename dialog
 #define IDC_RENAME_INFO         2301

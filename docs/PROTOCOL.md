@@ -395,3 +395,22 @@ to the end when opened, with a Refresh button (or F5) that reads the file
 again and Ctrl+A to select the text for copying. A file above 4 MB is shown
 from its last 4 MB. The windows are independent of the main window and are
 not updated as the log grows.
+
+## Clock
+
+*Set Client Date and Time* sends TIME to every checked online client with
+`utc_ms=` the host's clock in milliseconds since 1970-01-01 00:00 UTC, `date=`
+the host's local calendar date and `tolerance=180`. The agent compares its own
+clock with those: when its local date is not `date`, or its UTC time is
+`tolerance` seconds or more from `utc_ms` either way, it sets the system clock
+to `utc_ms` (SetSystemTime, which needs the agent to run with administrator
+rights) and then sends a full REPORT so that the corrected clock shows at
+once; a clock closer than that is left alone. The ACK carries `set=yes` or
+`no`, `delta_s=` the node's clock minus the host's in whole seconds before any
+change, and `date=` the node's local date before any change; `ok=no` with
+`error=` when the clock was wrong but could not be set. The event log reads
+"TIME: NAME clock was 245 s behind (its date 2026-11-06), set to the host's
+time", "TIME: NAME clock 2 s ahead, left alone" or "TIME: NAME clock 245 s
+behind, not set: ...". The host's own clock is taken as right. Agents older
+than 0.2.12 do not know TIME; Thunderhead skips them with a line in the event
+log, as for the other versioned commands.

@@ -84,7 +84,7 @@ std::string validComputerName(const std::string& name)
     return std::string();
 }
 
-bool enableShutdownPrivilege(std::string& err)
+bool enablePrivilege(const wchar_t* name, std::string& err)
 {
     HANDLE token;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) {
@@ -94,12 +94,16 @@ bool enableShutdownPrivilege(std::string& err)
     TOKEN_PRIVILEGES tp;
     tp.PrivilegeCount = 1;
     tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-    bool ok = LookupPrivilegeValueW(NULL, SE_SHUTDOWN_NAME, &tp.Privileges[0].Luid) &&
+    bool ok = LookupPrivilegeValueW(NULL, name, &tp.Privileges[0].Luid) &&
               AdjustTokenPrivileges(token, FALSE, &tp, 0, NULL, NULL) && GetLastError() == ERROR_SUCCESS;
-    if (!ok) err = "shutdown privilege: " + lastErrorText((int)GetLastError());
+    if (!ok) err = narrow(name) + ": " + lastErrorText((int)GetLastError());
     CloseHandle(token);
     return ok;
 }
+
+bool enableShutdownPrivilege(std::string& err) { return enablePrivilege(SE_SHUTDOWN_NAME, err); }
+
+std::string localDateText(const SYSTEMTIME& t) { return format("%04d-%02d-%02d", t.wYear, t.wMonth, t.wDay); }
 
 // Runs Windows' own shutdown.exe with the given switches and waits for it. Its
 // exit code is a Win32 error code: 0 when the request was accepted, otherwise
@@ -446,6 +450,13 @@ private:
         full.set("lightning", l.running ? "running" : "stopped");
         full.set("lightning_cpu_pct", (long long)l.cpuPct);
         full.set("rendering", boolText(l.rendering));
+        // The node's clock: its local date and time as it shows them, and the
+        // same instant in UTC milliseconds, from which Thunderhead works out how
+        // far the clock is from its own.
+        SYSTEMTIME lt;
+        GetLocalTime(&lt);
+        full.set("clock", format("%s %02d:%02d:%02d", localDateText(lt).c_str(), lt.wHour, lt.wMinute, lt.wSecond));
+        full.set("utc_ms", format("%llu", utcNowMs()));
         // ACPI thermal zone; empty when the board exposes none, which Thunderhead shows as n/a.
         int tenths = 0;
         bool haveTemp = thermal_.read(tenths);
@@ -619,6 +630,53 @@ private:
             ack.set("error", err);
             ack.set("file", ok ? b.file : std::string());
             sendMessage(ack);
+        } else if (m.verb == "TIME") {
+            // The host's clock: utc_ms= its UTC time in milliseconds since 1970,
+            // date= its local calendar date, tolerance= seconds. This clock is set
+            // to the host's when the local date differs from the host's or the two
+            // UTC times are tolerance or more apart; otherwise it is left alone.
+            // The ACK says which, with delta_s= (this clock minus the host's,
+            // before any change) and date= (this node's date before any change).
+            unsigned long long hostMs = _strtoui64(m.get("utc_ms").c_str(), NULL, 10);
+            int tol = m.getInt("tolerance", 180);
+            long long deltaMs = (long long)(utcNowMs() - hostMs);
+            SYSTEMTIME lt;
+            GetLocalTime(&lt);
+            std::string date = localDateText(lt), err;
+            bool dateWrong = !m.get("date").empty() && m.get("date") != date;
+            bool need = hostMs != 0 && (dateWrong || deltaMs >= (long long)tol * 1000 || deltaMs <= -(long long)tol * 1000);
+            bool ok = hostMs != 0;
+            if (!ok) err = "no utc_ms in the command";
+            if (need) {
+                ok = enablePrivilege(SE_SYSTEMTIME_NAME, err);
+                if (ok) {
+                    ULONGLONG t = (ULONGLONG)hostMs * 10000ULL + 116444736000000000ULL;
+                    FILETIME ft;
+                    ft.dwLowDateTime = (DWORD)t;
+                    ft.dwHighDateTime = (DWORD)(t >> 32);
+                    SYSTEMTIME st;
+                    if (!FileTimeToSystemTime(&ft, &st) || !SetSystemTime(&st)) {
+                        ok = false;
+                        err = lastErrorText((int)GetLastError());
+                    }
+                }
+            }
+            long long deltaS = deltaMs >= 0 ? (deltaMs + 500) / 1000 : -((-deltaMs + 500) / 1000);
+            logLine(format("TIME: this clock is %lld s from the host's%s, %s%s%s", deltaS, dateWrong ? ", the date differs" : "",
+                           !need ? "left alone" : ok ? "set to the host's time" : "not set", err.empty() ? "" : ": ", err.c_str()));
+            Message ack("ACK");
+            ack.set("cmd", m.verb);
+            ack.set("ok", boolText(ok));
+            ack.set("error", err);
+            ack.set("set", boolText(need && ok));
+            ack.set("delta_s", (long long)deltaS);
+            ack.set("date", date);
+            sendMessage(ack);
+            if (need && ok) {   // show the corrected clock at once
+                sent_ = Message();
+                sendReport();
+                nextReport_ = tickMs() + (unsigned long long)intervalSec_ * 1000;
+            }
         } else if (m.verb == "POWER") {
             // Windows' shutdown.exe does the work. The three actions are its -s, -r
             // and -g switches, always with -f (close programs by force) and -t 66

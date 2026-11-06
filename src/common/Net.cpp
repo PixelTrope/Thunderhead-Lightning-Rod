@@ -61,6 +61,14 @@ unsigned long long tickMs()
     return high + now;
 }
 
+unsigned long long utcNowMs()
+{
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    ULONGLONG t = ((ULONGLONG)ft.dwHighDateTime << 32) | ft.dwLowDateTime;   // 100 ns since 1601
+    return (t - 116444736000000000ULL) / 10000ULL;
+}
+
 std::string lastErrorText(int err)
 {
     char* buf = NULL;

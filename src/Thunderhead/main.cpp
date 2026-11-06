@@ -105,6 +105,7 @@ const CommandDef kCommands[] = {
     { IDC_CMD_WOL,           L"Send Wake On LAN Magic Packet", NULL, true },
     { IDC_CMD_VIEW_LOCAL_LOG, L"View Local Log",     NULL,      true  },
     { IDC_CMD_VIEW_REMOTE_LOG, L"View Remote Log(s)", NULL,     true  },
+    { IDC_CMD_SET_TIME,      L"Set Client Date and Time", NULL, true  },
     { IDC_CMD_START61,       L"Start Lightning 6.1", NULL,      false },
     { IDC_CMD_START63,       L"Start Lightning 6.3", NULL,      false },
     { IDC_CMD_START_TV,      L"Start TeamViewer",    NULL,      false },
@@ -477,10 +478,17 @@ void showStaticPane(NodeRecord* n)
     add(L"Mem free MB", widen(r.get("mem_free_mb")));
     add(L"C: free MB", widen(r.get("disk_free_mb")));
     add(L"Uptime", !r.has("uptime_s") ? std::wstring() : durationText(atoll(r.get("uptime_s").c_str())));
+    add(L"Clock at last report", widen(r.get("clock")));
+    if (n->haveClockOffset) {
+        long long ms = n->clockOffsetMs, s = ms >= 0 ? (ms + 500) / 1000 : -((-ms + 500) / 1000);
+        add(L"Clock offset", widen(format("%lld s %s this host", s < 0 ? -s : s, s < 0 ? "behind" : "ahead of")));
+    } else {
+        add(L"Clock offset", std::wstring());
+    }
     static const char* const knownHello[] = { "agent", "os", "cpu", "cpu_mhz", "cores", "mem_mb", "disk_total_mb", "board",
                                               "chipset", "gpu", "vram_mb", "ip", "mac", "name" };
     static const char* const knownReport[] = { "cpu_pct", "cpu_temp_c", "disk_free_mb", "lightning", "lightning_cpu_pct",
-                                               "mem_free_mb", "rendering", "uptime_s" };
+                                               "mem_free_mb", "rendering", "uptime_s", "clock", "utc_ms" };
     for (std::map<std::string, std::string>::const_iterator it = h.fields.begin(); it != h.fields.end(); ++it) {
         bool known = false;
         for (size_t k = 0; k < sizeof(knownHello) / sizeof(knownHello[0]); ++k) if (it->first == knownHello[k]) known = true;
@@ -930,6 +938,25 @@ void sendPower(const char* action)
     Message m("POWER");
     m.set("action", std::string(action));
     sendVersioned(m, m.oneLine(), kPowerAgent);
+}
+
+// Set Client Date and Time: every checked online client gets this host's clock
+// and sets its own to it when its date differs from the host's or its time is
+// kTimeToleranceSec or more from the host's; a clock closer than that is left
+// alone. The ACK says what was found and done.
+const char* const kTimeAgent = "0.2.12";
+const int kTimeToleranceSec = 180;
+
+void setClientTime()
+{
+    SYSTEMTIME lt;
+    GetLocalTime(&lt);
+    Message m("TIME");
+    m.set("utc_ms", format("%llu", utcNowMs()));
+    m.set("date", format("%04d-%02d-%02d", lt.wYear, lt.wMonth, lt.wDay));
+    m.set("tolerance", (long long)kTimeToleranceSec);
+    sendVersioned(m, format("TIME (host clock %04d-%02d-%02d %02d:%02d:%02d)", lt.wYear, lt.wMonth, lt.wDay, lt.wHour, lt.wMinute, lt.wSecond),
+                  kTimeAgent);
 }
 
 // Shutdown Node, the one button for shutting down and restarting: asks which
@@ -1956,6 +1983,10 @@ void onNet(NetEvent* e)
             n->report.fields[it->first] = it->second;
         n->lastReportMs = now;
         logNode(*n, "<- " + e->msg.oneLine());
+        if (e->msg.has("utc_ms")) {
+            n->clockOffsetMs = (long long)(_strtoui64(e->msg.get("utc_ms").c_str(), NULL, 10) - utcNowMs());
+            n->haveClockOffset = true;
+        }
         if (n->pingPending) pingReplied(n, "report");
         refreshRow(n);
         if (g_staticNode == n) showStaticPane(n);
@@ -1975,6 +2006,14 @@ void onNet(NetEvent* e)
                               n->name.c_str(), e->msg.get("exit").c_str(), e->msg.get("seconds").c_str());
             else if (ok) text = format("BATCH started on %s as batch\\%s", n->name.c_str(), file.c_str());
             else text = format("BATCH failed on %s: %s", n->name.c_str(), e->msg.get("error").c_str());
+        } else if (cmd == "TIME") {
+            long long delta = atoll(e->msg.get("delta_s").c_str());
+            std::string was = format("%lld s %s", delta < 0 ? -delta : delta, delta < 0 ? "behind" : "ahead");
+            if (!ok) text = format("TIME: %s clock %s, not set: %s", n->name.c_str(), was.c_str(), e->msg.get("error").c_str());
+            else if (parseBool(e->msg.get("set")))
+                text = format("TIME: %s clock was %s (its date %s), set to the host's time", n->name.c_str(), was.c_str(),
+                              e->msg.get("date").c_str());
+            else text = format("TIME: %s clock %s, left alone", n->name.c_str(), was.c_str());
         } else {
             if (cmd == "POWER") cmd += " " + e->msg.get("action");
             text = format("%s %s on %s%s%s", cmd.c_str(), ok ? "ok" : "failed",
@@ -2247,6 +2286,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CMD_PING: pingChecked(); return 0;
         case IDC_CMD_VIEW_LOCAL_LOG: viewLocalLog(); return 0;
         case IDC_CMD_VIEW_REMOTE_LOG: viewRemoteLogs(); return 0;
+        case IDC_CMD_SET_TIME: setClientTime(); return 0;
         case IDC_CMD_SHUTDOWN_NODE: shutdownChecked(); return 0;
         case IDC_CMD_ABORT_SHUTDOWN: sendPower("abort"); return 0;
         case IDC_FLAG_WOL: case IDC_FLAG_BOOT: case IDC_FLAG_AUTOLOGIN: case IDC_FLAG_AUTOROD: case IDC_FLAG_AUTOLIGHTNING:

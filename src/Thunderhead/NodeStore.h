@@ -31,12 +31,14 @@ struct NodeRecord {
     unsigned long long updateStartMs;
     bool rebootAfterRename;          // send REBOOT when the RENAME is acknowledged
     bool pingPending;                // PING sent, no report or PONG yet
+    bool haveClockOffset;            // a report with utc_ms has arrived
+    long long clockOffsetMs;         // the node's clock minus this host's, at the latest such report
     unsigned long long pingSentMs;   // tickMs() of that PING
 
     NodeRecord()
         : wol(false), boot(false), autoLogin(false), autoRod(false), autoLightning(false), autoShutdown(false),
           online(false), conn(-1), lastReportMs(0), onlineSinceMs(0), updating(false), updateStaged(false), updateStartMs(0),
-          rebootAfterRename(false), pingPending(false), pingSentMs(0) {}
+          rebootAfterRename(false), pingPending(false), haveClockOffset(false), clockOffsetMs(0), pingSentMs(0) {}
 };
 
 struct Settings {
