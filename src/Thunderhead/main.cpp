@@ -99,12 +99,12 @@ const CommandDef kCommands[] = {
     { IDC_CMD_COPY,          L"Copy files or folder to Client", NULL, true },
     { IDC_CMD_PRIORITY,      L"Change Render Priority", NULL, true },
     { IDC_CMD_BATCH,         L"Run Remote Batch File", NULL, true },
+    { IDC_CMD_WOL,           L"Send Wake On LAN Magic Packet", NULL, true },
     { IDC_CMD_START61,       L"Start Lightning 6.1", NULL,      false },
     { IDC_CMD_START63,       L"Start Lightning 6.3", NULL,      false },
     { IDC_CMD_START_TV,      L"Start TeamViewer",    NULL,      false },
     { IDC_CMD_MESSAGE,       L"Display message",     NULL,      false },
     { IDC_CMD_SOUND,         L"Play sound",          NULL,      false },
-    { IDC_CMD_WOL,           L"Wake On LAN",         NULL,      false },
 };
 const int kCommandCount = sizeof(kCommands) / sizeof(kCommands[0]);
 
@@ -903,6 +903,109 @@ void changeRenderPriority()
     sendCommandMessage(m);
 }
 
+// ---------------------------------------------------------------- wake on LAN
+
+// Parses "60-A4-4C-B5-16-1C" (hyphens or colons) into six bytes.
+bool parseMac(const std::string& text, unsigned char mac[6])
+{
+    int count = 0, digits = 0;
+    unsigned value = 0;
+    for (size_t i = 0; i <= text.size(); ++i) {
+        char c = i < text.size() ? text[i] : '-';
+        int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        if (d >= 0) {
+            if (digits == 2) return false;
+            value = value * 16 + (unsigned)d;
+            ++digits;
+        } else if (c == '-' || c == ':') {
+            if (digits != 2 || count == 6) return false;
+            mac[count++] = (unsigned char)value;
+            value = 0;
+            digits = 0;
+        } else {
+            return false;
+        }
+    }
+    return count == 6;
+}
+
+// Where a magic packet goes, in network byte order: the directed broadcast
+// address of every IPv4 interface of this host that is up, then 255.255.255.255,
+// which Windows sends on one interface only.
+std::vector<unsigned long> wakeTargets(SOCKET s)
+{
+    std::vector<unsigned long> out;
+    INTERFACE_INFO info[32];
+    DWORD bytes = 0;
+    if (WSAIoctl(s, SIO_GET_INTERFACE_LIST, NULL, 0, info, sizeof(info), &bytes, NULL, NULL) == 0) {
+        for (size_t i = 0; i < bytes / sizeof(INTERFACE_INFO); ++i) {
+            if (!(info[i].iiFlags & IFF_UP) || (info[i].iiFlags & IFF_LOOPBACK)) continue;
+            unsigned long addr = info[i].iiAddress.AddressIn.sin_addr.s_addr;
+            unsigned long mask = info[i].iiNetmask.AddressIn.sin_addr.s_addr;
+            if (addr == 0 || mask == 0 || mask == 0xFFFFFFFFul) continue;
+            unsigned long broadcast = addr | ~mask;
+            bool known = false;
+            for (size_t k = 0; k < out.size(); ++k) if (out[k] == broadcast) known = true;
+            if (!known) out.push_back(broadcast);
+        }
+    }
+    out.push_back(INADDR_BROADCAST);
+    return out;
+}
+
+// Send Wake On LAN Magic Packet: broadcasts the magic packet of every checked
+// client, online or not, to UDP port 9: six FF bytes, then the client's MAC
+// sixteen times. The network adapter of a client that is switched off starts
+// the client when it sees its own packet; a running client ignores it. Nothing
+// comes back, so the only sign of success is the client going online.
+void sendWakeOnLan()
+{
+    std::vector<NodeRecord*> targets = checkedNodes();
+    if (targets.empty()) { updateStatusBar(L"|  no clients checked"); return; }
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    BOOL yes = TRUE;
+    if (s == INVALID_SOCKET || setsockopt(s, SOL_SOCKET, SO_BROADCAST, (const char*)&yes, sizeof(yes)) != 0) {
+        std::string text = "WOL: no broadcast socket: " + lastErrorText(WSAGetLastError());
+        if (s != INVALID_SOCKET) closesocket(s);
+        logEvent(text);
+        updateStatusBar((L"|  " + widen(text)).c_str());
+        return;
+    }
+    std::vector<unsigned long> nets = wakeTargets(s);
+    int done = 0;
+    for (size_t i = 0; i < targets.size(); ++i) {
+        NodeRecord* n = targets[i];
+        unsigned char mac[6];
+        if (!parseMac(n->mac, mac)) {
+            logEvent(format("WOL magic packet not sent for %s: \"%s\" is not a MAC address", n->name.c_str(), n->mac.c_str()));
+            continue;
+        }
+        char packet[102];
+        memset(packet, 0xFF, 6);
+        for (int k = 0; k < 16; ++k) memcpy(packet + 6 + k * 6, mac, 6);
+        std::string where, error;
+        for (size_t k = 0; k < nets.size(); ++k) {
+            sockaddr_in to;
+            memset(&to, 0, sizeof(to));
+            to.sin_family = AF_INET;
+            to.sin_addr.s_addr = nets[k];
+            to.sin_port = htons(9);
+            if (sendto(s, packet, (int)sizeof(packet), 0, (sockaddr*)&to, sizeof(to)) == (int)sizeof(packet))
+                where += (where.empty() ? "" : ", ") + ipText(nets[k]);
+            else error = lastErrorText(WSAGetLastError());
+        }
+        if (where.empty()) {
+            logEvent(format("WOL magic packet for %s (%s) could not be sent: %s", n->name.c_str(), n->mac.c_str(), error.c_str()));
+            continue;
+        }
+        ++done;
+        logEvent(format("WOL magic packet for %s (%s) sent to %s, UDP port 9", n->name.c_str(), n->mac.c_str(), where.c_str()));
+        logNode(*n, "-> WOL magic packet to " + where);
+    }
+    closesocket(s);
+    updateStatusBar(widen(format("|  WOL magic packet sent for %d of %d checked", done, (int)targets.size())).c_str());
+}
+
 // ---------------------------------------------------------------- remote batch file
 
 // First agent version that knows BATCH.
@@ -1592,7 +1695,7 @@ void layoutCommandPane()
 {
     RECT rc;
     GetClientRect(g_commandPane, &rc);
-    const int margin = 8, gap = 6, bw = 150, bh = 30;
+    const int margin = 8, gap = 6, bw = 200, bh = 30;   // wide enough for the longest label
     int perRow = (rc.right - 2 * margin + gap) / (bw + gap);
     if (perRow < 1) perRow = 1;
     for (int i = 0; i < kCommandCount; ++i) {
@@ -1735,6 +1838,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CMD_COPY: copyToClients(); return 0;
         case IDC_CMD_PRIORITY: changeRenderPriority(); return 0;
         case IDC_CMD_BATCH: runRemoteBatch(); return 0;
+        case IDC_CMD_WOL: sendWakeOnLan(); return 0;
         case IDC_CMD_SHUTDOWN_NODE: shutdownChecked(); return 0;
         case IDC_CMD_ABORT_SHUTDOWN: sendPower("abort"); return 0;
         case IDC_FLAG_WOL: case IDC_FLAG_BOOT: case IDC_FLAG_AUTOLOGIN: case IDC_FLAG_AUTOROD: case IDC_FLAG_AUTOLIGHTNING:
