@@ -348,3 +348,21 @@ while it runs, and several can run at once. A batch file still running when
 the agent is stopped, restarted or updated keeps running, but its end is then
 not reported. Agents older than 0.2.7 do not know BATCH; Thunderhead does not
 send it to them and writes a line to the event log instead.
+
+## Wake On LAN
+
+*Send Wake On LAN Magic Packet* needs no agent, since its purpose is a client
+that is switched off. For every checked client, online or not, Thunderhead
+builds the magic packet from the MAC address the client is stored under (six
+`FF` bytes, then the six bytes of the MAC sixteen times, 102 bytes) and sends
+it as a UDP broadcast to port 9: once to the directed broadcast address of
+every IPv4 interface of the host that is up, and once to 255.255.255.255. The
+event log names the client, the MAC and the addresses. Nothing answers a magic
+packet; the client going online is the only sign that it worked. The stored
+`wol` flag of a client is not consulted.
+
+The packet reaches clients on the subnets the host is attached to. A client
+starts only when Wake on LAN is enabled in its firmware and its network adapter
+is set to wake on a magic packet; on Windows 8 and 10 Fast Startup usually has
+to be off as well, because an adapter often does not wake from the hybrid
+shutdown.
