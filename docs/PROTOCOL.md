@@ -135,15 +135,16 @@ Thunderhead may send at any time:
 | PRIORITY | level       | set the priority class of Lightning.exe: RealTime, High, AboveNormal, Normal, BelowNormal or Low; reply ACK |
 | REBOOT |               | reply ACK, then restart the node after 5 s, closing programs by force |
 | SHUTDOWN |             | reply ACK, then shut the node down after 5 s, closing programs by force (no longer sent by Thunderhead, which uses POWER) |
+| BATCH | text, maximized, front | write the text (hexadecimal digits of its UTF-8 bytes) to a batch file and run it; reply ACK when started and again when ended (see Remote batch file); agents from 0.2.7 |
 | POWER | action        | run Windows' `shutdown.exe` and reply ACK with the action: `shutdown` (`-s`), `restart` (`-r`) or `coldrestart` (`-g`), each with `-f -t 66`, or `abort` (`-a`); agents from 0.2.6 |
 
 The agent replies to START, STOP, PRIORITY, EXIT, RESTART, UPDATE, RENAME, REBOOT,
-SHUTDOWN and POWER with (RENAME adds `name=` with the name that was applied;
+SHUTDOWN, POWER and BATCH with (RENAME adds `name=` with the name that was applied;
 PRIORITY adds `level=` as requested and `applied=` with the class Windows reports
 afterwards, and answers `ok=no` when the two differ, as when RealTime is
 requested without administrator rights and Windows grants High; POWER adds
 `action=` and answers `ok=no` with the exit code of `shutdown.exe` when that
-is not 0):
+is not 0; BATCH is answered twice, as described under Remote batch file):
 
 ```
 ACK
@@ -282,3 +283,68 @@ and restart, then restart of registered applications) does not exist on
 Windows XP, where `coldrestart` is answered with `ok=no`. Agents older than
 0.2.6 do not know POWER; Thunderhead does not send it to them and writes a
 line to the event log instead.
+
+## Remote batch file
+
+*Run Remote Batch File* opens a dialog with a text box for the batch file, which
+can be typed, pasted, or loaded from a file with *Browse for file* (UTF-16 or
+UTF-8 by byte order mark, otherwise UTF-8 when the bytes are valid UTF-8,
+otherwise the ANSI code page of the host). The text box keeps its content
+while Thunderhead runs, as do the two check boxes *Start maximized* and *Bring
+to front*, which are set when Thunderhead starts. *Execute Remote Batch File* first shows a warning that
+nothing checks the text for errors or harmful code, with *Yes, Execute* and
+*No, Cancel*; only *Yes, Execute* sends it.
+
+Thunderhead sends BATCH to every checked online client with `text=` holding the
+UTF-8 bytes of the text as hexadecimal digits, two per byte, so that the line
+ends survive the one-line field format, and with `maximized=` and `front=`
+(`yes` or `no`) from the two check boxes. The text may be 30000 bytes long, which
+keeps the message below the 65536 byte limit. The event log and the node log
+record the size of the text, not the text.
+
+The agent writes the text to `batch\batch-YYYYMMDD-HHMMSS.bat` in its own
+folder, with CR LF line ends and in the OEM code page, which is what `cmd.exe`
+reads, and starts it as
+
+```
+cmd.exe /d /c ""C:\LightningRod\batch\NAME.bat""
+```
+
+in a console window of its own on the node's desktop, titled *Thunderhead batch
+file NAME.bat*, as when the file is double-clicked: output shows in that
+window, `pause` and prompts wait for a key at the node, and the window closes
+when the batch file ends. With `maximized=yes` the window opens maximized. With
+`front=yes` the agent puts it above the other windows with the keyboard focus;
+without that, Windows opens a window started by a background program behind
+the others, with only its taskbar button to show for it. For both the agent
+finds the window by its title, whatever hosts it (the classic console host or
+Windows Terminal), and looks for it for 30 s. Agents 0.2.7 and 0.2.8 ignore
+both fields. The current directory is the agent's folder (the
+shared one, where *Copy files or folder to Client* puts files) and the batch
+file has the rights the agent has. The output is not recorded; a batch file
+whose output is wanted on the host redirects it itself, for example to a file
+in the shared folder. The batch file stays in the `batch` folder, which *Open
+Client's Shared Folder* reaches as `\\NAME\<share_name>\batch`. Agent 0.2.7
+ran batch files without a window, with input from `NUL` and the output in
+`batch\NAME.log`.
+
+The agent answers twice. The first ACK follows at once:
+
+```
+ACK
+cmd=BATCH
+stage=started
+ok=yes
+error=
+file=batch-20261105-231500.bat
+```
+
+The second follows when `cmd.exe` has ended, with `stage=finished`, `exit=`
+the exit code, `seconds=` the running time and `ok=yes` only for exit code 0.
+A batch file that waits for a key therefore stays unfinished until someone
+presses one at the node or closes the window.
+The agent does not wait for the batch file: reports and other commands go on
+while it runs, and several can run at once. A batch file still running when
+the agent is stopped, restarted or updated keeps running, but its end is then
+not reported. Agents older than 0.2.7 do not know BATCH; Thunderhead does not
+send it to them and writes a line to the event log instead.

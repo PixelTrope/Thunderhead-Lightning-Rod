@@ -98,12 +98,12 @@ const CommandDef kCommands[] = {
     { IDC_CMD_OPEN_SHARE,    L"Open Client's Shared Folder", NULL, true },
     { IDC_CMD_COPY,          L"Copy files or folder to Client", NULL, true },
     { IDC_CMD_PRIORITY,      L"Change Render Priority", NULL, true },
+    { IDC_CMD_BATCH,         L"Run Remote Batch File", NULL, true },
     { IDC_CMD_START61,       L"Start Lightning 6.1", NULL,      false },
     { IDC_CMD_START63,       L"Start Lightning 6.3", NULL,      false },
     { IDC_CMD_START_TV,      L"Start TeamViewer",    NULL,      false },
     { IDC_CMD_MESSAGE,       L"Display message",     NULL,      false },
     { IDC_CMD_SOUND,         L"Play sound",          NULL,      false },
-    { IDC_CMD_BATCH,         L"Run batch file",      NULL,      false },
     { IDC_CMD_WOL,           L"Wake On LAN",         NULL,      false },
 };
 const int kCommandCount = sizeof(kCommands) / sizeof(kCommands[0]);
@@ -774,35 +774,41 @@ void sendCommand(const char* verb)
 // First agent version that knows POWER; older agents ignore the verb.
 const char* const kPowerAgent = "0.2.6";
 
-// Sends POWER with the given action to every checked online client. Agents
-// older than kPowerAgent are skipped with a line in the event log.
-void sendPower(const char* action)
+// Sends m to every checked online client whose agent is at least minAgent.
+// Older agents do not know the verb and are skipped with a line in the event
+// log. label is what the logs and the status bar show for the message.
+void sendVersioned(const Message& m, const std::string& label, const char* minAgent)
 {
     std::vector<NodeRecord*> targets = checkedNodes();
-    Message m("POWER");
-    m.set("action", std::string(action));
     int online = 0, sent = 0, old = 0;
     for (size_t i = 0; i < targets.size(); ++i) {
         NodeRecord* n = targets[i];
         if (!n->online) continue;
         ++online;
         std::string agent = n->hello.get("agent");
-        if (compareVersions(agent, kPowerAgent) < 0) {
+        if (compareVersions(agent, minAgent) < 0) {
             ++old;
             logEvent(format("%s not sent to %s: agent %s is older than %s, update it first",
-                            m.oneLine().c_str(), n->name.c_str(), agent.c_str(), kPowerAgent));
+                            label.c_str(), n->name.c_str(), agent.c_str(), minAgent));
             continue;
         }
         if (g_server->send(n->conn, m)) {
             ++sent;
-            logEvent(format("%s -> %s", m.oneLine().c_str(), n->name.c_str()));
-            logNode(*n, std::string("-> ") + m.oneLine());
+            logEvent(format("%s -> %s", label.c_str(), n->name.c_str()));
+            logNode(*n, "-> " + label);
         }
     }
     if (online == 0) { updateStatusBar(L"|  no online clients checked"); return; }
-    std::string status = format("|  %s sent to %d of %d checked", m.oneLine().c_str(), sent, (int)targets.size());
-    if (old) status += format(", %d skipped: agent older than %s", old, kPowerAgent);
+    std::string status = format("|  %s sent to %d of %d checked", label.c_str(), sent, (int)targets.size());
+    if (old) status += format(", %d skipped: agent older than %s", old, minAgent);
     updateStatusBar(widen(status).c_str());
+}
+
+void sendPower(const char* action)
+{
+    Message m("POWER");
+    m.set("action", std::string(action));
+    sendVersioned(m, m.oneLine(), kPowerAgent);
 }
 
 // Shutdown Node, the one button for shutting down and restarting: asks which
@@ -895,6 +901,212 @@ void changeRenderPriority()
     Message m("PRIORITY");
     m.set("level", std::string(level));
     sendCommandMessage(m);
+}
+
+// ---------------------------------------------------------------- remote batch file
+
+// First agent version that knows BATCH.
+const char* const kBatchAgent = "0.2.7";
+// The text travels as two hexadecimal digits per byte inside one message, which
+// may be 65536 bytes long.
+const size_t kMaxBatchBytes = 30000;
+const wchar_t* const kBatchTitle = L"Run Remote Batch File";
+
+std::wstring g_batchText;       // text of the dialog, kept while Thunderhead runs
+bool g_batchMaximized = true;   // Start maximized: the console window on the client opens maximized
+bool g_batchFront = true;       // Bring to front: it is put above the client's other windows
+int g_batchOnline = 0;          // checked online clients when the dialog opened
+HFONT g_batchFont = NULL;
+
+std::wstring windowText(HWND w)
+{
+    int len = GetWindowTextLengthW(w);
+    std::wstring s((size_t)len + 1, L'\0');
+    int got = GetWindowTextW(w, &s[0], len + 1);
+    s.resize((size_t)(got > 0 ? got : 0));
+    return s;
+}
+
+// Reads a batch file for the text box: UTF-16 or UTF-8 when the file starts
+// with that byte order mark, otherwise UTF-8 when the bytes are valid UTF-8,
+// otherwise the ANSI code page of this machine. Lines come back ending in CR LF.
+bool readBatchFile(const std::wstring& path, std::wstring& text, std::wstring& error)
+{
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) { error = widen(lastErrorText((int)GetLastError())); return false; }
+    LARGE_INTEGER size;
+    if (!GetFileSizeEx(f, &size) || size.QuadPart > (LONGLONG)(2 * kMaxBatchBytes + 4)) {
+        CloseHandle(f);
+        error = widen(format("The file is larger than the %u bytes of text a remote batch file may have.", (unsigned)kMaxBatchBytes));
+        return false;
+    }
+    std::string bytes((size_t)size.QuadPart, '\0');
+    DWORD got = 0;
+    bool ok = bytes.empty() || (ReadFile(f, &bytes[0], (DWORD)bytes.size(), &got, NULL) && got == bytes.size());
+    DWORD err = GetLastError();
+    CloseHandle(f);
+    if (!ok) { error = widen(lastErrorText((int)err)); return false; }
+
+    std::wstring raw;
+    if (bytes.size() >= 2 && (unsigned char)bytes[0] == 0xFF && (unsigned char)bytes[1] == 0xFE) {
+        raw.assign((const wchar_t*)(bytes.data() + 2), (bytes.size() - 2) / 2);
+    } else {
+        size_t skip = bytes.size() >= 3 && (unsigned char)bytes[0] == 0xEF && (unsigned char)bytes[1] == 0xBB &&
+                      (unsigned char)bytes[2] == 0xBF ? 3 : 0;
+        const char* data = bytes.data() + skip;
+        int len = (int)(bytes.size() - skip);
+        UINT cp = CP_UTF8;
+        int n = len ? MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, data, len, NULL, 0) : 0;
+        if (len && n == 0) { cp = CP_ACP; n = MultiByteToWideChar(CP_ACP, 0, data, len, NULL, 0); }
+        raw.assign((size_t)n, L'\0');
+        if (n) MultiByteToWideChar(cp, 0, data, len, &raw[0], n);
+    }
+    text.clear();
+    for (size_t i = 0; i < raw.size(); ++i) {
+        if (raw[i] == L'\r') continue;
+        if (raw[i] == L'\n') text += L"\r\n"; else text += raw[i];
+    }
+    return true;
+}
+
+bool browseBatchFile(HWND owner, std::wstring& path)
+{
+    IFileOpenDialog* dlg = NULL;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg))) || !dlg) {
+        MessageBoxW(owner, L"The file dialog could not be created.", kBatchTitle, MB_OK | MB_ICONERROR);
+        return false;
+    }
+    const COMDLG_FILTERSPEC types[2] = { { L"Batch files (*.bat;*.cmd)", L"*.bat;*.cmd" }, { L"All files (*.*)", L"*.*" } };
+    dlg->SetFileTypes(2, types);
+    DWORD opts = 0;
+    dlg->GetOptions(&opts);
+    dlg->SetOptions(opts | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_FILEMUSTEXIST);
+    dlg->SetTitle(L"Select the batch file to load");
+    dlg->SetOkButtonLabel(L"Load");
+    bool ok = false;
+    if (SUCCEEDED(dlg->Show(owner))) {
+        IShellItem* item = NULL;
+        if (SUCCEEDED(dlg->GetResult(&item)) && item) {
+            PWSTR p = NULL;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &p)) && p) { path = p; CoTaskMemFree(p); ok = true; }
+            item->Release();
+        }
+    }
+    dlg->Release();
+    return ok;
+}
+
+// The reminder shown before anything is sent. Returns true for "Yes, Execute".
+bool confirmBatch(HWND owner)
+{
+    std::wstring content = widen(format("No error checking and no check for harmful code is done on this batch file. It is sent to "
+                                        "%d checked online client(s) and run there exactly as written, with the rights Lightning Rod "
+                                        "has on each client.\n\n", g_batchOnline)) +
+                           L"Are you ABSOLUTELY sure you want this batch file to run on the remote client(s) ?";
+    TASKDIALOG_BUTTON buttons[2] = { { 300, L"Yes, Execute" }, { 301, L"No, Cancel" } };
+    TASKDIALOGCONFIG cc;
+    memset(&cc, 0, sizeof(cc));
+    cc.cbSize = sizeof(cc);
+    cc.hwndParent = owner;
+    cc.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+    cc.pszWindowTitle = L"Execute Remote Batch File";
+    cc.pszMainIcon = TD_WARNING_ICON;
+    cc.pszMainInstruction = L"This batch file is not checked in any way";
+    cc.pszContent = content.c_str();
+    cc.pButtons = buttons;
+    cc.cButtons = 2;
+    cc.nDefaultButton = 301;
+    int answer = 0;
+    return SUCCEEDED(TaskDialogIndirect(&cc, &answer, NULL, NULL)) && answer == 300;
+}
+
+// Copies what the dialog holds into the globals that outlive it.
+void keepBatchDialog(HWND dlg)
+{
+    g_batchText = windowText(GetDlgItem(dlg, IDC_BATCH_TEXT));
+    g_batchMaximized = IsDlgButtonChecked(dlg, IDC_BATCH_MAXIMIZED) == BST_CHECKED;
+    g_batchFront = IsDlgButtonChecked(dlg, IDC_BATCH_FRONT) == BST_CHECKED;
+}
+
+INT_PTR CALLBACK batchDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM)
+{
+    HWND edit = GetDlgItem(dlg, IDC_BATCH_TEXT);
+    switch (msg) {
+    case WM_INITDIALOG: {
+        SetDlgItemTextW(dlg, IDC_BATCH_INFO, widen(format("Text of the batch file to run on %d checked online client(s). Type it, "
+                                                           "paste it, or load a file with Browse for file.", g_batchOnline)).c_str());
+        if (!g_batchFont) {
+            HDC dc = GetDC(dlg);
+            g_batchFont = CreateFontW(-MulDiv(10, GetDeviceCaps(dc, LOGPIXELSY), 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
+                                      FIXED_PITCH | FF_MODERN, L"Consolas");
+            ReleaseDC(dlg, dc);
+        }
+        if (g_batchFont) SendMessageW(edit, WM_SETFONT, (WPARAM)g_batchFont, TRUE);
+        SendMessageW(edit, EM_SETLIMITTEXT, kMaxBatchBytes, 0);
+        SetWindowTextW(edit, g_batchText.c_str());
+        CheckDlgButton(dlg, IDC_BATCH_MAXIMIZED, g_batchMaximized ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(dlg, IDC_BATCH_FRONT, g_batchFront ? BST_CHECKED : BST_UNCHECKED);
+        SetFocus(edit);
+        return FALSE;
+    }
+    case WM_COMMAND:
+        switch (LOWORD(wp)) {
+        case IDC_BATCH_BROWSE: {
+            std::wstring path, text, error;
+            if (!browseBatchFile(dlg, path)) return TRUE;
+            if (!readBatchFile(path, text, error)) {
+                MessageBoxW(dlg, (path + L"\n\n" + error).c_str(), kBatchTitle, MB_OK | MB_ICONWARNING);
+                return TRUE;
+            }
+            SetWindowTextW(edit, text.c_str());
+            SetFocus(edit);
+            return TRUE;
+        }
+        case IDC_BATCH_EXECUTE: {
+            keepBatchDialog(dlg);
+            if (trim(g_batchText).empty()) {
+                MessageBoxW(dlg, L"The batch file text is empty.", kBatchTitle, MB_OK | MB_ICONINFORMATION);
+                return TRUE;
+            }
+            size_t bytes = narrow(g_batchText).size();
+            if (bytes > kMaxBatchBytes) {
+                MessageBoxW(dlg, widen(format("The text is %u bytes; a remote batch file may have %u at most.",
+                                              (unsigned)bytes, (unsigned)kMaxBatchBytes)).c_str(), kBatchTitle, MB_OK | MB_ICONWARNING);
+                return TRUE;
+            }
+            if (confirmBatch(dlg)) EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+        case IDCANCEL:
+            keepBatchDialog(dlg);
+            EndDialog(dlg, IDCANCEL);
+            return TRUE;
+        }
+        break;
+    }
+    return FALSE;
+}
+
+// Run Remote Batch File: asks for the text, confirms, and sends it to every
+// checked online client, whose agent writes it to a file and runs it.
+void runRemoteBatch()
+{
+    std::vector<NodeRecord*> targets = checkedNodes();
+    g_batchOnline = 0;
+    for (size_t i = 0; i < targets.size(); ++i) if (targets[i]->online) ++g_batchOnline;
+    if (g_batchOnline == 0) {
+        MessageBoxW(g_main, L"Check the online clients to run the batch file on first.", kBatchTitle, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_BATCH), g_main, batchDlgProc, 0) != IDOK) return;
+    std::string utf8 = narrow(g_batchText);
+    Message m("BATCH");
+    m.set("text", hexEncode(utf8));
+    m.set("maximized", std::string(boolText(g_batchMaximized)));
+    m.set("front", std::string(boolText(g_batchFront)));
+    sendVersioned(m, format("BATCH (%u bytes of text%s%s)", (unsigned)utf8.size(), g_batchMaximized ? ", maximized" : "",
+                            g_batchFront ? ", to the front" : ""), kBatchAgent);
 }
 
 // ---------------------------------------------------------------- rename
@@ -1254,10 +1466,20 @@ void onNet(NetEvent* e)
         if (!n) break;
         logNode(*n, "<- " + e->msg.oneLine());
         bool ok = parseBool(e->msg.get("ok"));
-        std::string cmd = e->msg.get("cmd");
-        if (cmd == "POWER") cmd += " " + e->msg.get("action");
-        std::string text = format("%s %s on %s%s%s", cmd.c_str(), ok ? "ok" : "failed",
-                                  n->name.c_str(), ok ? "" : ": ", ok ? "" : e->msg.get("error").c_str());
+        std::string cmd = e->msg.get("cmd"), text;
+        if (cmd == "BATCH") {
+            // Two acknowledgements per batch file: stage=started, then stage=finished.
+            std::string file = e->msg.get("file");
+            if (e->msg.get("stage") == "finished")
+                text = format("BATCH %s finished on %s with exit code %s after %s s", file.c_str(),
+                              n->name.c_str(), e->msg.get("exit").c_str(), e->msg.get("seconds").c_str());
+            else if (ok) text = format("BATCH started on %s as batch\\%s", n->name.c_str(), file.c_str());
+            else text = format("BATCH failed on %s: %s", n->name.c_str(), e->msg.get("error").c_str());
+        } else {
+            if (cmd == "POWER") cmd += " " + e->msg.get("action");
+            text = format("%s %s on %s%s%s", cmd.c_str(), ok ? "ok" : "failed",
+                          n->name.c_str(), ok ? "" : ": ", ok ? "" : e->msg.get("error").c_str());
+        }
         logEvent(text);
         updateStatusBar((L"|  " + widen(text)).c_str());
         if (e->msg.get("cmd") == "UPDATE" && !ok && n->updating) {
@@ -1512,6 +1734,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CMD_OPEN_SHARE: openSharedFolders(); return 0;
         case IDC_CMD_COPY: copyToClients(); return 0;
         case IDC_CMD_PRIORITY: changeRenderPriority(); return 0;
+        case IDC_CMD_BATCH: runRemoteBatch(); return 0;
         case IDC_CMD_SHUTDOWN_NODE: shutdownChecked(); return 0;
         case IDC_CMD_ABORT_SHUTDOWN: sendPower("abort"); return 0;
         case IDC_FLAG_WOL: case IDC_FLAG_BOOT: case IDC_FLAG_AUTOLOGIN: case IDC_FLAG_AUTOROD: case IDC_FLAG_AUTOLIGHTNING:

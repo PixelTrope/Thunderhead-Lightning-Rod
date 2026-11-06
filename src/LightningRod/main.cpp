@@ -131,6 +131,138 @@ bool runShutdownExe(const std::wstring& args, std::string& err)
     return true;
 }
 
+// A batch file sent by Thunderhead that is still running.
+struct RunningBatch {
+    HANDLE process;
+    std::string file;                // name inside the batch folder
+    unsigned long long startMs;
+    std::wstring title;              // title of its console window
+    bool maximized, front;           // what to do with the window once it is found
+    bool wantWindow;                 // the window is still to be found
+};
+
+// Puts a window above all others and gives it the keyboard. Windows does not let
+// a background process take the foreground by asking, so the window is first
+// lifted through the topmost band, which needs no permission, and the request
+// for the keyboard is then made while attached to the input of the thread that
+// has the foreground now.
+void bringToFront(HWND w)
+{
+    if (IsIconic(w)) ShowWindow(w, SW_RESTORE);
+    SetWindowPos(w, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    SetWindowPos(w, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    HWND fg = GetForegroundWindow();
+    DWORD me = GetCurrentThreadId(), other = fg ? GetWindowThreadProcessId(fg, NULL) : 0;
+    bool attached = other != 0 && other != me && AttachThreadInput(me, other, TRUE);
+    BringWindowToTop(w);
+    SetForegroundWindow(w);
+    if (attached) AttachThreadInput(me, other, FALSE);
+}
+
+// Looks for the window of a batch file, once it is wanted maximized or in front,
+// and gives up 30 s after the start. The window is found by its title alone,
+// which carries the name of the batch file: its class is ConsoleWindowClass
+// under the classic console host and another under Windows Terminal.
+void tryWindow(RunningBatch& b)
+{
+    if (!b.wantWindow) return;
+    HWND w = FindWindowW(NULL, b.title.c_str());
+    if (w) {
+        if (b.maximized && !IsZoomed(w)) ShowWindow(w, SW_SHOWMAXIMIZED);
+        if (b.front) bringToFront(w);
+        b.wantWindow = false;
+        logLine(format("BATCH batch\\%s: window found%s%s", b.file.c_str(), b.maximized ? ", maximized" : "",
+                       b.front ? ", brought to the front" : ""));
+    } else if (tickMs() - b.startMs > 30000) {
+        b.wantWindow = false;
+        logLine("BATCH batch\\" + b.file + ": window not found within 30 s, left as Windows opened it");
+    }
+}
+
+// Writes the text as batch\batch-YYYYMMDD-HHMMSS.bat beside the agent and starts
+// it with cmd.exe in a console window of its own on the node's desktop, as when
+// the file is double-clicked, with the agent's folder (the shared one) as current
+// directory. Output shows in that window, a pause waits for a key there, and the
+// window closes when the batch file ends. maximized opens the window maximized;
+// front brings it above the other windows, which would otherwise keep a window
+// opened by a background program behind them with only its taskbar button showing.
+bool startBatch(const std::string& utf8, bool maximized, bool front, RunningBatch& out, std::string& err)
+{
+    std::wstring dir = exeDirectory(), folder = dir + L"\\batch";
+    if (!CreateDirectoryW(folder.c_str(), NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
+        err = "batch folder: " + lastErrorText((int)GetLastError());
+        return false;
+    }
+    // cmd.exe wants CR LF line ends and reads a batch file in the OEM code page.
+    std::wstring wide = widen(utf8), text;
+    for (size_t i = 0; i < wide.size(); ++i) {
+        if (wide[i] == L'\r') continue;
+        if (wide[i] == L'\n') text += L"\r\n"; else text += wide[i];
+    }
+    if (text.size() < 2 || text.compare(text.size() - 2, 2, L"\r\n") != 0) text += L"\r\n";
+    int n = WideCharToMultiByte(CP_OEMCP, 0, text.data(), (int)text.size(), NULL, 0, NULL, NULL);
+    std::string bytes((size_t)n, '\0');
+    if (n) WideCharToMultiByte(CP_OEMCP, 0, text.data(), (int)text.size(), &bytes[0], n, NULL, NULL);
+
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    std::string base = format("batch-%04d%02d%02d-%02d%02d%02d", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond), name;
+    HANDLE f = INVALID_HANDLE_VALUE;
+    for (int i = 0; i < 100 && f == INVALID_HANDLE_VALUE; ++i) {
+        name = i == 0 ? base : format("%s-%d", base.c_str(), i + 1);
+        f = CreateFileW((folder + L"\\" + widen(name) + L".bat").c_str(), GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (f == INVALID_HANDLE_VALUE && GetLastError() != ERROR_FILE_EXISTS) break;
+    }
+    if (f == INVALID_HANDLE_VALUE) { err = "batch file: " + lastErrorText((int)GetLastError()); return false; }
+    DWORD wrote = 0;
+    bool ok = WriteFile(f, bytes.data(), (DWORD)bytes.size(), &wrote, NULL) && wrote == bytes.size();
+    DWORD writeErr = GetLastError();
+    CloseHandle(f);
+    if (!ok) { err = "batch file: " + lastErrorText((int)writeErr); return false; }
+
+    wchar_t sys[MAX_PATH];
+    UINT sn = GetSystemDirectoryW(sys, MAX_PATH);
+    if (sn == 0 || sn >= MAX_PATH) { err = "system directory: " + lastErrorText((int)GetLastError()); return false; }
+    std::wstring exe = std::wstring(sys, sn) + L"\\cmd.exe";
+    std::wstring bat = folder + L"\\" + widen(name) + L".bat";
+    // cmd.exe removes the outer pair of quotes and runs what is between them.
+    std::wstring cmd = L"\"" + exe + L"\" /d /c \"\"" + bat + L"\"\"";
+    std::wstring title = L"Thunderhead batch file " + widen(name) + L".bat";
+    std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
+    cmdBuf.push_back(L'\0');
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    memset(&pi, 0, sizeof(pi));
+    std::vector<wchar_t> titleBuf(title.begin(), title.end());
+    titleBuf.push_back(L'\0');
+    si.lpTitle = &titleBuf[0];
+    if (maximized) {
+        si.dwFlags |= STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_SHOWMAXIMIZED;
+    }
+    if (!CreateProcessW(exe.c_str(), &cmdBuf[0], NULL, NULL, FALSE, CREATE_NEW_CONSOLE, NULL, dir.c_str(), &si, &pi)) {
+        err = "cmd.exe could not be started: " + lastErrorText((int)GetLastError());
+        return false;
+    }
+    CloseHandle(pi.hThread);
+    out.process = pi.hProcess;
+    out.file = name + ".bat";
+    out.startMs = tickMs();
+    out.title = title;
+    out.maximized = maximized;
+    out.front = front;
+    out.wantWindow = maximized || front;
+    // The window exists a moment after the process; a slow node gets more tries
+    // from pollBatches.
+    for (int i = 0; i < 20 && out.wantWindow; ++i) {
+        tryWindow(out);
+        if (out.wantWindow) Sleep(100);
+    }
+    return true;
+}
+
 // Connects with a timeout; returns INVALID_SOCKET on failure.
 SOCKET connectWithTimeout(const sockaddr_in& addr, int timeoutMs)
 {
@@ -462,6 +594,27 @@ private:
             ack.set("ok", boolText(ok));
             ack.set("error", err);
             sendMessage(ack);
+        } else if (m.verb == "BATCH") {
+            // The text arrives as hexadecimal digits of its UTF-8 bytes. This ACK
+            // says whether it was started; pollBatches sends a second one when
+            // it has ended.
+            std::string text, err;
+            RunningBatch b;
+            bool ok = hexDecode(m.get("text"), text) && !text.empty();
+            if (!ok) err = "no batch text, or not hexadecimal";
+            bool maximized = parseBool(m.get("maximized")), front = parseBool(m.get("front"));
+            if (ok) ok = startBatch(text, maximized, front, b, err);
+            if (ok) batches_.push_back(b);
+            logLine(ok ? format("BATCH started in a console window as batch\\%s, %u bytes of text%s%s", b.file.c_str(),
+                                (unsigned)text.size(), maximized ? ", maximized" : "", front ? ", to the front" : "")
+                       : "BATCH failed: " + err);
+            Message ack("ACK");
+            ack.set("cmd", m.verb);
+            ack.set("stage", "started");
+            ack.set("ok", boolText(ok));
+            ack.set("error", err);
+            ack.set("file", ok ? b.file : std::string());
+            sendMessage(ack);
         } else if (m.verb == "POWER") {
             // Windows' shutdown.exe does the work. The three actions are its -s, -r
             // and -g switches, always with -f (close programs by force) and -t 66
@@ -519,9 +672,36 @@ private:
         }
     }
 
+    // Reports every batch file that has ended since the last pass with a second
+    // ACK: stage=finished, the exit code of cmd.exe and the running time.
+    bool pollBatches()
+    {
+        for (size_t i = 0; i < batches_.size(); ) {
+            if (WaitForSingleObject(batches_[i].process, 0) != WAIT_OBJECT_0) { tryWindow(batches_[i]); ++i; continue; }
+            RunningBatch b = batches_[i];
+            batches_.erase(batches_.begin() + i);
+            DWORD code = 0;
+            GetExitCodeProcess(b.process, &code);
+            CloseHandle(b.process);
+            long long seconds = (long long)((tickMs() - b.startMs) / 1000);
+            logLine(format("BATCH batch\\%s finished with exit code %u after %lld s", b.file.c_str(), (unsigned)code, seconds));
+            Message ack("ACK");
+            ack.set("cmd", "BATCH");
+            ack.set("stage", "finished");
+            ack.set("ok", boolText(code == 0));
+            ack.set("error", code == 0 ? std::string() : format("exit code %u", (unsigned)code));
+            ack.set("file", b.file);
+            ack.set("exit", format("%u", (unsigned)code));
+            ack.set("seconds", seconds);
+            if (!sendMessage(ack)) return false;
+        }
+        return true;
+    }
+
     void sessionPhase()
     {
         while (tcp_ != INVALID_SOCKET) {
+            if (!pollBatches()) { dropSession("batch result send failed"); return; }
             unsigned long long now = tickMs();
             if (now >= nextReport_) {
                 if (!sendReport()) { dropSession("report send failed"); return; }
@@ -564,6 +744,7 @@ private:
     ThermalReader thermal_;
     MessageParser parser_;
     Message sent_;                   // every report value as last sent to this host
+    std::vector<RunningBatch> batches_;   // batch files started by BATCH and not yet ended
     int intervalSec_;
     unsigned long long nextReport_;
     CRITICAL_SECTION lock_;

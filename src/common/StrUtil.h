@@ -15,5 +15,7 @@ std::string  toLower(const std::string& s);
 bool         parseBool(const std::string& s, bool def = false);
 const char*  boolText(bool b);                // "yes" / "no"
 std::string  stripIndirect(const std::string& s); // "@file,%id%;Text" -> "Text"
+std::string  hexEncode(const std::string& bytes);  // two lower-case digits per byte
+bool         hexDecode(const std::string& hex, std::string& bytes);
 
 } // namespace tlr

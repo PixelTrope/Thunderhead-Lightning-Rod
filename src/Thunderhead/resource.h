@@ -4,6 +4,7 @@
 #define IDR_MENU                101
 #define IDD_INTERVAL            103
 #define IDD_RENAME              104
+#define IDD_BATCH               105
 
 #define IDM_FILE_EXIT           1001
 #define IDM_NODE_REMOVE         1105
@@ -51,3 +52,11 @@
 #define IDC_RENAME_INFO         2301
 #define IDC_RENAME_NAME         2302
 #define IDC_RENAME_REBOOT       2303
+
+// remote batch file dialog
+#define IDC_BATCH_INFO          2401
+#define IDC_BATCH_TEXT          2402
+#define IDC_BATCH_BROWSE        2403
+#define IDC_BATCH_EXECUTE       2404
+#define IDC_BATCH_MAXIMIZED     2405
+#define IDC_BATCH_FRONT         2406

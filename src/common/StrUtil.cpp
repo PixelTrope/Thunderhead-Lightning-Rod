@@ -95,4 +95,35 @@ std::string stripIndirect(const std::string& s)
     return trim(s);
 }
 
+std::string hexEncode(const std::string& bytes)
+{
+    static const char digits[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(bytes.size() * 2);
+    for (size_t i = 0; i < bytes.size(); ++i) {
+        unsigned char c = (unsigned char)bytes[i];
+        out += digits[c >> 4];
+        out += digits[c & 15];
+    }
+    return out;
+}
+
+bool hexDecode(const std::string& hex, std::string& bytes)
+{
+    bytes.clear();
+    if (hex.size() % 2 != 0) return false;
+    bytes.reserve(hex.size() / 2);
+    for (size_t i = 0; i < hex.size(); i += 2) {
+        int v = 0;
+        for (int k = 0; k < 2; ++k) {
+            char c = hex[i + k];
+            int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+            if (d < 0) { bytes.clear(); return false; }
+            v = v * 16 + d;
+        }
+        bytes += (char)v;
+    }
+    return true;
+}
+
 } // namespace tlr
