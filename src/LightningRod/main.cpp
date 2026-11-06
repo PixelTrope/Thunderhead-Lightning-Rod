@@ -905,6 +905,8 @@ void refreshAll()
     setRow(row++, L"Lightning",           s.haveReport ? (r.get("lightning") == "running" ? L"Running" : L"Stopped") : L"");
     setRow(row++, L"Lightning CPU %",     s.haveReport ? widen(r.get("lightning_cpu_pct")) : L"");
     setRow(row++, L"Rendering",           s.haveReport ? (parseBool(r.get("rendering")) ? L"Yes" : L"No") : L"");
+    setRow(row++, L"Clock",               s.haveReport ? widen(r.get("clock")) : L"");
+    setRow(row++, L"UTC ms since 1970",   s.haveReport ? widen(r.get("utc_ms")) : L"");
     setRow(row++, L"Sent once at connect", L"");
     setRow(row++, L"Name",                widen(i.name));
     setRow(row++, L"IP",                  widen(i.ip));
