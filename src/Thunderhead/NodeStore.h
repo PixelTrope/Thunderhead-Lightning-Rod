@@ -27,6 +27,7 @@ struct NodeRecord {
     unsigned long long onlineSinceMs;
     bool updating;                   // update in progress: staging, then UPDATE sent, until the new agent connects
     bool updateStaged;               // LightningRod.new is on the node and UPDATE has been sent
+    bool updatePrompted;             // the credential prompt for its share has been shown in this update
     std::wstring updateDir;          // the share path the staging used
     unsigned long long updateStartMs;
     bool rebootAfterRename;          // send REBOOT when the RENAME is acknowledged
@@ -37,7 +38,7 @@ struct NodeRecord {
 
     NodeRecord()
         : wol(false), boot(false), autoLogin(false), autoRod(false), autoLightning(false), autoShutdown(false),
-          online(false), conn(-1), lastReportMs(0), onlineSinceMs(0), updating(false), updateStaged(false), updateStartMs(0),
+          online(false), conn(-1), lastReportMs(0), onlineSinceMs(0), updating(false), updateStaged(false), updatePrompted(false), updateStartMs(0),
           rebootAfterRename(false), pingPending(false), haveClockOffset(false), clockOffsetMs(0), pingSentMs(0) {}
 };
 

@@ -229,6 +229,15 @@ and the name resolves to that address, `\\<node name>\<share_name>\` is
 tried as well, since some nodes accept the host's credentials only under their
 name. Only when the file is in place is UPDATE sent.
 
+When the share refuses the credentials Windows offers, as a freshly cloned
+node does whose account or password is not the host's, Thunderhead shows the
+standard Windows credential prompt for that share, the one Explorer shows for
+a shared folder without stored credentials. What is typed connects the share,
+is saved in the Credential Manager when *Remember my credentials* is ticked,
+and the copy is tried once more; cancelling the prompt ends the update of
+that node with a line in the event log. Several refusals at once are
+prompted for one after another.
+
 On UPDATE the agent copies itself to `LightningRod.update.exe`, starts that copy
 with `--helper <pid>`, replies ACK and exits. The helper waits for the old
 process to end, renames `LightningRod.new` over `LightningRod.exe` (retrying
@@ -390,7 +399,9 @@ node's share: Thunderhead reads `\\IP\<share_name>\` under the address the
 client last reported from, then `\\NAME\<share_name>\` when the name resolves
 to that address, and takes the newest file by name. A client that is offline
 is tried too, because its share may answer when its agent does not; the window
-shows the error when nothing does. The windows are read-only text, scrolled
+shows the error when nothing does. A share that refuses the credentials
+Windows offers brings up the standard credential prompt, as for the update,
+and the file is read once more when they are accepted. The windows are read-only text, scrolled
 to the end when opened, with a Refresh button (or F5) that reads the file
 again and Ctrl+A to select the text for copying. A file above 4 MB is shown
 from its last 4 MB. The windows are independent of the main window and are

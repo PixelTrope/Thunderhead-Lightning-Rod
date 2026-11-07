@@ -21,6 +21,7 @@
 #include <commctrl.h>
 #include <shellapi.h>
 #include <shobjidl.h>
+#include <winnetwk.h>
 #include <objbase.h>
 #include <map>
 #include <string>
@@ -668,7 +669,11 @@ void checkOutdated()
 }
 
 struct UpdateJob { std::string name; std::string ip; std::wstring source; std::wstring share; std::wstring dir; };
-struct UpdateResult { std::string name; int phase; bool ok; std::string text; std::wstring dir; };
+struct UpdateResult {
+    std::string name; int phase; bool ok; std::string text; std::wstring dir;
+    bool needCredentials;            // a share refused the credentials Windows offered
+    std::wstring credDir;            // that share
+};
 
 // \\NAME\share is tried after \\IP\share, but only when NAME resolves to that
 // address, because freshly cloned nodes share a name. Some nodes accept the
@@ -687,6 +692,31 @@ bool nameResolvesTo(const std::string& name, const std::string& ip)
     return match;
 }
 
+// Whether an error from a share means that it refused the credentials Windows
+// offered, which the standard credential prompt is for.
+bool isCredentialError(int err)
+{
+    return err == ERROR_ACCESS_DENIED || err == ERROR_LOGON_FAILURE || err == ERROR_INVALID_PASSWORD ||
+           err == ERROR_BAD_USERNAME || err == ERROR_ACCOUNT_RESTRICTION || err == ERROR_LOGON_TYPE_NOT_GRANTED ||
+           err == ERROR_SESSION_CREDENTIAL_CONFLICT || err == ERROR_NO_SUCH_USER;
+}
+
+// Shows the standard Windows credential prompt for \\NAME\share, the one
+// Explorer shows for a shared folder without stored credentials, and connects
+// the share with what is typed; "Remember my credentials" saves them in the
+// Credential Manager. Returns NO_ERROR, ERROR_CANCELLED or another Windows
+// error. dir may end with a backslash.
+DWORD promptShareCredentials(HWND owner, const std::wstring& dir)
+{
+    std::wstring remote = dir;
+    while (!remote.empty() && remote[remote.size() - 1] == L'\\') remote.erase(remote.size() - 1);
+    NETRESOURCEW nr;
+    memset(&nr, 0, sizeof(nr));
+    nr.dwType = RESOURCETYPE_DISK;
+    nr.lpRemoteName = (LPWSTR)remote.c_str();
+    return WNetAddConnection3W(owner, &nr, NULL, NULL, CONNECT_INTERACTIVE | CONNECT_PROMPT | CONNECT_CMD_SAVECRED | CONNECT_TEMPORARY);
+}
+
 // Phase 1, worker thread: places the agent file beside the running agent as
 // LightningRod.new while everything on the node is still running, so a share
 // that cannot be written is reported before anything is stopped.
@@ -697,6 +727,7 @@ DWORD WINAPI updateStageThread(LPVOID p)
     res->name = job->name;
     res->phase = 1;
     res->ok = false;
+    res->needCredentials = false;
     std::vector<std::wstring> dirs;
     dirs.push_back(L"\\\\" + widen(job->ip) + L"\\" + job->share + L"\\");
     if (nameResolvesTo(job->name, job->ip)) dirs.push_back(L"\\\\" + widen(job->name) + L"\\" + job->share + L"\\");
@@ -707,7 +738,9 @@ DWORD WINAPI updateStageThread(LPVOID p)
             res->dir = dirs[i];
             res->text = "agent staged as LightningRod.new in " + narrow(dirs[i]);
         } else {
-            errors += std::string(errors.empty() ? "" : "; ") + "copy to " + narrow(dirs[i]) + " failed: " + lastErrorText((int)GetLastError());
+            int err = (int)GetLastError();
+            errors += std::string(errors.empty() ? "" : "; ") + "copy to " + narrow(dirs[i]) + " failed: " + lastErrorText(err);
+            if (!res->needCredentials && isCredentialError(err)) { res->needCredentials = true; res->credDir = dirs[i]; }
         }
     }
     if (!res->ok) res->text = errors;
@@ -727,6 +760,7 @@ DWORD WINAPI updateFinishThread(LPVOID p)
     res->name = job->name;
     res->phase = 2;
     res->ok = false;
+    res->needCredentials = false;
     std::wstring staged = job->dir + L"LightningRod.new";
     std::wstring target = job->dir + L"LightningRod.exe";
     bool swappedHere = false;
@@ -770,6 +804,36 @@ void startUpdateThread(NodeRecord* n, LPTHREAD_START_ROUTINE fn, const char* wha
     logEvent(n->name + " update: could not start the " + what + " thread");
 }
 
+// A share that refused the credentials Windows offered gets the credential
+// prompt, owned by the main window, and the staging is tried once more with
+// what was typed. Refusals that arrive while a prompt is up wait their turn.
+std::vector<std::pair<NodeRecord*, std::wstring> > g_credQueue;
+bool g_credPrompting = false;
+
+void runCredQueue()
+{
+    if (g_credPrompting) return;
+    g_credPrompting = true;
+    while (!g_credQueue.empty()) {
+        NodeRecord* n = g_credQueue.front().first;
+        std::wstring dir = g_credQueue.front().second;
+        g_credQueue.erase(g_credQueue.begin());
+        if (!n->updating) continue;
+        logEvent(n->name + " update: " + narrow(dir) + " refused the credentials Windows offered; asking for them");
+        DWORD e = promptShareCredentials(g_main, dir);
+        if (e == NO_ERROR) {
+            logEvent(n->name + " update: connected to " + narrow(dir) + " with the credentials given, staging again");
+            startUpdateThread(n, updateStageThread, "staging");
+            continue;
+        }
+        logEvent(n->name + " update: " + (e == ERROR_CANCELLED ? std::string("the credential prompt was cancelled") : lastErrorText((int)e)));
+        n->updating = false;
+        n->updateStaged = false;
+        refreshRow(n);
+    }
+    g_credPrompting = false;
+}
+
 void onUpdateDone(UpdateResult* r)
 {
     std::string text = r->name + " update: " + r->text;
@@ -779,6 +843,12 @@ void onUpdateDone(UpdateResult* r)
     std::vector<NodeRecord*>& nodes = g_store->nodes();
     for (size_t i = 0; i < nodes.size(); ++i) if (nodes[i]->name == r->name) n = nodes[i];
     if (!n || !n->updating) return;
+    if (r->phase == 1 && !r->ok && r->needCredentials && !n->updatePrompted) {
+        n->updatePrompted = true;
+        g_credQueue.push_back(std::make_pair(n, r->credDir));
+        runCredQueue();
+        return;
+    }
     if (r->phase == 1 && r->ok && n->online) {
         n->updateDir = r->dir;
         n->updateStaged = true;
@@ -816,6 +886,7 @@ void updateChecked()
         n->updating = true;
         n->updateStaged = false;
         n->updateDir.clear();
+        n->updatePrompted = false;
         n->updateStartMs = tickMs();
         logEvent(format("%s update: agent %s, staging %s from %s", n->name.c_str(), n->hello.get("agent").c_str(), version.c_str(), narrow(file).c_str()));
         refreshRow(n);
@@ -1379,24 +1450,24 @@ struct LogSource {
     std::string name, ip;
     std::wstring share, pattern;
 };
-struct LogView { std::wstring title; LogSource src; HWND text, refresh, info; bool loading; };
+struct LogView { std::wstring title; LogSource src; HWND text, refresh, info; bool loading, prompted; };
 struct LogJob { HWND window; LogSource src; };
-struct LogText { bool ok; std::wstring file, text, info; };
+struct LogText { bool ok; std::wstring file, text, info; bool needCredentials; std::wstring credDir; };
 HFONT g_logFont = NULL;
 
 // The newest file matching pattern in dir, by name, which carries the date.
-std::wstring newestFile(const std::wstring& dir, const std::wstring& pattern, std::string& err)
+std::wstring newestFile(const std::wstring& dir, const std::wstring& pattern, std::string& err, int& code)
 {
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW((dir + pattern).c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) { err = lastErrorText((int)GetLastError()); return std::wstring(); }
+    if (h == INVALID_HANDLE_VALUE) { code = (int)GetLastError(); err = lastErrorText(code); return std::wstring(); }
     std::wstring best;
     do {
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && (best.empty() || _wcsicmp(fd.cFileName, best.c_str()) > 0))
             best = fd.cFileName;
     } while (FindNextFileW(h, &fd));
     FindClose(h);
-    if (best.empty()) { err = "no such file"; return std::wstring(); }
+    if (best.empty()) { code = ERROR_FILE_NOT_FOUND; err = "no such file"; return std::wstring(); }
     return dir + best;
 }
 
@@ -1454,15 +1525,18 @@ DWORD WINAPI logLoadThread(LPVOID p)
     HWND window = job->window;
     LogText* res = new LogText();
     res->ok = false;
+    res->needCredentials = false;
     std::vector<std::wstring> dirs = job->src.dirs;
     if (!job->src.name.empty() && (job->src.ip.empty() || nameResolvesTo(job->src.name, job->src.ip)))
         dirs.push_back(L"\\\\" + widen(job->src.name) + L"\\" + job->src.share + L"\\");
     std::string errors;
     for (size_t i = 0; i < dirs.size() && !res->ok; ++i) {
         std::string err;
-        std::wstring file = newestFile(dirs[i], job->src.pattern, err);
+        int code = 0;
+        std::wstring file = newestFile(dirs[i], job->src.pattern, err, code);
         if (file.empty()) {
             errors += (errors.empty() ? "" : "\r\n") + narrow(dirs[i] + job->src.pattern) + ": " + err;
+            if (!res->needCredentials && isCredentialError(code)) { res->needCredentials = true; res->credDir = dirs[i]; }
         } else if (readLogFile(file, res->text, res->info, err)) {
             res->ok = true;
             res->file = file;
@@ -1547,6 +1621,13 @@ LRESULT CALLBACK logViewProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_LOG_LOADED: {
         LogText* r = (LogText*)lp;
         v->loading = false;
+        if (!r->ok && r->needCredentials && !v->prompted) {
+            v->prompted = true;
+            DWORD e = promptShareCredentials(hwnd, r->credDir);
+            if (e == NO_ERROR) { delete r; startLogLoad(hwnd, v); return 0; }
+            r->text += e == ERROR_CANCELLED ? std::wstring(L"\r\n\r\nThe credential prompt was cancelled.")
+                                            : L"\r\n\r\n" + widen(lastErrorText((int)e));
+        }
         SetWindowTextW(v->text, r->text.c_str());
         if (r->ok) {
             SetWindowTextW(hwnd, (v->title + L"   " + r->file).c_str());
@@ -1589,6 +1670,7 @@ void openLogView(const std::wstring& title, const LogSource& src)
     v->src = src;
     v->text = v->refresh = v->info = NULL;
     v->loading = false;
+    v->prompted = false;
     HWND w = CreateWindowExW(0, L"ThunderheadLogView", (title + L"   reading").c_str(), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                              CW_USEDEFAULT, CW_USEDEFAULT, 1000, 600, NULL, NULL, g_inst, v);
     if (!w) { logEvent("log window could not be created: " + lastErrorText((int)GetLastError())); return; }
