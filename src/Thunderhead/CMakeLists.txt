@@ -11,4 +11,4 @@ add_executable(Thunderhead WIN32
     Thunderhead.rc
     Thunderhead.ico
 )
-target_link_libraries(Thunderhead PRIVATE common comctl32 version shell32 ole32 mpr)
+target_link_libraries(Thunderhead PRIVATE common comctl32 version shell32 ole32 mpr iphlpapi ws2_32)

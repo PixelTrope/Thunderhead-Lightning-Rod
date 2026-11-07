@@ -378,7 +378,7 @@ shutdown.
 
 ## Ping
 
-*Ping* tells every checked client to report at once. Thunderhead sends PING
+*Lightning Rod Ping* tells every checked client to report at once. Thunderhead sends PING
 to each checked client it holds as online and writes "NAME is offline, not
 pinged" for the others. An agent from 0.2.11 answers with a REPORT that
 carries every value, not only the changed ones, and restarts its report timer
@@ -388,6 +388,16 @@ the agent version. A client that sends neither within 5 s is marked offline
 with "no report within 5 s of PING", as it would be after three missed
 reports, and reconnects by itself when its agent is alive. The status bar
 keeps the count: checked, sent, replied, no reply, offline.
+
+*Network Ping* is the plain ICMP echo test, three requests of 32 bytes with
+a 1 s timeout each, as `ping -n 3` sends, to every checked client whether
+Thunderhead holds it as online or not. The address used is that of the
+client's connection, else the one its last HELLO carried, else its name
+resolved. All clients are pinged at the same time and the replies, timeouts
+and round-trip summary of each appear in a text box as that client finishes,
+followed by a count of clients that replied; OK closes the box. The event
+log notes the clients pinged. No agent takes part, so this reaches a client
+whose agent is not running.
 
 ## Log viewers
 

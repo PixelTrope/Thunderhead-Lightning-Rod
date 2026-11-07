@@ -5,6 +5,7 @@
 #define IDD_INTERVAL            103
 #define IDD_RENAME              104
 #define IDD_BATCH               105
+#define IDD_TEXTBOX             106
 
 #define IDM_FILE_EXIT           1001
 #define IDM_NODE_REMOVE         1105
@@ -49,7 +50,8 @@
 #define IDC_CMD_VIEW_LOCAL_LOG  3023
 #define IDC_CMD_VIEW_REMOTE_LOG 3024
 #define IDC_CMD_SET_TIME        3025
-#define IDC_CMD_LAST            3025
+#define IDC_CMD_NETPING         3026
+#define IDC_CMD_LAST            3026
 
 // rename dialog
 #define IDC_RENAME_INFO         2301
@@ -63,3 +65,6 @@
 #define IDC_BATCH_EXECUTE       2404
 #define IDC_BATCH_MAXIMIZED     2405
 #define IDC_BATCH_FRONT         2406
+
+// text display box
+#define IDC_TEXTBOX_TEXT        2601

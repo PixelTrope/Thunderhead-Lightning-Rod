@@ -22,6 +22,8 @@
 #include <shellapi.h>
 #include <shobjidl.h>
 #include <winnetwk.h>
+#include <iphlpapi.h>
+#include <icmpapi.h>
 #include <objbase.h>
 #include <map>
 #include <string>
@@ -89,7 +91,8 @@ struct CommandDef { int id; const wchar_t* label; const char* verb; bool live; }
 const CommandDef kCommands[] = {
     { IDC_CMD_START71,       L"Start Lightning 7.1", "START",   true  },
     { IDC_CMD_STOP,          L"Stop Lightning",      "STOP",    true  },
-    { IDC_CMD_PING,          L"Ping",                NULL,      true  },
+    { IDC_CMD_PING,          L"Lightning Rod Ping",  NULL,      true  },
+    { IDC_CMD_NETPING,       L"Network Ping",        NULL,      true  },
     { IDC_CMD_RESTART_LR,    L"Restart LR",          "RESTART", true  },
     { IDC_CMD_EXIT_LR,       L"Exit LR",             "EXIT",    true  },
     { IDC_CMD_CHECK_ALL,     L"Check all",           NULL,      true  },
@@ -919,7 +922,7 @@ void sendCommand(const char* verb)
     sendCommandMessage(Message(verb));
 }
 
-// Ping: every checked client is told to report at once. An agent from 0.2.11
+// Lightning Rod Ping: every checked client is told to report at once. An agent from 0.2.11
 // answers with a full REPORT, an older one with PONG; a client that sends
 // neither within kPingWaitMs is marked offline by onTimer. A checked client
 // that is offline already gets a line in the event log instead of a PING.
@@ -969,6 +972,222 @@ void pingReplied(NodeRecord* n, const std::string& what)
     ++g_pingReplied;
     logEvent(format("%s from %s %llu ms after PING", what.c_str(), n->name.c_str(), tickMs() - n->pingSentMs));
     pingStatus();
+}
+
+// ---------------------------------------------------------------- text display box
+
+// A pop-up with read-only, scrollable text and an OK button, for results that
+// are too long for the status bar. The text may be appended to while the box
+// is open through WM_TEXTBOX_APPEND; opened, when given, is called once the
+// box exists, so that whatever fills it knows where to send its lines.
+const UINT WM_TEXTBOX_APPEND = WM_APP + 4;   // wParam: job id, lParam: std::wstring* to append (deleted here)
+struct TextBoxStart { std::wstring title, text; void (*opened)(HWND, void*); void* arg; unsigned job; };
+HFONT g_textBoxFont = NULL;
+
+INT_PTR CALLBACK textBoxDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    HWND edit = GetDlgItem(dlg, IDC_TEXTBOX_TEXT);
+    switch (msg) {
+    case WM_INITDIALOG: {
+        TextBoxStart* s = (TextBoxStart*)lp;
+        SetWindowLongPtrW(dlg, GWLP_USERDATA, (LONG_PTR)s->job);
+        SetWindowTextW(dlg, s->title.c_str());
+        if (!g_textBoxFont) {
+            HDC dc = GetDC(dlg);
+            g_textBoxFont = CreateFontW(-MulDiv(10, GetDeviceCaps(dc, LOGPIXELSY), 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                        FIXED_PITCH | FF_MODERN, L"Consolas");
+            ReleaseDC(dlg, dc);
+        }
+        if (g_textBoxFont) SendMessageW(edit, WM_SETFONT, (WPARAM)g_textBoxFont, TRUE);
+        SendMessageW(edit, EM_SETLIMITTEXT, 0, 0);
+        SetWindowTextW(edit, s->text.c_str());
+        if (s->opened) s->opened(dlg, s->arg);
+        SetFocus(GetDlgItem(dlg, IDOK));
+        return FALSE;
+    }
+    case WM_TEXTBOX_APPEND: {
+        std::wstring* s = (std::wstring*)lp;
+        if ((unsigned)GetWindowLongPtrW(dlg, GWLP_USERDATA) == (unsigned)wp) {
+            int len = GetWindowTextLengthW(edit);
+            SendMessageW(edit, EM_SETSEL, len, len);
+            SendMessageW(edit, EM_REPLACESEL, FALSE, (LPARAM)s->c_str());
+        }
+        delete s;
+        return TRUE;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDOK || LOWORD(wp) == IDCANCEL) { EndDialog(dlg, IDOK); return TRUE; }
+        break;
+    }
+    return FALSE;
+}
+
+// Shows the box and returns when OK closes it.
+void showTextBox(const std::wstring& title, const std::wstring& text, void (*opened)(HWND, void*) = NULL, void* arg = NULL, unsigned job = 0)
+{
+    TextBoxStart s;
+    s.title = title;
+    s.text = text;
+    s.opened = opened;
+    s.arg = arg;
+    s.job = job;
+    DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_TEXTBOX), g_main, textBoxDlgProc, (LPARAM)&s);
+}
+
+// ---------------------------------------------------------------- network ping
+
+// Network Ping: a plain ICMP echo test of every checked client, three echo
+// requests each as "ping -n 3" sends, to the address the client is known by:
+// that of its connection, else the one its last HELLO carried, else its name
+// resolved. The clients are pinged at the same time, each on its own thread,
+// and the lines appear in a text box as each one finishes; OK closes it. A box
+// closed early loses nothing but the display: the threads finish on their own
+// and the event log keeps the line naming the clients pinged.
+const int kNetPingCount = 3;
+const DWORD kNetPingTimeoutMs = 1000;
+const int kNetPingBytes = 32;
+
+struct NetPingJob {
+    HWND dlg;
+    unsigned id;
+    volatile LONG remaining;             // clients still being pinged
+    volatile LONG answered;              // clients that replied at least once
+    int clients;
+};
+struct NetPingTarget { NetPingJob* job; std::string name, ip; };
+struct NetPingStart { NetPingJob* job; std::vector<NetPingTarget*> targets; };
+unsigned g_netPingId = 0;
+
+std::string ipText(IPAddr a)   // IPAddr is in network order
+{
+    return format("%u.%u.%u.%u", (unsigned)(a & 255), (unsigned)((a >> 8) & 255), (unsigned)((a >> 16) & 255), (unsigned)((a >> 24) & 255));
+}
+
+std::string icmpStatusText(DWORD status)
+{
+    wchar_t buf[256];
+    DWORD size = 255;
+    if (GetIpErrorString(status, buf, &size) == NO_ERROR) return narrow(trim(buf));
+    return lastErrorText((int)status);
+}
+
+void postNetPingText(NetPingJob* job, const std::string& text)
+{
+    std::wstring* s = new std::wstring(widen(text));
+    if (!PostMessageW(job->dlg, WM_TEXTBOX_APPEND, job->id, (LPARAM)s)) delete s;   // the box is closed
+}
+
+std::string netPingDone(const NetPingJob* job)
+{
+    return format("Done: %d client(s), %d replied, %d without a reply.\r\n", job->clients, (int)job->answered,
+                  job->clients - (int)job->answered);
+}
+
+DWORD WINAPI netPingThread(LPVOID param)
+{
+    NetPingTarget* t = (NetPingTarget*)param;
+    NetPingJob* job = t->job;
+    std::string ip = t->ip;
+    if (ip.empty()) {   // never reported: try the name
+        addrinfo hints, *res = NULL;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_INET;
+        if (getaddrinfo(t->name.c_str(), NULL, &hints, &res) == 0 && res) {
+            ip = ipText(((sockaddr_in*)res->ai_addr)->sin_addr.s_addr);
+            freeaddrinfo(res);
+        }
+    }
+    std::string out = t->name + (ip.empty() ? "" : " (" + ip + ")") + "\r\n";
+    int received = 0;
+    if (ip.empty()) {
+        out += "  no address: the client has never reported and its name does not resolve\r\n";
+    } else {
+        IPAddr addr = inet_addr(ip.c_str());
+        HANDLE h = IcmpCreateFile();
+        if (h == INVALID_HANDLE_VALUE) {
+            out += "  ICMP is not available: " + lastErrorText((int)GetLastError()) + "\r\n";
+        } else {
+            char data[kNetPingBytes];
+            for (int i = 0; i < kNetPingBytes; ++i) data[i] = (char)('a' + i % 23);   // the pattern ping.exe sends
+            std::vector<char> reply(sizeof(ICMP_ECHO_REPLY) + kNetPingBytes + 8);
+            DWORD minRt = 0, maxRt = 0, sumRt = 0;
+            for (int i = 0; i < kNetPingCount; ++i) {
+                DWORD n = IcmpSendEcho(h, addr, data, sizeof(data), NULL, &reply[0], (DWORD)reply.size(), kNetPingTimeoutMs);
+                ICMP_ECHO_REPLY* r = (ICMP_ECHO_REPLY*)&reply[0];
+                if (n == 0) { out += "  " + icmpStatusText(GetLastError()) + "\r\n"; continue; }
+                if (r->Status != IP_SUCCESS) { out += "  Reply from " + ipText(r->Address) + ": " + icmpStatusText(r->Status) + "\r\n"; continue; }
+                DWORD rt = r->RoundTripTime;
+                if (received == 0 || rt < minRt) minRt = rt;
+                if (rt > maxRt) maxRt = rt;
+                sumRt += rt;
+                ++received;
+                out += format("  Reply from %s: bytes=%u time%s TTL=%u\r\n", ipText(r->Address).c_str(), (unsigned)r->DataSize,
+                              rt == 0 ? "<1ms" : format("=%ums", (unsigned)rt).c_str(), (unsigned)r->Options.Ttl);
+            }
+            IcmpCloseHandle(h);
+            int lost = kNetPingCount - received;
+            out += format("  %d sent, %d received, %d lost (%d%% loss)", kNetPingCount, received, lost, lost * 100 / kNetPingCount);
+            if (received) out += format(", round trip min %u ms, avg %u ms, max %u ms", (unsigned)minRt, (unsigned)(sumRt / received), (unsigned)maxRt);
+            out += "\r\n";
+        }
+    }
+    out += "\r\n";
+    postNetPingText(job, out);
+    if (received) InterlockedIncrement(&job->answered);
+    if (InterlockedDecrement(&job->remaining) == 0) {
+        postNetPingText(job, netPingDone(job));
+        delete job;
+    }
+    delete t;
+    return 0;
+}
+
+// Called once the text box exists: the threads need its handle for their lines.
+void startNetPing(HWND dlg, void* arg)
+{
+    NetPingStart* s = (NetPingStart*)arg;
+    s->job->dlg = dlg;
+    for (size_t i = 0; i < s->targets.size(); ++i) {
+        HANDLE t = CreateThread(NULL, 0, netPingThread, s->targets[i], 0, NULL);
+        if (t) { CloseHandle(t); continue; }
+        postNetPingText(s->job, s->targets[i]->name + "\r\n  could not start a thread: " + lastErrorText((int)GetLastError()) + "\r\n\r\n");
+        delete s->targets[i];
+        if (InterlockedDecrement(&s->job->remaining) == 0) {
+            postNetPingText(s->job, netPingDone(s->job));
+            delete s->job;
+            break;
+        }
+    }
+}
+
+void networkPing()
+{
+    std::vector<NodeRecord*> targets = checkedNodes();
+    if (targets.empty()) { updateStatusBar(L"|  no clients checked"); return; }
+    NetPingStart s;
+    s.job = new NetPingJob();
+    s.job->dlg = NULL;
+    s.job->id = ++g_netPingId;
+    s.job->remaining = (LONG)targets.size();
+    s.job->answered = 0;
+    s.job->clients = (int)targets.size();
+    std::string names;
+    for (size_t i = 0; i < targets.size(); ++i) {
+        NetPingTarget* t = new NetPingTarget();
+        t->job = s.job;
+        t->name = targets[i]->name.empty() ? targets[i]->mac : targets[i]->name;
+        t->ip = nodeIp(*targets[i]);
+        s.targets.push_back(t);
+        names += (names.empty() ? "" : ", ") + t->name + (t->ip.empty() ? "" : " " + t->ip);
+    }
+    logEvent(format("Network Ping: %d echo requests each to %s", kNetPingCount, names.c_str()));
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    std::string head = format("Network Ping at %02d:%02d:%02d: %d checked client(s), %d echo requests of %d bytes each, %u ms timeout.\r\n"
+                              "Each client's lines appear when its requests are done.\r\n\r\n", st.wHour, st.wMinute, st.wSecond,
+                              (int)targets.size(), kNetPingCount, kNetPingBytes, (unsigned)kNetPingTimeoutMs);
+    showTextBox(L"Network Ping", widen(head), startNetPing, &s, s.job->id);
 }
 
 // First agent version that knows POWER; older agents ignore the verb.
@@ -2366,6 +2585,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CMD_BATCH: runRemoteBatch(); return 0;
         case IDC_CMD_WOL: sendWakeOnLan(); return 0;
         case IDC_CMD_PING: pingChecked(); return 0;
+        case IDC_CMD_NETPING: networkPing(); return 0;
         case IDC_CMD_VIEW_LOCAL_LOG: viewLocalLog(); return 0;
         case IDC_CMD_VIEW_REMOTE_LOG: viewRemoteLogs(); return 0;
         case IDC_CMD_SET_TIME: setClientTime(); return 0;
