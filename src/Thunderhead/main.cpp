@@ -98,8 +98,8 @@ const CommandDef kCommands[] = {
     { IDC_CMD_NETPING,       L"Network Ping",        NULL,      true  },
     { IDC_CMD_RESTART_LR,    L"Restart LR",          "RESTART", true  },
     { IDC_CMD_EXIT_LR,       L"Exit LR",             "EXIT",    true  },
-    { IDC_CMD_CHECK_ALL,     L"Check all",           NULL,      true  },
-    { IDC_CMD_CHECK_NONE,    L"Check none",          NULL,      true  },
+    { IDC_CMD_CHECK_ALL,     L"Check All (Ctrl-A)",  NULL,      true  },
+    { IDC_CMD_CHECK_NONE,    L"Check None (Ctrl-D)", NULL,      true  },
     { IDC_CMD_CHECK_OUTDATED, L"Check outdated",     NULL,      true  },
     { IDC_CMD_UPDATE,        L"Update checked",      NULL,      true  },
     { IDC_CMD_RENAME,        L"Rename node",         NULL,      true  },
@@ -2845,11 +2845,22 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show)
     ShowWindow(g_main, show);
     UpdateWindow(g_main);
 
+    // Hot keys while the main window has the focus: Ctrl+A checks every client,
+    // Ctrl+D checks none. They arrive as WM_COMMAND with the button's id. The
+    // in-place Group/Comment editor keeps its own Ctrl+A (select all text).
+    ACCEL accel[] = {
+        { FCONTROL | FVIRTKEY, 'A', IDC_CMD_CHECK_ALL },
+        { FCONTROL | FVIRTKEY, 'D', IDC_CMD_CHECK_NONE },
+    };
+    HACCEL hotKeys = CreateAcceleratorTableW(accel, 2);
+
     MSG m;
     while (GetMessageW(&m, NULL, 0, 0) > 0) {
+        if (!g_edit && hotKeys && TranslateAcceleratorW(g_main, hotKeys, &m)) continue;
         TranslateMessage(&m);
         DispatchMessageW(&m);
     }
+    if (hotKeys) DestroyAcceleratorTable(hotKeys);
 
     server.stop();
     logEvent("Thunderhead stopped");
