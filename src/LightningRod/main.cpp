@@ -27,6 +27,12 @@ using namespace tlr;
 namespace {
 
 const UINT WM_AGENT_UPDATE = WM_APP + 1;
+const UINT WM_NETWORK_ERROR = WM_APP + 2;   // no valid address after kIpTries re-reads; the window shows the error box
+// A node whose NIC has not finished DHCP when the agent starts at logon reads
+// no address, 127.x or an APIPA 169.254.x.y one. The agent then re-reads the
+// address every kIpWaitMs, up to kIpTries times, before it gives up.
+const int kIpTries = 4;
+const DWORD kIpWaitMs = 30000;
 const UINT_PTR kClockTimer = 1;
 
 Logger g_log;
@@ -47,14 +53,51 @@ std::wstring exeDirectory()
 // What the window shows; copied out of the agent under its lock.
 struct AgentStatus {
     bool connected;
+    bool waitingIp;                  // start-up: no valid address yet
+    int ipTry;                       // re-reads done so far
+    std::string badIp;               // what was read, empty when the NIC had no address
     std::string hostName, hostIp, hostMac;
     int intervalSec;
     SYSTEMTIME lastReportTime;
     bool haveReport;
     StaticInfo info;
     Message report;
-    AgentStatus() : connected(false), intervalSec(kDefaultReportInterval), haveReport(false) { memset(&lastReportTime, 0, sizeof(lastReportTime)); }
+    AgentStatus() : connected(false), waitingIp(false), ipTry(0), intervalSec(kDefaultReportInterval), haveReport(false) { memset(&lastReportTime, 0, sizeof(lastReportTime)); }
 };
+
+// An address the agent can work from: not empty, not the 0.0.0.0 of a NIC
+// without a lease, not loopback and not an APIPA address, which Windows
+// assigns itself when no DHCP server answered.
+bool validAddress(const std::string& ip)
+{
+    if (ip.empty() || ip == "0.0.0.0") return false;
+    if (ip.compare(0, 4, "127.") == 0) return false;
+    if (ip.compare(0, 8, "169.254.") == 0) return false;
+    return true;
+}
+
+// Starts a new instance of this executable and lets go of the single-instance
+// mutex so that it can run; the caller exits afterwards.
+void relaunchSelf()
+{
+    if (g_singleInstance) { CloseHandle(g_singleInstance); g_singleInstance = NULL; }
+    wchar_t path[MAX_PATH];
+    DWORD n = GetModuleFileNameW(NULL, path, MAX_PATH);
+    std::wstring cmd = L"\"" + std::wstring(path, n) + L"\"";
+    std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
+    cmdBuf.push_back(L'\0');
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    memset(&pi, 0, sizeof(pi));
+    if (CreateProcessW(path, &cmdBuf[0], NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    } else {
+        logLine("relaunch failed: " + lastErrorText((int)GetLastError()));
+    }
+}
 
 // MAC of a LAN address through ARP; the node's own MAC when the host is this machine.
 std::string macOf(const std::string& ip, const StaticInfo& self)
@@ -320,6 +363,7 @@ public:
 
     void run()
     {
+        if (!acquireAddress()) return;   // the window thread shows the error and relaunches
         for (;;) {
             if (tcp_ == INVALID_SOCKET) announcePhase();
             else sessionPhase();
@@ -337,6 +381,54 @@ private:
     void notify()
     {
         if (g_window) PostMessageW(g_window, WM_AGENT_UPDATE, 0, 0);
+    }
+
+    // ---- address ---------------------------------------------------------
+    // True once the adapter has a valid address. An invalid one at start is
+    // re-read every kIpWaitMs up to kIpTries times; when a valid address then
+    // appears, Lightning, which started at logon as well and most likely bound
+    // the same bad address, is stopped and started again. After kIpTries
+    // failures the window is told to show the network error box, and false is
+    // returned so that nothing is announced from the bad address.
+    bool acquireAddress()
+    {
+        int tries = 0;
+        while (!validAddress(info_.ip)) {
+            if (tries == kIpTries) {
+                logLine(format("no valid IP address after %d re-reads (last read \"%s\"); network error shown", kIpTries, info_.ip.c_str()));
+                if (g_window) PostMessageW(g_window, WM_NETWORK_ERROR, 0, 0);
+                return false;
+            }
+            ++tries;
+            logLine(format("no valid IP address (read \"%s\"); waiting %u s, then re-reading, try %d of %d",
+                           info_.ip.c_str(), (unsigned)(kIpWaitMs / 1000), tries, kIpTries));
+            EnterCriticalSection(&lock_);
+            status_.waitingIp = true;
+            status_.ipTry = tries;
+            status_.badIp = info_.ip;
+            LeaveCriticalSection(&lock_);
+            notify();
+            Sleep(kIpWaitMs);
+            collectAddress(info_);
+        }
+        if (tries == 0) return true;
+        logLine(format("valid IP address %s (mac %s) after %d re-read(s)", info_.ip.c_str(), info_.mac.c_str(), tries));
+        EnterCriticalSection(&lock_);
+        status_.waitingIp = false;
+        status_.info = info_;
+        LeaveCriticalSection(&lock_);
+        notify();
+        std::string err;
+        if (findLightningPid() == 0) {
+            logLine("Lightning is not running; nothing to restart for the new address");
+        } else if (!stopLightning(err)) {
+            logLine("Lightning restart for the new address: stop failed: " + err);
+        } else if (!startLightning(err)) {
+            logLine("Lightning restart for the new address: start failed: " + err);
+        } else {
+            logLine("Lightning restarted so that it binds the new address");
+        }
+        return true;
     }
 
     // ---- announcing ------------------------------------------------------
@@ -711,24 +803,7 @@ private:
             closesocket(tcp_);
             tcp_ = INVALID_SOCKET;
             if (g_singleInstance) { CloseHandle(g_singleInstance); g_singleInstance = NULL; }
-            if (m.verb == "RESTART") {
-                wchar_t path[MAX_PATH];
-                DWORD n = GetModuleFileNameW(NULL, path, MAX_PATH);
-                std::wstring cmd = L"\"" + std::wstring(path, n) + L"\"";
-                std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
-                cmdBuf.push_back(L'\0');
-                STARTUPINFOW si;
-                PROCESS_INFORMATION pi;
-                memset(&si, 0, sizeof(si));
-                si.cb = sizeof(si);
-                memset(&pi, 0, sizeof(pi));
-                if (CreateProcessW(path, &cmdBuf[0], NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
-                    CloseHandle(pi.hThread);
-                    CloseHandle(pi.hProcess);
-                } else {
-                    logLine("relaunch failed: " + lastErrorText((int)GetLastError()));
-                }
-            }
+            if (m.verb == "RESTART") relaunchSelf();
             ExitProcess(0);
         } else {
             logLine("unknown verb from Thunderhead: " + m.verb);
@@ -881,6 +956,9 @@ void refreshAll()
     if (s.connected) {
         host = L"Reporting to Thunderhead on " + widen(s.hostName) + L"  (" + widen(s.hostIp) +
                (s.hostMac.empty() ? L"" : L", " + widen(s.hostMac)) + L")";
+    } else if (s.waitingIp) {
+        host = widen(format("No valid IP address (read \"%s\"): re-reading it in %u s, try %d of %d",
+                            s.badIp.c_str(), (unsigned)(kIpWaitMs / 1000), s.ipTry, kIpTries));
     } else {
         host = L"Not connected: announcing, waiting for Thunderhead";
     }
@@ -947,6 +1025,14 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg) {
     case WM_SIZE: layout(hwnd); return 0;
     case WM_AGENT_UPDATE: refreshAll(); return 0;
+    case WM_NETWORK_ERROR:
+        // MB_ICONERROR plays the Critical Stop sound; OK starts a fresh agent.
+        SetWindowTextW(g_hostText, L"Network Error: Invalid IP address");
+        MessageBoxW(hwnd, L"Network Error: Invalid IP address. Check network settings or hardware and restart Lightning Rod.",
+                    L"Lightning Rod " TLR_VERSION_WSTRING, MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST);
+        logLine("network error acknowledged, relaunching");
+        relaunchSelf();
+        ExitProcess(0);
     case WM_TIMER: if (wp == kClockTimer) refreshClock(); return 0;
     case WM_CLOSE: DestroyWindow(hwnd); return 0;
     case WM_DESTROY: KillTimer(hwnd, kClockTimer); PostQuitMessage(0); return 0;

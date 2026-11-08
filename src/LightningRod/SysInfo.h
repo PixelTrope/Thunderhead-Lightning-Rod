@@ -45,6 +45,9 @@ private:
 };
 
 StaticInfo  collectStatic();
+// Re-reads only mac and ip of s from the adapters, for the start-up wait on a
+// node whose NIC has no lease yet.
+void        collectAddress(StaticInfo& s);
 DynamicInfo collectDynamic(CpuTracker& cpu);
 
 // Directed broadcast address (network order) of every adapter with an address.

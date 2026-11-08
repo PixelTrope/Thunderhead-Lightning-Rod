@@ -286,12 +286,17 @@ static void displayAdapter(std::string& gpu, int& vramMb)
 
 // ---------------------------------------------------------------- collection
 
-StaticInfo collectStatic()
+void collectAddress(StaticInfo& s)
 {
-    StaticInfo s;
     AdapterPick a = pickAdapter();
     s.mac = a.mac;
     s.ip = a.ip;
+}
+
+StaticInfo collectStatic()
+{
+    StaticInfo s;
+    collectAddress(s);
 
     wchar_t name[MAX_COMPUTERNAME_LENGTH + 1];
     DWORD len = MAX_COMPUTERNAME_LENGTH + 1;
