@@ -316,6 +316,14 @@ StaticInfo collectStatic()
     ms.dwLength = sizeof(ms);
     if (GlobalMemoryStatusEx(&ms)) s.memMb = (int)(ms.ullTotalPhys / (1024 * 1024));
 
+    // GetPhysicallyInstalledSystemMemory reads the firmware's SMBIOS memory
+    // tables, so it counts what is fitted rather than what a 32-bit kernel can
+    // address. It exists from Vista on and is looked up at run time for XP.
+    typedef BOOL (WINAPI *InstalledMemFn)(PULONGLONG);
+    InstalledMemFn installedMem = (InstalledMemFn)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetPhysicallyInstalledSystemMemory");
+    ULONGLONG installedKb = 0;
+    if (installedMem && installedMem(&installedKb)) s.memInstalledMb = (int)(installedKb / 1024);
+
     ULARGE_INTEGER freeBytes, totalBytes;
     if (GetDiskFreeSpaceExW(L"C:\\", &freeBytes, &totalBytes, NULL)) s.diskTotalMb = (int)(totalBytes.QuadPart / (1024 * 1024));
 

@@ -15,13 +15,14 @@ struct StaticInfo {
     std::string cpu;        // processor name string
     int cpuMhz;
     int cores;              // logical processors
-    int memMb;              // installed, as seen by the OS
+    int memMb;              // usable: physical memory the OS can address
+    int memInstalledMb;     // fitted, from the firmware's SMBIOS tables; 0 when the OS cannot tell (XP)
     int diskTotalMb;        // size of C:
     std::string board;      // baseboard manufacturer and product
     std::string chipset;    // host bridge description
     std::string gpu;        // display adapter description
     int vramMb;
-    StaticInfo() : cpuMhz(0), cores(0), memMb(0), diskTotalMb(0), vramMb(0) {}
+    StaticInfo() : cpuMhz(0), cores(0), memMb(0), memInstalledMb(0), diskTotalMb(0), vramMb(0) {}
 };
 
 // Gathered every report.

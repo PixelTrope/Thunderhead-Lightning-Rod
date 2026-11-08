@@ -66,12 +66,20 @@ cpu=AMD G-T56N Processor
 cpu_mhz=1650
 cores=2
 mem_mb=3892
+mem_installed_mb=4096
 disk_total_mb=3889
 board=Dell Inc. 0XXXXX
 chipset=AMD A55E Host Bridge
 gpu=AMD Radeon HD 6310 Graphics
 vram_mb=384
 ```
+
+`mem_mb` is the physical memory the node's Windows can address, the figure
+Windows calls usable. `mem_installed_mb` is what the firmware's SMBIOS tables
+say is fitted, so the two differ on a 32-bit system with 4 GB or more, where
+the usable figure stops at what lies below the address hole. Agents from
+0.2.14 send `mem_installed_mb`; it is 0 where the OS cannot supply it (Windows
+XP), and Thunderhead shows that as n/a and an absent field as blank.
 
 Thunderhead replies with the report interval in seconds (5 to 60 in steps of 5,
 default 15):

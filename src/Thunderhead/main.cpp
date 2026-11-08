@@ -58,7 +58,8 @@ std::map<std::string, Logger*> g_nodeLogs;
 // ---------------------------------------------------------------- inventory columns
 
 enum Column {
-    ColName, ColIp, ColMac, ColStatus, ColAgent, ColRendering, ColLightning, ColLightningCpu, ColCpuPct, ColCpuTemp, ColMemFree, ColDiskFree,
+    ColName, ColIp, ColMac, ColStatus, ColAgent, ColRendering, ColLightning, ColLightningCpu, ColCpuPct, ColCpuTemp, ColMemFree,
+    ColMemUsable, ColMemInstalled, ColDiskFree,
     ColUptime, ColLastReport, ColAutoShutdown, ColGroup, ColComment, ColCount
 };
 
@@ -76,6 +77,8 @@ const ColumnDef kColumns[ColCount] = {
     { L"CPU %",         50, LVCFMT_RIGHT },
     { L"CPU temp",     110, LVCFMT_RIGHT },
     { L"Mem free MB",   80, LVCFMT_RIGHT },
+    { L"Mem usable MB", 90, LVCFMT_RIGHT },
+    { L"Mem installed MB", 105, LVCFMT_RIGHT },
     { L"C: free MB",    75, LVCFMT_RIGHT },
     { L"Uptime",        90, LVCFMT_RIGHT },
     { L"Last report",   80, LVCFMT_RIGHT },
@@ -182,6 +185,14 @@ std::string nodeIp(const NodeRecord& n)
     return n.ip.empty() ? n.hello.get("ip") : n.ip;
 }
 
+// mem_installed_mb from HELLO: blank from an agent that does not send it, n/a
+// where the node's OS cannot supply it (XP), else the figure.
+std::wstring memInstalledText(const Message& h)
+{
+    if (!h.has("mem_installed_mb")) return L"";
+    return h.get("mem_installed_mb") == "0" ? std::wstring(L"n/a") : widen(h.get("mem_installed_mb"));
+}
+
 std::wstring columnText(const NodeRecord& n, int col)
 {
     const Message& r = n.report;
@@ -198,6 +209,8 @@ std::wstring columnText(const NodeRecord& n, int col)
     case ColCpuPct:       return !live ? L"" : widen(r.get("cpu_pct"));
     case ColCpuTemp:      return !live ? L"" : tempText(r.get("cpu_temp_c"));
     case ColMemFree:      return !live ? L"" : widen(r.get("mem_free_mb"));
+    case ColMemUsable:    return widen(n.hello.get("mem_mb"));
+    case ColMemInstalled: return memInstalledText(n.hello);
     case ColDiskFree:     return !live ? L"" : widen(r.get("disk_free_mb"));
     case ColUptime:       return !live ? L"" : durationText(atoll(r.get("uptime_s").c_str()));
     case ColLastReport: {
@@ -309,6 +322,14 @@ bool sortNumber(const NodeRecord& n, int col, long long& out)
     case ColLightningCpu: key = "lightning_cpu_pct"; break;
     case ColCpuPct:       key = "cpu_pct"; break;
     case ColMemFree:      key = "mem_free_mb"; break;
+    case ColMemUsable:
+    case ColMemInstalled: {
+        // static values from HELLO, present whether the node is online or not
+        std::string v = n.hello.get(col == ColMemUsable ? "mem_mb" : "mem_installed_mb");
+        if (v.empty()) return false;
+        out = atoll(v.c_str());
+        return true;
+    }
     case ColDiskFree:     key = "disk_free_mb"; break;
     case ColUptime:       key = "uptime_s"; break;
     case ColLastReport:
@@ -467,7 +488,8 @@ void showStaticPane(NodeRecord* n)
     add(L"CPU", widen(h.get("cpu")));
     add(L"MHz", widen(h.get("cpu_mhz")));
     add(L"Cores", widen(h.get("cores")));
-    add(L"Memory MB", widen(h.get("mem_mb")));
+    add(L"Mem usable MB", widen(h.get("mem_mb")));
+    add(L"Mem installed MB", memInstalledText(h));
     add(L"C: MB", widen(h.get("disk_total_mb")));
     add(L"Board", widen(h.get("board")));
     add(L"Chipset", widen(h.get("chipset")));
@@ -489,7 +511,7 @@ void showStaticPane(NodeRecord* n)
     } else {
         add(L"Clock offset", std::wstring());
     }
-    static const char* const knownHello[] = { "agent", "os", "cpu", "cpu_mhz", "cores", "mem_mb", "disk_total_mb", "board",
+    static const char* const knownHello[] = { "agent", "os", "cpu", "cpu_mhz", "cores", "mem_mb", "mem_installed_mb", "disk_total_mb", "board",
                                               "chipset", "gpu", "vram_mb", "ip", "mac", "name" };
     static const char* const knownReport[] = { "cpu_pct", "cpu_temp_c", "disk_free_mb", "lightning", "lightning_cpu_pct",
                                                "mem_free_mb", "rendering", "uptime_s", "clock", "utc_ms" };
