@@ -113,6 +113,8 @@ const CommandDef kCommands[] = {
     { IDC_CMD_VIEW_LOCAL_LOG, L"View Local Log",     NULL,      true  },
     { IDC_CMD_VIEW_REMOTE_LOG, L"View Remote Log(s)", NULL,     true  },
     { IDC_CMD_SET_TIME,      L"Set Client Date and Time", NULL, true  },
+    { IDC_CMD_MUTE,          L"Mute Checked Clients", NULL,     true  },
+    { IDC_CMD_UNMUTE,        L"Unmute Checked Clients", NULL,   true  },
     { IDC_CMD_START61,       L"Start Lightning 6.1", NULL,      false },
     { IDC_CMD_START63,       L"Start Lightning 6.3", NULL,      false },
     { IDC_CMD_START_TV,      L"Start TeamViewer",    NULL,      false },
@@ -1252,6 +1254,17 @@ void sendPower(const char* action)
     sendVersioned(m, m.oneLine(), kPowerAgent);
 }
 
+// Mute / Unmute Checked Clients: AUDIO action=mute|unmute sets the master mute
+// of the client's default playback device; the ACK reports the state read back.
+const char* const kAudioAgent = "0.2.16";
+
+void sendAudio(const char* action)
+{
+    Message m("AUDIO");
+    m.set("action", std::string(action));
+    sendVersioned(m, m.oneLine(), kAudioAgent);
+}
+
 // Set Client Date and Time: every checked online client gets this host's clock
 // and sets its own to it when its date differs from the host's or its time is
 // kTimeToleranceSec or more from the host's; a clock closer than that is left
@@ -2337,6 +2350,12 @@ void onNet(NetEvent* e)
                 text = format("TIME: %s clock was %s (its date %s), set to the host's time", n->name.c_str(), was.c_str(),
                               e->msg.get("date").c_str());
             else text = format("TIME: %s clock %s, left alone", n->name.c_str(), was.c_str());
+        } else if (cmd == "AUDIO") {
+            std::string action = e->msg.get("action"), method = e->msg.get("method");
+            if (ok) text = format("AUDIO %s ok on %s: audio %s%s%s", action.c_str(), n->name.c_str(),
+                                  parseBool(e->msg.get("muted")) ? "muted" : "unmuted",
+                                  method.empty() ? "" : " via ", method.c_str());
+            else text = format("AUDIO %s failed on %s: %s", action.c_str(), n->name.c_str(), e->msg.get("error").c_str());
         } else {
             if (cmd == "POWER") cmd += " " + e->msg.get("action");
             text = format("%s %s on %s%s%s", cmd.c_str(), ok ? "ok" : "failed",
@@ -2611,6 +2630,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CMD_VIEW_LOCAL_LOG: viewLocalLog(); return 0;
         case IDC_CMD_VIEW_REMOTE_LOG: viewRemoteLogs(); return 0;
         case IDC_CMD_SET_TIME: setClientTime(); return 0;
+        case IDC_CMD_MUTE: sendAudio("mute"); return 0;
+        case IDC_CMD_UNMUTE: sendAudio("unmute"); return 0;
         case IDC_CMD_SHUTDOWN_NODE: shutdownChecked(); return 0;
         case IDC_CMD_ABORT_SHUTDOWN: sendPower("abort"); return 0;
         case IDC_FLAG_WOL: case IDC_FLAG_BOOT: case IDC_FLAG_AUTOLOGIN: case IDC_FLAG_AUTOROD: case IDC_FLAG_AUTOLIGHTNING:

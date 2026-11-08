@@ -145,9 +145,10 @@ Thunderhead may send at any time:
 | SHUTDOWN |             | reply ACK, then shut the node down after 5 s, closing programs by force (no longer sent by Thunderhead, which uses POWER) |
 | BATCH | text, maximized, front | write the text (hexadecimal digits of its UTF-8 bytes) to a batch file and run it; reply ACK when started and again when ended (see Remote batch file); agents from 0.2.7 |
 | POWER | action        | run Windows' `shutdown.exe` and reply ACK with the action: `shutdown` (`-s`), `restart` (`-r`) or `coldrestart` (`-g`), each with `-f -t 66`, or `abort` (`-a`); agents from 0.2.6 |
+| AUDIO | action        | set the master mute of the default playback device: `mute` or `unmute`; reply ACK with the state read back (see Audio); agents from 0.2.16 |
 
 The agent replies to START, STOP, PRIORITY, EXIT, RESTART, UPDATE, RENAME, REBOOT,
-SHUTDOWN, POWER and BATCH with (RENAME adds `name=` with the name that was applied;
+SHUTDOWN, POWER, AUDIO and BATCH with (RENAME adds `name=` with the name that was applied;
 PRIORITY adds `level=` as requested and `applied=` with the class Windows reports
 afterwards, and answers `ok=no` when the two differ, as when RealTime is
 requested without administrator rights and Windows grants High; POWER adds
@@ -424,6 +425,22 @@ to the end when opened, with a Refresh button (or F5) that reads the file
 again and Ctrl+A to select the text for copying. A file above 4 MB is shown
 from its last 4 MB. The windows are independent of the main window and are
 not updated as the log grows.
+
+## Audio
+
+*Mute Checked Clients* and *Unmute Checked Clients* send `AUDIO action=mute`
+or `action=unmute` to every checked online client. The agent sets, rather
+than toggles, the master mute of the node's default playback device: through
+Core Audio (IAudioEndpointVolume on the default render endpoint) on Vista and
+later, through the multimedia mixer API (the mute control of the first mixer's
+speaker line) on XP, where Core Audio is not registered. The ACK carries
+`action=`, `muted=yes|no` as read back from the device afterwards and
+`method=Core Audio|mixer API`; `ok=no` with `error=` when neither API could
+set the state, when the node has no playback device, or when the state read
+back differs from the one asked for. The event log reads "AUDIO mute ok on
+NAME: audio muted via Core Audio" or "AUDIO mute failed on NAME: ...".
+Agents older than 0.2.16 do not know AUDIO; Thunderhead skips them with a line
+in the event log, as for the other versioned commands.
 
 ## Clock
 

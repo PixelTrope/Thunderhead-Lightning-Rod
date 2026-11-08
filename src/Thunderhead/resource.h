@@ -51,7 +51,9 @@
 #define IDC_CMD_VIEW_REMOTE_LOG 3024
 #define IDC_CMD_SET_TIME        3025
 #define IDC_CMD_NETPING         3026
-#define IDC_CMD_LAST            3026
+#define IDC_CMD_MUTE            3027
+#define IDC_CMD_UNMUTE          3028
+#define IDC_CMD_LAST            3028
 
 // rename dialog
 #define IDC_RENAME_INFO         2301

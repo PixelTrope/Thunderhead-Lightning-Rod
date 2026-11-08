@@ -13,6 +13,7 @@
 #include "SysInfo.h"
 #include "Lightning.h"
 #include "Thermal.h"
+#include "Audio.h"
 
 #include <commctrl.h>
 #include <iphlpapi.h>
@@ -628,6 +629,23 @@ private:
             ack.set("error", err);
             ack.set("level", level);
             ack.set("applied", applied);
+            sendMessage(ack);
+        } else if (m.verb == "AUDIO") {
+            // action=mute or unmute: the default playback device's master mute is
+            // set, not toggled, and the ACK carries the state read back.
+            std::string action = trim(m.get("action")), method, err;
+            bool muted = false, ok = false;
+            if (action != "mute" && action != "unmute") err = "unknown action \"" + action + "\"";
+            else ok = setAudioMute(action == "mute", muted, method, err);
+            logLine(format("AUDIO %s: %s%s%s%s", action.c_str(), ok ? "ok" : "failed",
+                           method.empty() ? "" : (" via " + method).c_str(), err.empty() ? "" : ": ", err.c_str()));
+            Message ack("ACK");
+            ack.set("cmd", m.verb);
+            ack.set("ok", boolText(ok));
+            ack.set("error", err);
+            ack.set("action", action);
+            ack.set("muted", boolText(muted));
+            ack.set("method", method);
             sendMessage(ack);
         } else if (m.verb == "PING") {
             // Report at once, with every value rather than only the changed ones,
