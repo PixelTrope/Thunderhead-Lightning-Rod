@@ -67,6 +67,7 @@ cpu_mhz=1650
 cores=2
 mem_mb=3892
 mem_installed_mb=4096
+mem_type=DDR3
 disk_total_mb=3889
 board=Dell Inc. 0XXXXX
 chipset=AMD A55E Host Bridge
@@ -78,8 +79,18 @@ vram_mb=384
 Windows calls usable. `mem_installed_mb` is what the firmware's SMBIOS tables
 say is fitted, so the two differ on a 32-bit system with 4 GB or more, where
 the usable figure stops at what lies below the address hole. Agents from
-0.2.14 send `mem_installed_mb`; it is 0 where the OS cannot supply it (Windows
-XP), and Thunderhead shows that as n/a and an absent field as blank.
+0.2.14 send `mem_installed_mb`; it is 0 where the firmware supplies nothing,
+and Thunderhead shows that as n/a and an absent field as blank. Agents from
+0.2.17 also send `mem_type`, the memory technology of the fitted modules as
+the firmware's SMBIOS memory device records (type 17) state it: `DDR3`,
+`DDR4`, `SDRAM` and so on, with `/` between the names when fitted modules
+differ, `Unknown` when the firmware fills the field with Unknown or Other, and
+empty when the table has no memory device records at all; Thunderhead shows
+the empty value as n/a and an absent field as blank. The value is what the
+BIOS wrote, not a reading from the modules. The same records supply
+`mem_installed_mb` on Windows XP, where the agent reads the SMBIOS table
+through WMI (`MSSmBios_RawSMBiosTables`) because the OS has no
+GetSystemFirmwareTable.
 
 Thunderhead replies with the report interval in seconds (5 to 60 in steps of 5,
 default 15):

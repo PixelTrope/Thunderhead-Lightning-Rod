@@ -115,6 +115,7 @@ const CommandDef kCommands[] = {
     { IDC_CMD_SET_TIME,      L"Set Client Date and Time", NULL, true  },
     { IDC_CMD_MUTE,          L"Mute Checked Clients", NULL,     true  },
     { IDC_CMD_UNMUTE,        L"Unmute Checked Clients", NULL,   true  },
+    { IDC_CMD_REMOVE_OFFLINE, L"Remove Checked Offline Clients", NULL, true },
     { IDC_CMD_START61,       L"Start Lightning 6.1", NULL,      false },
     { IDC_CMD_START63,       L"Start Lightning 6.3", NULL,      false },
     { IDC_CMD_START_TV,      L"Start TeamViewer",    NULL,      false },
@@ -193,6 +194,14 @@ std::wstring memInstalledText(const Message& h)
 {
     if (!h.has("mem_installed_mb")) return L"";
     return h.get("mem_installed_mb") == "0" ? std::wstring(L"n/a") : widen(h.get("mem_installed_mb"));
+}
+
+// mem_type from HELLO (agents from 0.2.17): blank when absent, n/a when the
+// node's firmware lists no memory devices.
+std::wstring memTypeText(const Message& h)
+{
+    if (!h.has("mem_type")) return L"";
+    return h.get("mem_type").empty() ? std::wstring(L"n/a") : widen(h.get("mem_type"));
 }
 
 std::wstring columnText(const NodeRecord& n, int col)
@@ -492,6 +501,7 @@ void showStaticPane(NodeRecord* n)
     add(L"Cores", widen(h.get("cores")));
     add(L"Mem usable MB", widen(h.get("mem_mb")));
     add(L"Mem installed MB", memInstalledText(h));
+    add(L"Memory type", memTypeText(h));
     add(L"C: MB", widen(h.get("disk_total_mb")));
     add(L"Board", widen(h.get("board")));
     add(L"Chipset", widen(h.get("chipset")));
@@ -513,7 +523,7 @@ void showStaticPane(NodeRecord* n)
     } else {
         add(L"Clock offset", std::wstring());
     }
-    static const char* const knownHello[] = { "agent", "os", "cpu", "cpu_mhz", "cores", "mem_mb", "mem_installed_mb", "disk_total_mb", "board",
+    static const char* const knownHello[] = { "agent", "os", "cpu", "cpu_mhz", "cores", "mem_mb", "mem_installed_mb", "mem_type", "disk_total_mb", "board",
                                               "chipset", "gpu", "vram_mb", "ip", "mac", "name" };
     static const char* const knownReport[] = { "cpu_pct", "cpu_temp_c", "disk_free_mb", "lightning", "lightning_cpu_pct",
                                                "mem_free_mb", "rendering", "uptime_s", "clock", "utc_ms" };
@@ -2655,6 +2665,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CMD_SET_TIME: setClientTime(); return 0;
         case IDC_CMD_MUTE: sendAudio("mute"); return 0;
         case IDC_CMD_UNMUTE: sendAudio("unmute"); return 0;
+        case IDC_CMD_REMOVE_OFFLINE: removeCheckedOffline(); return 0;   // same as Node > Remove checked offline nodes
         case IDC_CMD_SHUTDOWN_NODE: shutdownChecked(); return 0;
         case IDC_CMD_ABORT_SHUTDOWN: sendPower("abort"); return 0;
         case IDC_FLAG_WOL: case IDC_FLAG_BOOT: case IDC_FLAG_AUTOLOGIN: case IDC_FLAG_AUTOROD: case IDC_FLAG_AUTOLIGHTNING:
@@ -2828,7 +2839,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show)
     RegisterClassW(&wc);
 
     g_main = CreateWindowExW(0, L"ThunderheadMain", L"Thunderhead " TLR_VERSION_WSTRING,
-                             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 1500, 760, NULL, NULL, inst, NULL);
+                             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 1500, 796, NULL, NULL, inst, NULL);
     if (!g_main) return 1;
     createChildren(inst);
     layout();

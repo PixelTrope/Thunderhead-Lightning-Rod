@@ -346,8 +346,9 @@ public:
         status_.info = info_;
         logLine(format("Lightning Rod %s starting: %s mac=%s ip=%s", TLR_VERSION_STRING,
                        info_.name.c_str(), info_.mac.c_str(), info_.ip.c_str()));
-        logLine(format("os=%s cpu=%s %d MHz cores=%d mem=%d MB usable, %d MB installed disk=%d MB board=%s chipset=%s gpu=%s vram=%d MB",
-                       info_.os.c_str(), info_.cpu.c_str(), info_.cpuMhz, info_.cores, info_.memMb, info_.memInstalledMb, info_.diskTotalMb,
+        logLine(format("os=%s cpu=%s %d MHz cores=%d mem=%d MB usable, %d MB installed, type %s disk=%d MB board=%s chipset=%s gpu=%s vram=%d MB",
+                       info_.os.c_str(), info_.cpu.c_str(), info_.cpuMhz, info_.cores, info_.memMb, info_.memInstalledMb,
+                       info_.memType.empty() ? "n/a" : info_.memType.c_str(), info_.diskTotalMb,
                        info_.board.c_str(), info_.chipset.c_str(), info_.gpu.c_str(), info_.vramMb));
         udp_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         if (udp_ == INVALID_SOCKET) { logLine("udp socket failed"); return false; }
@@ -524,6 +525,7 @@ private:
         m.set("cores", (long long)info_.cores);
         m.set("mem_mb", (long long)info_.memMb);
         m.set("mem_installed_mb", (long long)info_.memInstalledMb);
+        m.set("mem_type", info_.memType);
         m.set("disk_total_mb", (long long)info_.diskTotalMb);
         m.set("board", info_.board);
         m.set("chipset", info_.chipset);
@@ -1015,6 +1017,7 @@ void refreshAll()
     setRow(row++, L"Cores",               widen(format("%d", i.cores)));
     setRow(row++, L"Memory usable MB",    widen(format("%d", i.memMb)));
     setRow(row++, L"Memory installed MB", i.memInstalledMb > 0 ? widen(format("%d", i.memInstalledMb)) : std::wstring(L"n/a"));
+    setRow(row++, L"Memory type",         i.memType.empty() ? std::wstring(L"n/a") : widen(i.memType));
     setRow(row++, L"C: MB",               widen(format("%d", i.diskTotalMb)));
     setRow(row++, L"Board",               widen(i.board));
     setRow(row++, L"Chipset",             widen(i.chipset));

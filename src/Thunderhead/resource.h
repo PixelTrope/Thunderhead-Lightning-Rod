@@ -53,7 +53,8 @@
 #define IDC_CMD_NETPING         3026
 #define IDC_CMD_MUTE            3027
 #define IDC_CMD_UNMUTE          3028
-#define IDC_CMD_LAST            3028
+#define IDC_CMD_REMOVE_OFFLINE  3029
+#define IDC_CMD_LAST            3029
 
 // rename dialog
 #define IDC_RENAME_INFO         2301

@@ -4,6 +4,9 @@
 #include "StrUtil.h"
 
 #include <iphlpapi.h>
+#include <objbase.h>
+#include <wbemidl.h>
+#include <oleauto.h>
 #include <cstdio>
 #include <cstring>
 
@@ -137,9 +140,85 @@ static std::string osDescription()
     return out;
 }
 
-// ---------------------------------------------------------------- SMBIOS baseboard
+// ---------------------------------------------------------------- SMBIOS
 
 typedef UINT (WINAPI *GetSystemFirmwareTableFn)(DWORD, DWORD, PVOID, DWORD);
+
+// The raw SMBIOS structure table, without the RawSMBIOSData header: from
+// GetSystemFirmwareTable on Vista and later, else from the WMI class
+// MSSmBios_RawSMBiosTables in ROOT\WMI, which is how XP exposes the same bytes.
+// Empty when neither answers. COM is initialised by the agent thread.
+static std::vector<BYTE> smbiosTable()
+{
+    std::vector<BYTE> out;
+    GetSystemFirmwareTableFn fn = (GetSystemFirmwareTableFn)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetSystemFirmwareTable");
+    if (fn) {
+        const DWORD sig = 'RSMB';
+        UINT size = fn(sig, 0, NULL, 0);
+        if (size > 8) {
+            std::vector<BYTE> buf(size);
+            if (fn(sig, 0, &buf[0], size) == size) out.assign(buf.begin() + 8, buf.end());
+        }
+        return out;
+    }
+    IWbemLocator* locator = NULL;
+    if (FAILED(CoCreateInstance(CLSID_WbemLocator, NULL, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (void**)&locator))) return out;
+    IWbemServices* services = NULL;
+    BSTR ns = SysAllocString(L"ROOT\\WMI");
+    HRESULT hr = locator->ConnectServer(ns, NULL, NULL, NULL, 0, NULL, NULL, &services);
+    SysFreeString(ns);
+    locator->Release();
+    if (FAILED(hr)) return out;
+    CoSetProxyBlanket(services, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, NULL, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE);
+    BSTR lang = SysAllocString(L"WQL");
+    BSTR query = SysAllocString(L"SELECT SMBiosData FROM MSSmBios_RawSMBiosTables");
+    IEnumWbemClassObject* en = NULL;
+    hr = services->ExecQuery(lang, query, WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &en);
+    SysFreeString(query);
+    SysFreeString(lang);
+    if (SUCCEEDED(hr)) {
+        IWbemClassObject* obj = NULL;
+        ULONG got = 0;
+        if (en->Next(WBEM_INFINITE, 1, &obj, &got) == S_OK && got == 1) {
+            VARIANT v;
+            VariantInit(&v);
+            if (SUCCEEDED(obj->Get(L"SMBiosData", 0, &v, NULL, NULL)) && v.vt == (VT_ARRAY | VT_UI1) && v.parray) {
+                BYTE* data = NULL;
+                if (SUCCEEDED(SafeArrayAccessData(v.parray, (void**)&data))) {
+                    LONG lo = 0, hi = -1;
+                    SafeArrayGetLBound(v.parray, 1, &lo);
+                    SafeArrayGetUBound(v.parray, 1, &hi);
+                    if (hi >= lo) out.assign(data, data + (hi - lo + 1));
+                    SafeArrayUnaccessData(v.parray);
+                }
+            }
+            VariantClear(&v);
+            obj->Release();
+        }
+        en->Release();
+    }
+    services->Release();
+    return out;
+}
+
+// SMBIOS type 17 (Memory Device) memory type codes, specification 3.6.
+static std::string memoryTypeName(BYTE code)
+{
+    switch (code) {
+    case 0x01: return "Other";      case 0x02: return "Unknown";    case 0x03: return "DRAM";
+    case 0x04: return "EDRAM";      case 0x05: return "VRAM";       case 0x06: return "SRAM";
+    case 0x07: return "RAM";        case 0x08: return "ROM";        case 0x09: return "Flash";
+    case 0x0A: return "EEPROM";     case 0x0B: return "FEPROM";     case 0x0C: return "EPROM";
+    case 0x0D: return "CDRAM";      case 0x0E: return "3DRAM";      case 0x0F: return "SDRAM";
+    case 0x10: return "SGRAM";      case 0x11: return "RDRAM";      case 0x12: return "DDR";
+    case 0x13: return "DDR2";       case 0x14: return "DDR2 FB-DIMM"; case 0x18: return "DDR3";
+    case 0x19: return "FBD2";       case 0x1A: return "DDR4";       case 0x1B: return "LPDDR";
+    case 0x1C: return "LPDDR2";     case 0x1D: return "LPDDR3";     case 0x1E: return "LPDDR4";
+    case 0x1F: return "Logical non-volatile"; case 0x20: return "HBM"; case 0x21: return "HBM2";
+    case 0x22: return "DDR5";       case 0x23: return "LPDDR5";     case 0x24: return "HBM3";
+    default: return format("type 0x%02X", code);
+    }
+}
 
 static std::string smbiosString(const BYTE* strings, const BYTE* end, int index)
 {
@@ -154,18 +233,20 @@ static std::string smbiosString(const BYTE* strings, const BYTE* end, int index)
     return std::string();
 }
 
-static std::string baseboardFromSmbios()
+// One pass over the table: type 2 (baseboard) gives maker and product; type 17
+// (memory device) gives, for every slot with a module in it, the memory type
+// and size. memType lists the distinct types of the fitted modules, "/" between
+// them when they differ; installedMb is their sizes summed. Both stay empty or
+// 0 when the table has no such records.
+struct SmbiosInfo { std::string board; std::string memType; int installedMb; SmbiosInfo() : installedMb(0) {} };
+
+static SmbiosInfo parseSmbios(const std::vector<BYTE>& table)
 {
-    GetSystemFirmwareTableFn fn = (GetSystemFirmwareTableFn)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetSystemFirmwareTable");
-    if (!fn) return std::string();
-    const DWORD sig = 'RSMB';
-    UINT size = fn(sig, 0, NULL, 0);
-    if (size == 0) return std::string();
-    std::vector<BYTE> buf(size);
-    if (fn(sig, 0, &buf[0], size) != size) return std::string();
-    if (size < 8) return std::string();
-    const BYTE* p = &buf[8];              // skip RawSMBIOSData header
-    const BYTE* end = &buf[0] + size;
+    SmbiosInfo info;
+    if (table.empty()) return info;
+    std::vector<std::string> types;
+    const BYTE* p = &table[0];
+    const BYTE* end = p + table.size();
     while (p + 4 <= end) {
         BYTE type = p[0], len = p[1];
         if (len < 4) break;
@@ -173,22 +254,36 @@ static std::string baseboardFromSmbios()
         const BYTE* q = strings;
         while (q + 1 < end && !(q[0] == 0 && q[1] == 0)) ++q;
         const BYTE* next = q + 2;
-        if (type == 2 && len >= 6) {
+        if (type == 2 && len >= 6 && info.board.empty()) {
             std::string maker = smbiosString(strings, end, p[4]);
             std::string product = smbiosString(strings, end, p[5]);
-            std::string out = maker;
-            if (!product.empty()) out += (out.empty() ? "" : " ") + product;
-            return out;
+            info.board = maker;
+            if (!product.empty()) info.board += (info.board.empty() ? "" : " ") + product;
+        } else if (type == 17 && len >= 0x13) {
+            unsigned size = p[0x0C] | (p[0x0D] << 8);      // 0: slot empty; 0xFFFF: unknown; bit 15: in KB
+            if (size != 0) {
+                std::string name = memoryTypeName(p[0x12]);
+                bool seen = false;
+                for (size_t i = 0; i < types.size(); ++i) if (types[i] == name) seen = true;
+                if (!seen) types.push_back(name);
+                if (size == 0x7FFF && len >= 0x20) info.installedMb += (int)(*(const DWORD*)(p + 0x1C) & 0x7FFFFFFF);
+                else if (size != 0xFFFF) info.installedMb += (size & 0x8000) ? (int)((size & 0x7FFF) / 1024) : (int)size;
+            }
         }
         if (type == 127) break;
         p = next;
     }
-    return std::string();
+    // Other and Unknown only matter when they are all the firmware offers.
+    std::string known;
+    for (size_t i = 0; i < types.size(); ++i)
+        if (types[i] != "Other" && types[i] != "Unknown") known += (known.empty() ? "" : "/") + types[i];
+    info.memType = !known.empty() ? known : (types.empty() ? std::string() : std::string("Unknown"));
+    return info;
 }
 
-static std::string baseboard()
+static std::string baseboard(const std::string& fromSmbios)
 {
-    std::string out = baseboardFromSmbios();
+    std::string out = fromSmbios;
     if (!out.empty()) return out;
     const wchar_t* key = L"HARDWARE\\DESCRIPTION\\System\\BIOS";
     std::string maker = regString(HKEY_LOCAL_MACHINE, key, L"BaseBoardManufacturer");
@@ -332,7 +427,10 @@ StaticInfo collectStatic()
     ULARGE_INTEGER freeBytes, totalBytes;
     if (GetDiskFreeSpaceExW(L"C:\\", &freeBytes, &totalBytes, NULL)) s.diskTotalMb = (int)(totalBytes.QuadPart / (1024 * 1024));
 
-    s.board = baseboard();
+    SmbiosInfo bios = parseSmbios(smbiosTable());
+    if (s.memInstalledMb == 0) s.memInstalledMb = bios.installedMb;    // XP: summed from the memory device records
+    s.memType = bios.memType;
+    s.board = baseboard(bios.board);
     s.chipset = chipset();
     displayAdapter(s.gpu, s.vramMb);
     return s;

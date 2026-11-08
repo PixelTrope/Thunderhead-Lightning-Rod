@@ -16,7 +16,8 @@ struct StaticInfo {
     int cpuMhz;
     int cores;              // logical processors
     int memMb;              // usable: physical memory the OS can address
-    int memInstalledMb;     // fitted, from the firmware's SMBIOS tables; 0 when the OS cannot tell (XP)
+    int memInstalledMb;     // fitted, from the firmware's SMBIOS tables; 0 when the firmware gives none
+    std::string memType;    // DDR3, DDR4 ... from the SMBIOS memory device records; empty when the firmware gives none
     int diskTotalMb;        // size of C:
     std::string board;      // baseboard manufacturer and product
     std::string chipset;    // host bridge description
