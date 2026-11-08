@@ -2477,17 +2477,35 @@ void layoutStaticPane()
     SendMessageW(g_staticList, LVM_SETCOLUMNWIDTH, 1, (LPARAM)valueWidth);
 }
 
+// Command buttons: as many 200 px columns as the pane's width holds (200 px
+// fits the longest label), widened to share the width, in as many rows as
+// the count needs. The pane's height is set from commandPaneHeight() so that
+// every row is visible; the details pane above it takes what is left.
+const int kCmdMargin = 8, kCmdGap = 6, kCmdMinWidth = 200, kCmdHeight = 30;
+
+int commandColumns(int width)
+{
+    int perRow = (width - 2 * kCmdMargin + kCmdGap) / (kCmdMinWidth + kCmdGap);
+    return perRow < 1 ? 1 : perRow;
+}
+
+int commandPaneHeight(int width)
+{
+    int rows = (kCommandCount + commandColumns(width) - 1) / commandColumns(width);
+    return 2 * kCmdMargin + rows * (kCmdHeight + kCmdGap) - kCmdGap;
+}
+
 void layoutCommandPane()
 {
     RECT rc;
     GetClientRect(g_commandPane, &rc);
-    const int margin = 8, gap = 6, bw = 200, bh = 30;   // wide enough for the longest label
-    int perRow = (rc.right - 2 * margin + gap) / (bw + gap);
-    if (perRow < 1) perRow = 1;
+    int perRow = commandColumns(rc.right);
+    int bw = (rc.right - 2 * kCmdMargin - (perRow - 1) * kCmdGap) / perRow;
+    if (bw < kCmdMinWidth) bw = kCmdMinWidth;
     for (int i = 0; i < kCommandCount; ++i) {
-        int x = margin + (i % perRow) * (bw + gap);
-        int y = margin + (i / perRow) * (bh + gap);
-        MoveWindow(GetDlgItem(g_commandPane, kCommands[i].id), x, y, bw, bh, TRUE);
+        int x = kCmdMargin + (i % perRow) * (bw + kCmdGap);
+        int y = kCmdMargin + (i / perRow) * (kCmdHeight + kCmdGap);
+        MoveWindow(GetDlgItem(g_commandPane, kCommands[i].id), x, y, bw, kCmdHeight, TRUE);
     }
 }
 
@@ -2500,8 +2518,13 @@ void layout()
     RECT sb;
     GetWindowRect(g_status, &sb);
     int height = rc.bottom - (sb.bottom - sb.top);
-    int left = rc.right / 2;
-    int top = height / 2;
+    // Client Inventory: two thirds of the width; details above the command
+    // buttons in the remaining third. The command pane is as tall as its rows
+    // need, the details pane keeps at least kDetailsMinHeight.
+    const int kDetailsMinHeight = 160;
+    int left = rc.right * 2 / 3;
+    int top = height - commandPaneHeight(rc.right - left);
+    if (top < kDetailsMinHeight) top = kDetailsMinHeight;
     MoveWindow(g_inventoryPane, 0, 0, left, height, TRUE);
     MoveWindow(g_staticPane, left, 0, rc.right - left, top, TRUE);
     MoveWindow(g_commandPane, left, top, rc.right - left, height - top, TRUE);
