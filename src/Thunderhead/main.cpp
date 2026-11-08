@@ -21,6 +21,7 @@
 #include <commctrl.h>
 #include <shellapi.h>
 #include <shobjidl.h>
+#include <shlobj.h>
 #include <winnetwk.h>
 #include <iphlpapi.h>
 #include <icmpapi.h>
@@ -2055,31 +2056,241 @@ struct CopyJob {
     std::vector<std::pair<std::string, std::wstring> > targets; // client name, \\NAME\<share>
 };
 
-// One Windows shell copy per client, so the usual progress window and the
-// overwrite and permission prompts appear exactly as they do in Explorer.
-// Runs on its own thread because an unreachable client can take a minute.
+// The copy progress window: Thunderhead's own, because the Windows shell
+// dialogs (SHFileOperation, IFileOperation, IProgressDialog) all hold their
+// window back for about a second so that a short copy shows nothing at all,
+// and most copies to a client share are short. This one appears as soon as
+// the copy starts, follows the bytes of every file, and stays with the result
+// until closed. It lives on the copy thread, which pumps its messages from
+// the CopyFileEx callback and between files.
+struct CopyProgress {
+    HWND wnd, client, file, bar, bytes, button;
+    ULONGLONG total;       // bytes over the whole job, all clients
+    ULONGLONG done;        // bytes of the files finished so far
+    ULONGLONG fileBase;    // done at the start of the current file
+    bool cancelled;
+    bool finished;         // the button then reads Close
+    CopyProgress() : wnd(NULL), client(NULL), file(NULL), bar(NULL), bytes(NULL), button(NULL),
+                     total(0), done(0), fileBase(0), cancelled(false), finished(false) {}
+};
+
+static std::string byteText(ULONGLONG bytes)
+{
+    if (bytes >= 1024ULL * 1024 * 1024) return format("%.2f GB", bytes / (1024.0 * 1024 * 1024));
+    if (bytes >= 1024ULL * 1024) return format("%.1f MB", bytes / (1024.0 * 1024));
+    return format("%u KB", (unsigned)((bytes + 1023) / 1024));
+}
+
+static LRESULT CALLBACK copyProgressProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    CopyProgress* cp = (CopyProgress*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    switch (msg) {
+    case WM_CREATE: SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)((CREATESTRUCTW*)lp)->lpCreateParams); return 0;
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDCANCEL && cp) {
+            if (cp->finished) DestroyWindow(hwnd);
+            else if (!cp->cancelled) { cp->cancelled = true; SetWindowTextW(cp->file, L"Stopping after the current file..."); EnableWindow(cp->button, FALSE); }
+        }
+        return 0;
+    case WM_CLOSE: SendMessageW(hwnd, WM_COMMAND, IDCANCEL, 0); return 0;
+    case WM_DESTROY: PostQuitMessage(0); return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void copyProgressPump(CopyProgress& cp)
+{
+    MSG m;
+    while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE)) {
+        if (m.message == WM_QUIT) { PostQuitMessage((int)m.wParam); return; }
+        if (!cp.wnd || !IsDialogMessageW(cp.wnd, &m)) { TranslateMessage(&m); DispatchMessageW(&m); }
+    }
+}
+
+static void copyProgressShowBytes(CopyProgress& cp, ULONGLONG at)
+{
+    if (!cp.wnd) return;
+    ULONGLONG total = cp.total ? cp.total : 1;
+    if (at > total) at = total;
+    SendMessageW(cp.bar, PBM_SETPOS, (WPARAM)(at * 1000 / total), 0);
+    SetWindowTextW(cp.bytes, widen(format("%s of %s (%u%%)", byteText(at).c_str(), byteText(cp.total).c_str(), (unsigned)(at * 100 / total))).c_str());
+}
+
+static void copyProgressOpen(CopyProgress& cp)
+{
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSW wc;
+        memset(&wc, 0, sizeof(wc));
+        wc.lpfnWndProc = copyProgressProc;
+        wc.hInstance = g_inst;
+        wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_3DFACE + 1);
+        wc.lpszClassName = L"ThunderheadCopyProgress";
+        registered = RegisterClassW(&wc) != 0;
+    }
+    const int w = 520, h = 190, margin = 12, line = 20;
+    RECT owner;
+    GetWindowRect(g_main, &owner);
+    int x = owner.left + ((owner.right - owner.left) - w) / 2, y = owner.top + ((owner.bottom - owner.top) - h) / 2;
+    cp.wnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"ThunderheadCopyProgress", L"Copy files or folder to Client",
+                             WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, w, h, g_main, NULL, g_inst, &cp);
+    if (!cp.wnd) return;
+    RECT rc;
+    GetClientRect(cp.wnd, &rc);
+    int cw = rc.right - 2 * margin, cy = margin;
+    cp.client = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_ENDELLIPSIS, margin, cy, cw, line, cp.wnd, NULL, g_inst, NULL); cy += line + 4;
+    cp.file = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_PATHELLIPSIS, margin, cy, cw, line, cp.wnd, NULL, g_inst, NULL); cy += line + 6;
+    cp.bar = CreateWindowExW(0, PROGRESS_CLASSW, NULL, WS_CHILD | WS_VISIBLE | PBS_SMOOTH, margin, cy, cw, 18, cp.wnd, NULL, g_inst, NULL); cy += 18 + 6;
+    cp.bytes = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT, margin, cy, cw, line, cp.wnd, NULL, g_inst, NULL); cy += line + 8;
+    cp.button = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, rc.right - margin - 90, rc.bottom - margin - 26, 90, 26, cp.wnd, (HMENU)IDCANCEL, g_inst, NULL);
+    SendMessageW(cp.bar, PBM_SETRANGE32, 0, 1000);
+    HWND texts[] = { cp.client, cp.file, cp.bytes, cp.button };
+    for (int i = 0; i < 4; ++i) SendMessageW(texts[i], WM_SETFONT, (WPARAM)g_font, TRUE);
+    copyProgressShowBytes(cp, 0);
+    ShowWindow(cp.wnd, SW_SHOWNORMAL);
+    UpdateWindow(cp.wnd);
+    copyProgressPump(cp);
+}
+
+static DWORD CALLBACK copyProgressRoutine(LARGE_INTEGER, LARGE_INTEGER transferred, LARGE_INTEGER, LARGE_INTEGER,
+                                          DWORD, DWORD, HANDLE, HANDLE, LPVOID data)
+{
+    CopyProgress* cp = (CopyProgress*)data;
+    copyProgressShowBytes(*cp, cp->fileBase + (ULONGLONG)transferred.QuadPart);
+    copyProgressPump(*cp);
+    return cp->cancelled ? PROGRESS_CANCEL : PROGRESS_CONTINUE;
+}
+
+static std::wstring leafName(std::wstring path)
+{
+    while (path.size() > 1 && path[path.size() - 1] == L'\\') path.erase(path.size() - 1);
+    size_t cut = path.find_last_of(L"\\/");
+    return cut == std::wstring::npos ? path : path.substr(cut + 1);
+}
+
+static bool isDot(const wchar_t* name) { return wcscmp(name, L".") == 0 || wcscmp(name, L"..") == 0; }
+
+// Bytes in a file, or in every file under a folder.
+static ULONGLONG treeSize(const std::wstring& path)
+{
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fa)) return 0;
+    if (!(fa.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) return ((ULONGLONG)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
+    ULONGLONG sum = 0;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((path + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do { if (!isDot(fd.cFileName)) sum += treeSize(path + L"\\" + fd.cFileName); } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return sum;
+}
+
+// Copies the file or folder src into destDir as destDir<leaf>, folders
+// recursively, existing files overwritten, each file through CopyFileEx so
+// that the window follows the bytes. Stops at the first failure (err set) or
+// when the user has cancelled.
+static bool copyTree(const std::wstring& src, const std::wstring& destDir, CopyProgress& cp, std::string& err, unsigned& files)
+{
+    std::wstring dest = destDir + leafName(src);
+    DWORD attr = GetFileAttributesW(src.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES) { err = narrow(src) + " not found"; return false; }
+    if (attr & FILE_ATTRIBUTE_DIRECTORY) {
+        if (!CreateDirectoryW(dest.c_str(), NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
+            err = "cannot create " + narrow(dest) + ": " + lastErrorText((int)GetLastError());
+            return false;
+        }
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((src + L"\\*").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) return true;
+        bool ok = true;
+        do { if (!isDot(fd.cFileName)) ok = copyTree(src + L"\\" + fd.cFileName, dest + L"\\", cp, err, files); }
+        while (ok && !cp.cancelled && FindNextFileW(h, &fd));
+        FindClose(h);
+        return ok;
+    }
+    if (cp.wnd) SetWindowTextW(cp.file, dest.c_str());
+    cp.fileBase = cp.done;
+    ULONGLONG size = treeSize(src);
+    copyProgressPump(cp);
+    if (cp.cancelled) return false;
+    BOOL cancel = FALSE;
+    if (!CopyFileExW(src.c_str(), dest.c_str(), copyProgressRoutine, &cp, &cancel, 0)) {
+        DWORD e = GetLastError();
+        if (cp.cancelled || e == ERROR_REQUEST_ABORTED) { cp.cancelled = true; return false; }
+        err = narrow(leafName(src)) + ": " + lastErrorText((int)e);
+        return false;
+    }
+    cp.done += size;
+    ++files;
+    return true;
+}
+
+// One progress window over the whole job: the first line names the client,
+// the second the file being written, the bar counts bytes over every client,
+// Cancel stops after the current file, and the result stays on screen until
+// Close. A share that refuses the connection gets the standard credential
+// prompt once. Runs on its own thread because an unreachable client can take
+// a minute; the main window keeps running.
 DWORD WINAPI copyToClientsThread(LPVOID param)
 {
     CopyJob* job = (CopyJob*)param;
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-    std::wstring from;
-    for (size_t i = 0; i < job->sources.size(); ++i) { from += job->sources[i]; from.push_back(L'\0'); }
-    from.push_back(L'\0');
-    for (size_t i = 0; i < job->targets.size(); ++i) {
+    CopyProgress cp;
+    ULONGLONG perClient = 0;
+    for (size_t k = 0; k < job->sources.size(); ++k) perClient += treeSize(job->sources[k]);
+    cp.total = perClient * job->targets.size();
+    copyProgressOpen(cp);
+    unsigned clientsDone = 0, clientsFailed = 0, filesAll = 0;
+    ULONGLONG bytesAll = 0;
+    std::string lastError;
+    for (size_t i = 0; i < job->targets.size() && !cp.cancelled; ++i) {
         const std::string& name = job->targets[i].first;
         std::wstring to = job->targets[i].second;
-        to.push_back(L'\0');
-        to.push_back(L'\0');
-        SHFILEOPSTRUCTW op;
-        memset(&op, 0, sizeof(op));
-        op.wFunc = FO_COPY;
-        op.pFrom = from.c_str();
-        op.pTo = to.c_str();
-        op.fFlags = FOF_NOCONFIRMMKDIR;
-        int r = SHFileOperationW(&op);
-        if (r == 0 && !op.fAnyOperationsAborted) logEvent(format("copied %u item(s) to %s", (unsigned)job->sources.size(), name.c_str()));
-        else if (op.fAnyOperationsAborted) logEvent(format("copy to %s cancelled", name.c_str()));
-        else logEvent(format("copy to %s failed (shell error %d)", name.c_str(), r));
+        if (to.empty() || to[to.size() - 1] != L'\\') to += L'\\';
+        if (cp.wnd) {
+            SetWindowTextW(cp.client, widen(format("Client %s (%u of %u): %s", name.c_str(), (unsigned)i + 1, (unsigned)job->targets.size(), narrow(to).c_str())).c_str());
+            SetWindowTextW(cp.file, L"Connecting...");
+            copyProgressPump(cp);
+        }
+        // The share must answer before anything is copied; a refusal gets the credential prompt.
+        if (GetFileAttributesW(to.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            DWORD e = GetLastError();
+            if (e == ERROR_ACCESS_DENIED || e == ERROR_LOGON_FAILURE || e == ERROR_INVALID_PASSWORD || e == ERROR_SESSION_CREDENTIAL_CONFLICT)
+                e = promptShareCredentials(cp.wnd ? cp.wnd : g_main, to) == NO_ERROR && GetFileAttributesW(to.c_str()) != INVALID_FILE_ATTRIBUTES ? NO_ERROR : GetLastError();
+            if (e != NO_ERROR) {
+                lastError = format("%s is not reachable (%s)", narrow(to).c_str(), lastErrorText((int)e).c_str());
+                logEvent(format("copy to %s failed: %s", name.c_str(), lastError.c_str()));
+                ++clientsFailed;
+                cp.done += perClient;
+                copyProgressShowBytes(cp, cp.done);
+                continue;
+            }
+        }
+        std::string err;
+        unsigned files = 0;
+        ULONGLONG before = cp.done;
+        bool ok = true;
+        for (size_t k = 0; k < job->sources.size() && ok; ++k) ok = copyTree(job->sources[k], to, cp, err, files);
+        filesAll += files;
+        bytesAll += cp.done - before;
+        if (cp.cancelled) logEvent(format("copy to %s cancelled after %u file(s), %s", name.c_str(), files, byteText(cp.done - before).c_str()));
+        else if (ok) { logEvent(format("copied %u file(s), %s, to %s", files, byteText(cp.done - before).c_str(), name.c_str())); ++clientsDone; }
+        else { lastError = err; logEvent(format("copy to %s failed after %u file(s): %s", name.c_str(), files, err.c_str())); ++clientsFailed; }
+        if (!ok && !cp.cancelled) { cp.done = before + perClient; copyProgressShowBytes(cp, cp.done); }
+    }
+    if (cp.wnd) {
+        cp.finished = true;
+        std::string head = cp.cancelled ? "Cancelled" : clientsFailed ? format("Finished with %u failure(s)", clientsFailed) : "Finished";
+        SetWindowTextW(cp.client, widen(format("%s: %u file(s), %s, copied to %u of %u client(s)", head.c_str(), filesAll, byteText(bytesAll).c_str(),
+                                              clientsDone, (unsigned)job->targets.size())).c_str());
+        SetWindowTextW(cp.file, widen(lastError.empty() ? std::string(cp.cancelled ? "Stopped at your request." : "The event log lists every client.") : "Last error: " + lastError).c_str());
+        if (!cp.cancelled && !clientsFailed) copyProgressShowBytes(cp, cp.total);
+        SetWindowTextW(cp.button, L"Close");
+        EnableWindow(cp.button, TRUE);
+        SetFocus(cp.button);
+        MSG m;
+        while (GetMessageW(&m, NULL, 0, 0) > 0) { if (!IsDialogMessageW(cp.wnd, &m)) { TranslateMessage(&m); DispatchMessageW(&m); } }
     }
     CoUninitialize();
     delete job;

@@ -230,8 +230,13 @@ running time, and every value it has sent, refreshed at each report; closing
 the window stops the agent. *Open Client's Shared Folder* in Thunderhead opens
 `\\NAME\<share_name>\` of every checked client in Windows Explorer. *Copy files or
 folder to Client* asks for files or one folder, then copies the selection to that
-folder on every checked client with the Windows shell copy, one client after
-another, so the usual progress window and overwrite prompts appear.
+folder on every checked client, one client after another, in a progress window
+of Thunderhead's own that opens the moment the copy starts (the Windows shell
+copy holds its window back for about a second, which is longer than most copies
+to a share take): the client being written, the file being written, a bar over
+the bytes of the whole job, Cancel, and at the end the result, which stays until
+Close. Existing files are overwritten; a share that refuses the connection gets
+the standard credential prompt once; the event log has one line per client.
 
 ## Agent update
 
