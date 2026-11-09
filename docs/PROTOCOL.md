@@ -241,8 +241,8 @@ the standard credential prompt once; the event log has one line per client.
 ## Agent update
 
 Thunderhead reads the version resource of the agent file it has to push.
-*Check outdated* checks every online client whose reported `agent` version is
-lower. *Update checked* updates each checked online client; the client is
+*Check Outdated* checks every online client whose reported `agent` version is
+lower. *Update Checked* updates each checked online client; the client is
 shown as Updating until its new agent connects.
 
 Thunderhead first copies the agent file to
@@ -282,7 +282,7 @@ the XP nodes need SMB1 on the host or another transfer method, to be decided.
 
 ## Rename and reboot
 
-*Rename node* in Thunderhead opens one dialog per checked online client, showing
+*Rename Node* in Thunderhead opens one dialog per checked online client, showing
 its current name, MAC and IP so that freshly cloned nodes with the same name can
 be told apart, with the new name (1 to 15 characters, letters, digits and
 hyphens, not all digits) and a *reboot after rename* option. On a successful
@@ -354,7 +354,7 @@ the others, with only its taskbar button to show for it. For both the agent
 finds the window by its title, whatever hosts it (the classic console host or
 Windows Terminal), and looks for it for 30 s. Agents 0.2.7 and 0.2.8 ignore
 both fields. The current directory is the agent's folder (the
-shared one, where *Copy files or folder to Client* puts files) and the batch
+shared one, where *Copy Files or Folder to Client* puts files) and the batch
 file has the rights the agent has. The output is not recorded; a batch file
 whose output is wanted on the host redirects it itself, for example to a file
 in the shared folder. The batch file stays in the `batch` folder, which *Open
@@ -427,7 +427,7 @@ whose agent is not running.
 ## Log viewers
 
 *View Local Log* opens the current Thunderhead event log,
-`logs\thunderhead-YYYY-MM-DD.log`, in a window of its own. *View Remote Log(s)*
+`logs\thunderhead-YYYY-MM-DD.log`, in a window of its own. *View Remote Log*
 opens one window per checked client with the agent's own log, which the agent
 writes as `LightningRod-YYYY-MM-DD.log` beside itself, in the root of the
 node's share: Thunderhead reads `\\IP\<share_name>\` under the address the

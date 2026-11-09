@@ -90,38 +90,55 @@ const ColumnDef kColumns[ColCount] = {
 
 // ---------------------------------------------------------------- command buttons
 
-struct CommandDef { int id; const wchar_t* label; const char* verb; bool live; };
+// The buttons sit in groups that mirror the Control menu, in the same order,
+// each group on its own rows with a tint of its own on the buttons and the
+// band behind them, so that the groups read without captions.
+struct CommandGroup { const wchar_t* name; COLORREF band; COLORREF face; };
+
+const CommandGroup kGroups[] = {
+    { L"Thunderhead Control",  RGB(230, 233, 238), RGB(204, 212, 224) },
+    { L"List Control",         RGB(228, 240, 228), RGB(196, 224, 196) },
+    { L"Node Control",         RGB(226, 234, 246), RGB(190, 212, 240) },
+    { L"LightningRod Control", RGB(246, 238, 222), RGB(238, 220, 180) },
+    { L"Audio Control",        RGB(238, 230, 244), RGB(220, 204, 236) },
+    { L"Render Control",       RGB(246, 228, 226), RGB(238, 200, 194) },
+};
+enum { GroupThunderhead, GroupList, GroupNode, GroupRod, GroupAudio, GroupRender, kGroupCount };
+
+struct CommandDef { int id; const wchar_t* label; const char* verb; bool live; int group; };
 
 const CommandDef kCommands[] = {
-    { IDC_CMD_START71,       L"Start Lightning 7.1", "START",   true  },
-    { IDC_CMD_STOP,          L"Stop Lightning",      "STOP",    true  },
-    { IDC_CMD_PING,          L"Lightning Rod Ping",  NULL,      true  },
-    { IDC_CMD_NETPING,       L"Network Ping",        NULL,      true  },
-    { IDC_CMD_RESTART_LR,    L"Restart LR",          "RESTART", true  },
-    { IDC_CMD_EXIT_LR,       L"Exit LR",             "EXIT",    true  },
-    { IDC_CMD_CHECK_ALL,     L"Check All (Ctrl-A)",  NULL,      true  },
-    { IDC_CMD_CHECK_NONE,    L"Check None (Ctrl-D)", NULL,      true  },
-    { IDC_CMD_CHECK_OUTDATED, L"Check outdated",     NULL,      true  },
-    { IDC_CMD_UPDATE,        L"Update checked",      NULL,      true  },
-    { IDC_CMD_RENAME,        L"Rename node",         NULL,      true  },
-    { IDC_CMD_SHUTDOWN_NODE, L"Shutdown Node",       NULL,      true  },
-    { IDC_CMD_ABORT_SHUTDOWN, L"Abort Shutdown",     NULL,      true  },
-    { IDC_CMD_OPEN_SHARE,    L"Open Client's Shared Folder", NULL, true },
-    { IDC_CMD_COPY,          L"Copy files or folder to Client", NULL, true },
-    { IDC_CMD_PRIORITY,      L"Change Render Priority", NULL, true },
-    { IDC_CMD_BATCH,         L"Run Remote Batch File", NULL, true },
-    { IDC_CMD_WOL,           L"Send Wake On LAN Magic Packet", NULL, true },
-    { IDC_CMD_VIEW_LOCAL_LOG, L"View Local Log",     NULL,      true  },
-    { IDC_CMD_VIEW_REMOTE_LOG, L"View Remote Log(s)", NULL,     true  },
-    { IDC_CMD_SET_TIME,      L"Set Client Date and Time", NULL, true  },
-    { IDC_CMD_MUTE,          L"Mute Checked Clients", NULL,     true  },
-    { IDC_CMD_UNMUTE,        L"Unmute Checked Clients", NULL,   true  },
-    { IDC_CMD_REMOVE_OFFLINE, L"Remove Checked Offline Clients", NULL, true },
-    { IDC_CMD_START61,       L"Start Lightning 6.1", NULL,      false },
-    { IDC_CMD_START63,       L"Start Lightning 6.3", NULL,      false },
-    { IDC_CMD_START_TV,      L"Start TeamViewer",    NULL,      false },
-    { IDC_CMD_MESSAGE,       L"Display message",     NULL,      false },
-    { IDC_CMD_SOUND,         L"Play sound",          NULL,      false },
+    { IDC_CMD_VIEW_LOCAL_LOG,  L"View Local Log",                 NULL,      true,  GroupThunderhead },
+    { IDC_CMD_SETTINGS,        L"Settings",                       NULL,      true,  GroupThunderhead },
+    { IDC_CMD_CHECK_ALL,       L"Check All (Ctrl-A)",             NULL,      true,  GroupList },
+    { IDC_CMD_CHECK_NONE,      L"Check None (Ctrl-D)",            NULL,      true,  GroupList },
+    { IDC_CMD_CHECK_OUTDATED,  L"Check Outdated",                 NULL,      true,  GroupList },
+    { IDC_CMD_OPEN_SHARE,      L"Open Client's Shared Folder",    NULL,      true,  GroupNode },
+    { IDC_CMD_COPY,            L"Copy Files or Folder to Client", NULL,      true,  GroupNode },
+    { IDC_CMD_BATCH,           L"Run Remote Batch File",          NULL,      true,  GroupNode },
+    { IDC_CMD_NETPING,         L"Network Ping",                   NULL,      true,  GroupNode },
+    { IDC_CMD_WOL,             L"Send Wake On LAN Magic Packet",  NULL,      true,  GroupNode },
+    { IDC_CMD_SET_TIME,        L"Set Client Date and Time",       NULL,      true,  GroupNode },
+    { IDC_CMD_START_TV,        L"Start TeamViewer",               NULL,      false, GroupNode },
+    { IDC_CMD_RENAME,          L"Rename Node",                    NULL,      true,  GroupNode },
+    { IDC_CMD_SHUTDOWN_NODE,   L"Shutdown Node",                  NULL,      true,  GroupNode },
+    { IDC_CMD_ABORT_SHUTDOWN,  L"Abort Shutdown",                 NULL,      true,  GroupNode },
+    { IDC_CMD_UPDATE,          L"Update Checked",                 NULL,      true,  GroupRod },
+    { IDC_CMD_MESSAGE,         L"Display Message",                NULL,      false, GroupRod },
+    { IDC_CMD_VIEW_REMOTE_LOG, L"View Remote Log",                NULL,      true,  GroupRod },
+    { IDC_CMD_PING,            L"Lightning Rod Ping",             NULL,      true,  GroupRod },
+    { IDC_CMD_REMOVE_OFFLINE,  L"Remove Checked Offline Clients", NULL,      true,  GroupRod },
+    { IDC_CMD_RESTART_LR,      L"Restart LR",                     "RESTART", true,  GroupRod },
+    { IDC_CMD_EXIT_LR,         L"Exit LR",                        "EXIT",    true,  GroupRod },
+    { IDC_CMD_MUTE,            L"Mute Checked Clients",           NULL,      true,  GroupAudio },
+    { IDC_CMD_UNMUTE,          L"Unmute Checked Clients",         NULL,      true,  GroupAudio },
+    { IDC_CMD_SOUND,           L"Play Sound",                     NULL,      false, GroupAudio },
+    { IDC_CMD_PRIORITY,        L"Change Render Priority",         NULL,      true,  GroupRender },
+    { IDC_CMD_STOP,            L"Stop Lightning",                 "STOP",    true,  GroupRender },
+    { IDC_CMD_START71,         L"Start Lightning 7.1",            "START",   true,  GroupRender },
+    { IDC_CMD_START63,         L"Start Lightning 6.3",            NULL,      false, GroupRender },
+    { IDC_CMD_START61,         L"Start Lightning 6.1",            NULL,      false, GroupRender },
+    { IDC_CMD_START50,         L"Start Lightning 5.0",            NULL,      false, GroupRender },
 };
 const int kCommandCount = sizeof(kCommands) / sizeof(kCommands[0]);
 
@@ -2699,35 +2716,126 @@ void layoutStaticPane()
 }
 
 // Command buttons: as many 200 px columns as the pane's width holds (200 px
-// fits the longest label), widened to share the width, in as many rows as
-// the count needs. The pane's height is set from commandPaneHeight() so that
-// every row is visible; the details pane above it takes what is left.
-const int kCmdMargin = 8, kCmdGap = 6, kCmdMinWidth = 200, kCmdHeight = 30;
+// fits the longest label), widened to share the width. Every group starts a
+// new row and gets a band of its own colour behind its rows. The pane's height
+// comes from commandPaneHeight() so that every row is visible; the details
+// pane above it takes what is left.
+const int kCmdMargin = 6, kCmdBandPad = 4, kCmdGap = 4, kCmdGroupGap = 4, kCmdMinWidth = 200, kCmdHeight = 26;
+
+struct CommandLayout {
+    RECT buttons[kCommandCount];
+    RECT bands[kGroupCount];
+    int height;
+};
 
 int commandColumns(int width)
 {
-    int perRow = (width - 2 * kCmdMargin + kCmdGap) / (kCmdMinWidth + kCmdGap);
+    int avail = width - 2 * (kCmdMargin + kCmdBandPad);
+    int perRow = (avail + kCmdGap) / (kCmdMinWidth + kCmdGap);
     return perRow < 1 ? 1 : perRow;
+}
+
+CommandLayout commandLayout(int width)
+{
+    CommandLayout out;
+    int cols = commandColumns(width);
+    int x0 = kCmdMargin + kCmdBandPad;
+    int bw = (width - 2 * x0 - (cols - 1) * kCmdGap) / cols;
+    if (bw < kCmdMinWidth) bw = kCmdMinWidth;
+    int y = kCmdMargin + kCmdBandPad;
+    for (int g = 0; g < kGroupCount; ++g) {
+        int n = 0;
+        RECT band = { kCmdMargin, y - kCmdBandPad, width - kCmdMargin, 0 };
+        for (int i = 0; i < kCommandCount; ++i) {
+            if (kCommands[i].group != g) continue;
+            RECT r = { x0 + (n % cols) * (bw + kCmdGap), y + (n / cols) * (kCmdHeight + kCmdGap), 0, 0 };
+            r.right = r.left + bw;
+            r.bottom = r.top + kCmdHeight;
+            out.buttons[i] = r;
+            ++n;
+        }
+        int rows = (n + cols - 1) / cols;
+        y += rows * (kCmdHeight + kCmdGap) - kCmdGap;
+        band.bottom = y + kCmdBandPad;
+        out.bands[g] = band;
+        y = band.bottom + kCmdGroupGap + kCmdBandPad;
+    }
+    out.height = out.bands[kGroupCount - 1].bottom + kCmdMargin;
+    return out;
 }
 
 int commandPaneHeight(int width)
 {
-    int rows = (kCommandCount + commandColumns(width) - 1) / commandColumns(width);
-    return 2 * kCmdMargin + rows * (kCmdHeight + kCmdGap) - kCmdGap;
+    return commandLayout(width - 2 * GetSystemMetrics(SM_CXEDGE)).height + 2 * GetSystemMetrics(SM_CYEDGE);
 }
 
 void layoutCommandPane()
 {
     RECT rc;
     GetClientRect(g_commandPane, &rc);
-    int perRow = commandColumns(rc.right);
-    int bw = (rc.right - 2 * kCmdMargin - (perRow - 1) * kCmdGap) / perRow;
-    if (bw < kCmdMinWidth) bw = kCmdMinWidth;
+    CommandLayout cl = commandLayout(rc.right);
     for (int i = 0; i < kCommandCount; ++i) {
-        int x = kCmdMargin + (i % perRow) * (bw + kCmdGap);
-        int y = kCmdMargin + (i / perRow) * (kCmdHeight + kCmdGap);
-        MoveWindow(GetDlgItem(g_commandPane, kCommands[i].id), x, y, bw, kCmdHeight, TRUE);
+        const RECT& r = cl.buttons[i];
+        MoveWindow(GetDlgItem(g_commandPane, kCommands[i].id), r.left, r.top, r.right - r.left, r.bottom - r.top, TRUE);
     }
+    InvalidateRect(g_commandPane, NULL, TRUE);
+}
+
+// pct parts of a to 100 - pct parts of b
+COLORREF mixColor(COLORREF a, COLORREF b, int pct)
+{
+    return RGB((GetRValue(a) * pct + GetRValue(b) * (100 - pct)) / 100,
+               (GetGValue(a) * pct + GetGValue(b) * (100 - pct)) / 100,
+               (GetBValue(a) * pct + GetBValue(b) * (100 - pct)) / 100);
+}
+
+// The bands behind the button groups.
+void paintCommandPaneBackground(HDC dc)
+{
+    RECT rc;
+    GetClientRect(g_commandPane, &rc);
+    FillRect(dc, &rc, GetSysColorBrush(COLOR_BTNFACE));
+    CommandLayout cl = commandLayout(rc.right);
+    for (int g = 0; g < kGroupCount; ++g) {
+        HBRUSH b = CreateSolidBrush(kGroups[g].band);
+        FillRect(dc, &cl.bands[g], b);
+        DeleteObject(b);
+    }
+}
+
+// An owner-drawn command button: the group's tint on the face, a darker edge
+// of the same hue, the face pressed darker and disabled paler with grey text.
+bool drawCommandButton(const DRAWITEMSTRUCT* di)
+{
+    const CommandDef* def = NULL;
+    for (int i = 0; i < kCommandCount && !def; ++i) if (kCommands[i].id == (int)di->CtlID) def = &kCommands[i];
+    if (!def) return false;
+    const CommandGroup& g = kGroups[def->group];
+    bool disabled = (di->itemState & ODS_DISABLED) != 0, pressed = (di->itemState & ODS_SELECTED) != 0;
+    COLORREF face = disabled ? mixColor(g.face, g.band, 35) : pressed ? mixColor(g.face, RGB(0, 0, 0), 86) : g.face;
+    COLORREF edge = mixColor(g.face, RGB(0, 0, 0), disabled ? 80 : 62);
+    RECT rc = di->rcItem;
+    HBRUSH b = CreateSolidBrush(face);
+    FillRect(di->hDC, &rc, b);
+    DeleteObject(b);
+    b = CreateSolidBrush(edge);
+    FrameRect(di->hDC, &rc, b);
+    DeleteObject(b);
+    wchar_t text[128];
+    GetWindowTextW(di->hwndItem, text, 128);
+    HGDIOBJ oldFont = SelectObject(di->hDC, g_font);
+    SetBkMode(di->hDC, TRANSPARENT);
+    SetTextColor(di->hDC, disabled ? GetSysColor(COLOR_GRAYTEXT) : RGB(0, 0, 0));
+    RECT tr = rc;
+    if (pressed) OffsetRect(&tr, 1, 1);
+    DrawTextW(di->hDC, text, -1, &tr, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+    SelectObject(di->hDC, oldFont);
+    if (di->itemState & ODS_FOCUS) {
+        RECT fr = rc;
+        InflateRect(&fr, -3, -3);
+        DrawFocusRect(di->hDC, &fr);
+    }
+    return true;
 }
 
 void layout()
@@ -2768,6 +2876,14 @@ LRESULT CALLBACK paneProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_CTLCOLORBTN:
         SetBkColor((HDC)wp, GetSysColor(COLOR_BTNFACE));
         return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
+    case WM_ERASEBKGND:
+        if (hwnd == g_commandPane) { paintCommandPaneBackground((HDC)wp); return 1; }
+        break;
+    case WM_DRAWITEM: {
+        const DRAWITEMSTRUCT* di = (const DRAWITEMSTRUCT*)lp;
+        if (di->CtlType == ODT_BUTTON && hwnd == g_commandPane && drawCommandButton(di)) return TRUE;
+        break;
+    }
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
@@ -2840,6 +2956,13 @@ LRESULT onListNotify(NMHDR* hdr)
     return 0;
 }
 
+// Settings: the report interval dialog, from the button and the menu alike.
+void openSettings()
+{
+    int sec = (int)DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_INTERVAL), g_main, intervalDlgProc, (LPARAM)g_store->settings.intervalSec);
+    if (sec > 0 && sec != g_store->settings.intervalSec) setIntervalAll(sec);
+}
+
 LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
@@ -2848,13 +2971,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         int id = LOWORD(wp);
         switch (id) {
         case IDM_FILE_EXIT: DestroyWindow(g_main); return 0;
-        case IDM_NODE_REMOVE: removeCheckedOffline(); return 0;
-        case IDM_SETTINGS_INTERVAL: {
-            int sec = (int)DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_INTERVAL), g_main, intervalDlgProc,
-                                           (LPARAM)g_store->settings.intervalSec);
-            if (sec > 0 && sec != g_store->settings.intervalSec) setIntervalAll(sec);
-            return 0;
-        }
+        case IDC_CMD_SETTINGS: openSettings(); return 0;
         case IDM_HELP_ABOUT:
             MessageBoxW(g_main, L"Thunderhead " TLR_VERSION_WSTRING L"\nBryce Lightning render farm console.\n\n"
                         L"Nodes run Lightning Rod " TLR_VERSION_WSTRING L".", L"About Thunderhead", MB_OK | MB_ICONINFORMATION);
@@ -2876,7 +2993,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CMD_SET_TIME: setClientTime(); return 0;
         case IDC_CMD_MUTE: sendAudio("mute"); return 0;
         case IDC_CMD_UNMUTE: sendAudio("unmute"); return 0;
-        case IDC_CMD_REMOVE_OFFLINE: removeCheckedOffline(); return 0;   // same as Node > Remove checked offline nodes
+        case IDC_CMD_REMOVE_OFFLINE: removeCheckedOffline(); return 0;
         case IDC_CMD_SHUTDOWN_NODE: shutdownChecked(); return 0;
         case IDC_CMD_ABORT_SHUTDOWN: sendPower("abort"); return 0;
         case IDC_FLAG_WOL: case IDC_FLAG_BOOT: case IDC_FLAG_AUTOLOGIN: case IDC_FLAG_AUTOROD: case IDC_FLAG_AUTOLIGHTNING:
@@ -3004,7 +3121,7 @@ void createChildren(HINSTANCE inst)
 
     // command pane
     for (int i = 0; i < kCommandCount; ++i) {
-        HWND b = CreateWindowExW(0, L"BUTTON", kCommands[i].label, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+        HWND b = CreateWindowExW(0, L"BUTTON", kCommands[i].label, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                                  0, 0, 10, 10, g_commandPane, (HMENU)(INT_PTR)kCommands[i].id, inst, NULL);
         SendMessageW(b, WM_SETFONT, (WPARAM)g_font, TRUE);
         EnableWindow(b, kCommands[i].live);
@@ -3050,7 +3167,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show)
     RegisterClassW(&wc);
 
     g_main = CreateWindowExW(0, L"ThunderheadMain", L"Thunderhead " TLR_VERSION_WSTRING,
-                             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 1500, 796, NULL, NULL, inst, NULL);
+                             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 1500, 830, NULL, NULL, inst, NULL);
     if (!g_main) return 1;
     createChildren(inst);
     layout();

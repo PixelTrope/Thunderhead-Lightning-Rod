@@ -8,8 +8,6 @@
 #define IDD_TEXTBOX             106
 
 #define IDM_FILE_EXIT           1001
-#define IDM_NODE_REMOVE         1105
-#define IDM_SETTINGS_INTERVAL   1201
 #define IDM_HELP_ABOUT          1301
 
 #define IDC_INTERVAL_COMBO      2101
@@ -54,7 +52,9 @@
 #define IDC_CMD_MUTE            3027
 #define IDC_CMD_UNMUTE          3028
 #define IDC_CMD_REMOVE_OFFLINE  3029
-#define IDC_CMD_LAST            3029
+#define IDC_CMD_START50         3030
+#define IDC_CMD_SETTINGS        3031
+#define IDC_CMD_LAST            3031
 
 // rename dialog
 #define IDC_RENAME_INFO         2301

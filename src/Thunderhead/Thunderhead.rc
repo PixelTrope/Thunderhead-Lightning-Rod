@@ -10,13 +10,57 @@ BEGIN
     BEGIN
         MENUITEM "E&xit", IDM_FILE_EXIT
     END
-    POPUP "&Node"
+    POPUP "&Control"
     BEGIN
-        MENUITEM "&Remove checked offline nodes", IDM_NODE_REMOVE
-    END
-    POPUP "&Settings"
-    BEGIN
-        MENUITEM "&Report interval...", IDM_SETTINGS_INTERVAL
+        POPUP "&Thunderhead Control"
+        BEGIN
+            MENUITEM "View Local Log", IDC_CMD_VIEW_LOCAL_LOG
+            MENUITEM "Settings", IDC_CMD_SETTINGS
+        END
+        POPUP "&List Control"
+        BEGIN
+            MENUITEM "Check All (Ctrl-A)", IDC_CMD_CHECK_ALL
+            MENUITEM "Check None (Ctrl-D)", IDC_CMD_CHECK_NONE
+            MENUITEM "Check Outdated", IDC_CMD_CHECK_OUTDATED
+        END
+        POPUP "&Node Control"
+        BEGIN
+            MENUITEM "Open Client's Shared Folder", IDC_CMD_OPEN_SHARE
+            MENUITEM "Copy Files or Folder to Client", IDC_CMD_COPY
+            MENUITEM "Run Remote Batch File", IDC_CMD_BATCH
+            MENUITEM "Network Ping", IDC_CMD_NETPING
+            MENUITEM "Send Wake On LAN Magic Packet", IDC_CMD_WOL
+            MENUITEM "Set Client Date and Time", IDC_CMD_SET_TIME
+            MENUITEM "Start TeamViewer", IDC_CMD_START_TV, GRAYED
+            MENUITEM "Rename Node", IDC_CMD_RENAME
+            MENUITEM "Shutdown Node", IDC_CMD_SHUTDOWN_NODE
+            MENUITEM "Abort Shutdown", IDC_CMD_ABORT_SHUTDOWN
+        END
+        POPUP "Lightning&Rod Control"
+        BEGIN
+            MENUITEM "Update Checked", IDC_CMD_UPDATE
+            MENUITEM "Display Message", IDC_CMD_MESSAGE, GRAYED
+            MENUITEM "View Remote Log", IDC_CMD_VIEW_REMOTE_LOG
+            MENUITEM "Lightning Rod Ping", IDC_CMD_PING
+            MENUITEM "Remove Checked Offline Clients", IDC_CMD_REMOVE_OFFLINE
+            MENUITEM "Restart LR", IDC_CMD_RESTART_LR
+            MENUITEM "Exit LR", IDC_CMD_EXIT_LR
+        END
+        POPUP "&Audio Control"
+        BEGIN
+            MENUITEM "Mute Checked Clients", IDC_CMD_MUTE
+            MENUITEM "Unmute Checked Clients", IDC_CMD_UNMUTE
+            MENUITEM "Play Sound", IDC_CMD_SOUND, GRAYED
+        END
+        POPUP "Rende&r Control"
+        BEGIN
+            MENUITEM "Change Render Priority", IDC_CMD_PRIORITY
+            MENUITEM "Stop Lightning", IDC_CMD_STOP
+            MENUITEM "Start Lightning 7.1", IDC_CMD_START71
+            MENUITEM "Start Lightning 6.3", IDC_CMD_START63, GRAYED
+            MENUITEM "Start Lightning 6.1", IDC_CMD_START61, GRAYED
+            MENUITEM "Start Lightning 5.0", IDC_CMD_START50, GRAYED
+        END
     END
     POPUP "&Help"
     BEGIN

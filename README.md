@@ -52,4 +52,4 @@ Copy `LightningRod.exe` to `C:\LightningRod` on each node, share that folder as
 `LightningRod`, and start the agent at logon with a shortcut in the Startup folder
 or a Run registry entry. Thunderhead runs from any folder; it writes
 `settings.txt`, `nodes.txt` and `logs\` beside itself, and pushes the
-`LightningRod.exe` placed beside `Thunderhead.exe` when *Update checked* is used.
+`LightningRod.exe` placed beside `Thunderhead.exe` when *Update Checked* is used.
