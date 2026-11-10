@@ -73,6 +73,8 @@ board=Dell Inc. 0XXXXX
 chipset=AMD A55E Host Bridge
 gpu=AMD Radeon HD 6310 Graphics
 vram_mb=384
+lightning3_path=C:\Program Files\DAZ 3D\BryceLightning7\Lightning.exe
+lightning3_version=7.1.0.109
 ```
 
 `mem_mb` is the physical memory the node's Windows can address, the figure
@@ -91,6 +93,12 @@ BIOS wrote, not a reading from the modules. The same records supply
 `mem_installed_mb` on Windows XP, where the agent reads the SMBIOS table
 through WMI (`MSSmBios_RawSMBiosTables`) because the OS has no
 GetSystemFirmwareTable.
+
+Agents from 0.2.19 send `lightning3_path` and `lightning3_version`, the
+installed Bryce 7 / 7 Pro Lightning as found at the agent's start by the
+lookup described under Lightning lookup; both are empty when none is
+installed, and Thunderhead shows that as "not installed" and an absent field
+as blank. The window of the agent shows the same.
 
 Thunderhead replies with the report interval in seconds (5 to 60 in steps of 5,
 default 15):
@@ -144,7 +152,7 @@ Thunderhead may send at any time:
 | Verb  | Fields        | Agent action                                           |
 |-------|---------------|--------------------------------------------------------|
 | SET   | interval      | change the report interval                             |
-| START |               | start `DAZ 3D\BryceLightning7\Lightning.exe` under Program Files (x86) on 64-bit Windows, under Program Files on 32-bit Windows |
+| START | gen           | start the installed Lightning of generation `gen`: 3 = Bryce 7 and 7 Pro, 2 = Bryce 6.x, 1 = Bryce 5.x (3 when absent, as agents before 0.2.19 take it); reply ACK with `gen=`, `path=`, `version=` and `found=` (see Lightning lookup) |
 | STOP  |               | terminate Lightning.exe                                |
 | PING  |               | reply PONG                                             |
 | EXIT  |               | reply ACK, then end the agent process                  |
@@ -161,6 +169,7 @@ Thunderhead may send at any time:
 
 The agent replies to START, STOP, PRIORITY, EXIT, RESTART, UPDATE, RENAME, REBOOT,
 SHUTDOWN, POWER, AUDIO, TEAMVIEWER and BATCH with (RENAME adds `name=` with the name that was applied;
+START adds `gen=`, `path=`, `version=` and `found=` as described under Lightning lookup;
 PRIORITY adds `level=` as requested and `applied=` with the class Windows reports
 afterwards, and answers `ok=no` when the two differ, as when RealTime is
 requested without administrator rights and Windows grants High; POWER adds
@@ -490,6 +499,54 @@ to start it, on the node's screen, before any window appears; the agent's
 waiting, and the window is left where TeamViewer opens it. Agents older than
 0.2.18 do not know TEAMVIEWER; Thunderhead skips them with a line in the event
 log, as for the other versioned commands.
+
+## Lightning lookup
+
+*Run Lightning 3 (B7 & 7 Pro)*, *Run Lightning 2 (B6.x)* and *Run Lightning 1
+(B5.x)* send `START gen=3`, `gen=2` or `gen=1` to every checked online client.
+The agent does not assume a folder: it looks the installed Lightning of that
+generation up, in this order, and takes the first `Lightning.exe` that exists:
+
+1. the installer's product key under `HKLM\SOFTWARE`, read in the agent's own
+   registry view and in the other one (a 32-bit installer writes
+   `SOFTWARE\WOW6432Node` on 64-bit Windows, which is what the 32-bit agent
+   reads without a view flag; on 32-bit Windows both views are the same key):
+   `Location` names the folder and `Version` the installed version;
+2. the Add/Remove Programs entry under `...\CurrentVersion\Uninstall`, in both
+   views: `InstallLocation` names the folder and `DisplayVersion` the version;
+3. the Start menu shortcut, for all users and then for the logged-on user,
+   resolved through IShellLink and accepted only when it points at a
+   `Lightning.exe`;
+4. the default folder under each Program Files folder.
+
+The file's own version resource is then read; when the installer's entry gave
+no version, that is the version reported, and when its first number is not
+the generation's (7 for Lightning 3, 6 for Lightning 2, 5 for Lightning 1)
+the start is refused with `error=` naming the file and its version, so that
+a folder holding another generation's Lightning is never started under the
+wrong button.
+
+For generation 3 the entries are those of the Bryce Lightning 7.0 installer
+(verified on 7.1.0.109): product key `HKLM\SOFTWARE\DAZ 3D\Bryce Lightning 7.0`
+(`HKLM\SOFTWARE\WOW6432Node\DAZ 3D\Bryce Lightning 7.0` on 64-bit Windows) with
+`Location` and `Version`, the Add/Remove Programs key named
+`Bryce Lightning 7.0 <version>`, the shortcut
+`DAZ 3D\Bryce Lightning\Bryce Lightning 7.0.lnk`, and the default folder
+`DAZ 3D\BryceLightning7`. The entries of generations 2 and 1 are not yet
+recorded; until they are, the agent answers `START gen=2` and `gen=1` with
+`ok=no` and an error saying so, and Thunderhead keeps those two controls
+inactive.
+
+The ACK carries `gen=`, `path=` (the file), `version=` and `found=` (the
+source, such as `registry HKLM\SOFTWARE\WOW6432Node\DAZ 3D\Bryce Lightning 7.0\Location`
+or `Start menu shortcut Bryce Lightning 7.0.lnk (all users)`), also when the
+start fails because Lightning is already running, in which case `error=`
+names the running file. The event log reads "START ok on NAME: Lightning 3
+7.1.0.109 at C:\...\Lightning.exe, found through ..." or "START failed on
+NAME: ...". When the agent restarts Lightning after acquiring a late address
+(see Agent start-up), it restarts the copy that was running, whatever its
+generation. The same lookup runs once at the agent's start and fills
+`lightning3_path` and `lightning3_version` in HELLO.
 
 ## Clock
 

@@ -346,6 +346,23 @@ public:
     bool init()
     {
         info_ = collectStatic();
+        // The installed Lightning of each generation goes into HELLO, so that
+        // Thunderhead shows where Run Lightning would land. IShellLink, for the
+        // Start menu fallback, wants COM on this thread.
+        {
+            HRESULT co = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+            LightningInstall li;
+            std::string err;
+            if (findLightning(3, li, err)) {
+                info_.lightning3Path = narrow(li.path);
+                info_.lightning3Version = li.version;
+                logLine(format("%s: %s, version %s, found through %s", lightningLabel(3), info_.lightning3Path.c_str(),
+                               li.version.empty() ? "unknown" : li.version.c_str(), li.found.c_str()));
+            } else {
+                logLine(err);
+            }
+            if (SUCCEEDED(co)) CoUninitialize();
+        }
         status_.info = info_;
         logLine(format("Lightning Rod %s starting: %s mac=%s ip=%s", TLR_VERSION_STRING,
                        info_.name.c_str(), info_.mac.c_str(), info_.ip.c_str()));
@@ -424,11 +441,13 @@ private:
         LeaveCriticalSection(&lock_);
         notify();
         std::string err;
+        std::wstring running = runningLightningPath();   // the same copy is started again, whatever its generation
+        LightningInstall li;
         if (findLightningPid() == 0) {
             logLine("Lightning is not running; nothing to restart for the new address");
         } else if (!stopLightning(err)) {
             logLine("Lightning restart for the new address: stop failed: " + err);
-        } else if (!startLightning(err)) {
+        } else if (running.empty() ? !startLightning(3, li, err) : !startLightningAt(running, err)) {
             logLine("Lightning restart for the new address: start failed: " + err);
         } else {
             logLine("Lightning restarted so that it binds the new address");
@@ -534,6 +553,8 @@ private:
         m.set("chipset", info_.chipset);
         m.set("gpu", info_.gpu);
         m.set("vram_mb", (long long)info_.vramMb);
+        m.set("lightning3_path", info_.lightning3Path);
+        m.set("lightning3_version", info_.lightning3Version);
         return sendMessage(m);
     }
 
@@ -613,14 +634,31 @@ private:
             LeaveCriticalSection(&lock_);
             notify();
         } else if (m.verb == "START" || m.verb == "STOP") {
+            // START gen=3|2|1 (3 when absent) starts the installed Lightning of that
+            // generation, found as docs/PROTOCOL.md describes under Lightning lookup;
+            // the ACK carries what was found even when the start fails.
             std::string err;
-            bool ok = m.verb == "START" ? startLightning(err) : stopLightning(err);
-            logLine(format("%s Lightning: %s%s%s", m.verb.c_str(), ok ? "ok" : "failed",
-                           err.empty() ? "" : " ", err.c_str()));
+            LightningInstall li;
+            int gen = m.getInt("gen", 3);
+            bool ok = m.verb == "START" ? startLightning(gen, li, err) : stopLightning(err);
+            if (m.verb == "START") {
+                std::string where = li.path.empty() ? std::string()
+                    : format(" [%s, version %s, found through %s]", narrow(li.path).c_str(),
+                             li.version.empty() ? "unknown" : li.version.c_str(), li.found.c_str());
+                logLine(format("START %s: %s%s%s%s", lightningLabel(gen), ok ? "ok" : "failed", err.empty() ? "" : " ", err.c_str(), where.c_str()));
+            } else {
+                logLine(format("STOP Lightning: %s%s%s", ok ? "ok" : "failed", err.empty() ? "" : " ", err.c_str()));
+            }
             Message ack("ACK");
             ack.set("cmd", m.verb);
             ack.set("ok", boolText(ok));
             ack.set("error", err);
+            if (m.verb == "START") {
+                ack.set("gen", (long long)gen);
+                ack.set("path", narrow(li.path));
+                ack.set("version", li.version);
+                ack.set("found", li.found);
+            }
             sendMessage(ack);
             sendReport();
             nextReport_ = tickMs() + (unsigned long long)intervalSec_ * 1000;
@@ -1077,6 +1115,8 @@ void refreshAll()
     setRow(row++, L"Chipset",             widen(i.chipset));
     setRow(row++, L"GPU",                 widen(i.gpu));
     setRow(row++, L"VRAM MB",             widen(format("%d", i.vramMb)));
+    setRow(row++, L"Lightning 3 (B7 & 7 Pro)", i.lightning3Path.empty() ? std::wstring(L"not installed")
+                                               : widen(i.lightning3Version.empty() ? i.lightning3Path : i.lightning3Version + " at " + i.lightning3Path));
     refreshClock();
 }
 

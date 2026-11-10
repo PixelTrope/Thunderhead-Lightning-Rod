@@ -1,5 +1,6 @@
 #include "Lightning.h"
 
+#include "Installed.h"
 #include "Net.h"
 #include "StrUtil.h"
 
@@ -9,21 +10,99 @@
 
 namespace tlr {
 
-const wchar_t* const kLightningPath = L"C:\\Program Files\\DAZ 3D\\BryceLightning7\\Lightning.exe";
+// Where each generation's installer leaves its traces. Generation 3 is
+// verified on Bryce 7.1 / Lightning 7.1.0.109 installs: the product key
+// HKLM\SOFTWARE\DAZ 3D\Bryce Lightning 7.0 (under SOFTWARE\WOW6432Node on
+// 64-bit Windows) with Location and Version, the Add/Remove Programs entry
+// "Bryce Lightning 7.0 <version>" with InstallLocation and DisplayVersion, the
+// Start menu shortcut DAZ 3D\Bryce Lightning\Bryce Lightning 7.0.lnk, and the
+// default folder DAZ 3D\BryceLightning7. The entries of generations 2 and 1
+// are not yet known; their rules are empty and findLightning says so.
+struct GenRule {
+    int gen;
+    const char* label;
+    const wchar_t* productKey;       // HKLM key with Location and Version
+    const wchar_t* uninstallPrefix;  // start of the Add/Remove Programs key name
+    const wchar_t* shortcut;         // text in the Start menu shortcut's name
+    const wchar_t* defaultTail;      // path below a Program Files folder
+    int major;                       // first number of the file's version
+};
+const GenRule kRules[] = {
+    { 3, "Lightning 3 (Bryce 7 and 7 Pro)", L"SOFTWARE\\DAZ 3D\\Bryce Lightning 7.0", L"Bryce Lightning 7", L"Bryce Lightning 7",
+      L"DAZ 3D\\BryceLightning7\\Lightning.exe", 7 },
+    { 2, "Lightning 2 (Bryce 6.x)", NULL, NULL, NULL, NULL, 6 },
+    { 1, "Lightning 1 (Bryce 5.x)", NULL, NULL, NULL, NULL, 5 },
+};
+const wchar_t* const kLightningExe = L"Lightning.exe";
+const wchar_t* const kUninstallKey = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
 
-std::wstring lightningPath()
+static const GenRule* ruleFor(int gen)
 {
-    // A 32-bit process sees ProgramFiles as Program Files (x86) on 64-bit Windows;
-    // the other two variables exist only there and cover an install either side.
-    const wchar_t* const vars[] = { L"ProgramFiles(x86)", L"ProgramFiles", L"ProgramW6432" };
-    for (int i = 0; i < 3; ++i) {
-        wchar_t base[MAX_PATH];
-        DWORD n = GetEnvironmentVariableW(vars[i], base, MAX_PATH);
-        if (n == 0 || n >= MAX_PATH) continue;
-        std::wstring path = std::wstring(base, n) + L"\\DAZ 3D\\BryceLightning7\\Lightning.exe";
-        if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) return path;
+    for (size_t i = 0; i < sizeof(kRules) / sizeof(kRules[0]); ++i) if (kRules[i].gen == gen) return &kRules[i];
+    return NULL;
+}
+
+const char* lightningLabel(int gen)
+{
+    const GenRule* r = ruleFor(gen);
+    return r ? r->label : "Lightning (unknown generation)";
+}
+
+bool findLightning(int gen, LightningInstall& out, std::string& error)
+{
+    out = LightningInstall();
+    out.gen = gen;
+    error.clear();
+    const GenRule* rule = ruleFor(gen);
+    if (!rule) { error = format("there is no Lightning generation %d", gen); return false; }
+    if (!rule->productKey) {
+        error = std::string(rule->label) + ": the registry entries of its installer are not yet known to this agent";
+        return false;
     }
-    return kLightningPath;
+    std::wstring path;
+    std::string version, found;
+    // 1. The product key, in this process's registry view and in the other one.
+    for (int v = 0; v < 2 && path.empty(); ++v) {
+        std::wstring p = joinPath(regText(HKEY_LOCAL_MACHINE, rule->productKey, L"Location", kRegViews[v]), kLightningExe);
+        if (!fileExists(p)) continue;
+        path = p;
+        version = narrow(regText(HKEY_LOCAL_MACHINE, rule->productKey, L"Version", kRegViews[v]));
+        found = "registry " + regKeyText(HKEY_LOCAL_MACHINE, rule->productKey, kRegViews[v]) + "\\Location";
+    }
+    // 2. The Add/Remove Programs entry.
+    for (int v = 0; v < 2 && path.empty(); ++v) {
+        std::vector<std::wstring> subs = regSubKeys(HKEY_LOCAL_MACHINE, kUninstallKey, kRegViews[v]);
+        for (size_t i = 0; i < subs.size() && path.empty(); ++i) {
+            if (!startsWithNoCase(subs[i], rule->uninstallPrefix)) continue;
+            std::wstring key = std::wstring(kUninstallKey) + L"\\" + subs[i];
+            std::wstring p = joinPath(regText(HKEY_LOCAL_MACHINE, key, L"InstallLocation", kRegViews[v]), kLightningExe);
+            if (!fileExists(p)) continue;
+            path = p;
+            version = narrow(regText(HKEY_LOCAL_MACHINE, key, L"DisplayVersion", kRegViews[v]));
+            found = "uninstall entry " + regKeyText(HKEY_LOCAL_MACHINE, key, kRegViews[v]);
+        }
+    }
+    // 3. The Start menu shortcut.  4. The default folder.
+    if (path.empty()) path = startMenuTarget(rule->shortcut, kLightningExe, found);
+    if (path.empty()) { path = programFilesFile(rule->defaultTail); if (!path.empty()) found = "default folder"; }
+    if (path.empty()) {
+        error = std::string(rule->label) + " is not installed: no registry entry, Start menu shortcut or default folder names it";
+        return false;
+    }
+    // The file itself must be of the generation asked for: a Bryce 7 Lightning
+    // carries 7.x in its version resource.
+    std::string fileVersion = fileVersionText(path);
+    if (version.empty()) version = fileVersion;
+    out.path = path;
+    out.version = version;
+    out.found = found;
+    int major = versionMajor(fileVersion.empty() ? version : fileVersion);
+    if (major != 0 && major != rule->major) {
+        error = format("%s is version %s, not a %d.x Lightning", narrow(path).c_str(),
+                       (fileVersion.empty() ? version : fileVersion).c_str(), rule->major);
+        return false;
+    }
+    return true;
 }
 
 // GetExtendedTcpTable arrived with Windows XP SP2; it is resolved at run time so
@@ -132,15 +211,35 @@ LightningState LightningMonitor::query()
     return s;
 }
 
-bool startLightning(std::string& error)
+std::wstring runningLightningPath()
 {
-    error.clear();
-    if (findLightningPid() != 0) { error = "already running"; return false; }
-    std::wstring path = lightningPath();
-    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        error = "not installed at " + narrow(path) + " or under Program Files (x86)";
+    DWORD pid = findLightningPid();
+    if (pid == 0) return std::wstring();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    if (snap == INVALID_HANDLE_VALUE) return std::wstring();
+    MODULEENTRY32W me;
+    me.dwSize = sizeof(me);
+    std::wstring out;
+    if (Module32FirstW(snap, &me)) out = me.szExePath;   // the first module is the executable
+    CloseHandle(snap);
+    return out;
+}
+
+bool startLightning(int gen, LightningInstall& inst, std::string& error)
+{
+    if (!findLightning(gen, inst, error)) return false;
+    if (findLightningPid() != 0) {
+        std::wstring running = runningLightningPath();
+        error = "already running" + (running.empty() ? std::string() : " (" + narrow(running) + ")");
         return false;
     }
+    return startLightningAt(inst.path, error);
+}
+
+bool startLightningAt(const std::wstring& path, std::string& error)
+{
+    error.clear();
+    if (!fileExists(path)) { error = narrow(path) + " does not exist"; return false; }
     std::wstring dir = path.substr(0, path.rfind(L'\\'));
     std::wstring cmd = std::wstring(L"\"") + path + L"\"";
     std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());

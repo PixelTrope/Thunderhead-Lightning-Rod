@@ -135,10 +135,9 @@ const CommandDef kCommands[] = {
     { IDC_CMD_SOUND,           L"Play Sound",                     NULL,      false, GroupAudio },
     { IDC_CMD_PRIORITY,        L"Change Render Priority",         NULL,      true,  GroupRender },
     { IDC_CMD_STOP,            L"Stop Lightning",                 "STOP",    true,  GroupRender },
-    { IDC_CMD_START71,         L"Start Lightning 7.1",            "START",   true,  GroupRender },
-    { IDC_CMD_START63,         L"Start Lightning 6.3",            NULL,      false, GroupRender },
-    { IDC_CMD_START61,         L"Start Lightning 6.1",            NULL,      false, GroupRender },
-    { IDC_CMD_START50,         L"Start Lightning 5.0",            NULL,      false, GroupRender },
+    { IDC_CMD_START71,         L"Run Lightning 3 (B7 & 7 Pro)",   NULL,      true,  GroupRender },
+    { IDC_CMD_START63,         L"Run Lightning 2 (B6.x)",         NULL,      false, GroupRender },
+    { IDC_CMD_START50,         L"Run Lightning 1 (B5.x)",         NULL,      false, GroupRender },
 };
 const int kCommandCount = sizeof(kCommands) / sizeof(kCommands[0]);
 
@@ -216,6 +215,17 @@ std::wstring memInstalledText(const Message& h)
 
 // mem_type from HELLO (agents from 0.2.17): blank when absent, n/a when the
 // node's firmware lists no memory devices.
+// HELLO lightningN_path / lightningN_version: absent (an older agent) shows
+// blank, an empty path "not installed", else "version at path".
+std::wstring lightningInstallText(const Message& h, const char* prefix)
+{
+    std::string pathKey = std::string(prefix) + "_path", verKey = std::string(prefix) + "_version";
+    if (!h.has(pathKey)) return std::wstring();
+    std::string path = h.get(pathKey), ver = h.get(verKey);
+    if (path.empty()) return L"not installed";
+    return widen(ver.empty() ? path : ver + " at " + path);
+}
+
 std::wstring memTypeText(const Message& h)
 {
     if (!h.has("mem_type")) return L"";
@@ -525,6 +535,7 @@ void showStaticPane(NodeRecord* n)
     add(L"Chipset", widen(h.get("chipset")));
     add(L"GPU", widen(h.get("gpu")));
     add(L"VRAM MB", widen(h.get("vram_mb")));
+    add(L"Lightning 3 (B7 & 7 Pro)", lightningInstallText(h, "lightning3"));
     bool reported = !r.verb.empty();
     add(L"Rendering", !r.has("rendering") ? std::wstring() : (parseBool(r.get("rendering")) ? L"Yes" : L"No"));
     add(L"Lightning", !r.has("lightning") ? std::wstring() : (r.get("lightning") == "running" ? L"Running" : L"Stopped"));
@@ -542,7 +553,7 @@ void showStaticPane(NodeRecord* n)
         add(L"Clock offset", std::wstring());
     }
     static const char* const knownHello[] = { "agent", "os", "cpu", "cpu_mhz", "cores", "mem_mb", "mem_installed_mb", "mem_type", "disk_total_mb", "board",
-                                              "chipset", "gpu", "vram_mb", "ip", "mac", "name" };
+                                              "chipset", "gpu", "vram_mb", "ip", "mac", "name", "lightning3_path", "lightning3_version" };
     static const char* const knownReport[] = { "cpu_pct", "cpu_temp_c", "disk_free_mb", "lightning", "lightning_cpu_pct",
                                                "mem_free_mb", "rendering", "uptime_s", "clock", "utc_ms" };
     for (std::map<std::string, std::string>::const_iterator it = h.fields.begin(); it != h.fields.end(); ++it) {
@@ -1302,6 +1313,18 @@ void startTeamViewer()
 {
     Message m("TEAMVIEWER");
     sendVersioned(m, m.oneLine(), kTeamViewerAgent);
+}
+
+// Run Lightning 3 / 2 / 1: START gen=N. The agent finds the installed Lightning
+// of that generation through its installer's registry entries, the Start menu
+// or the default folder (Lightning lookup in docs/PROTOCOL.md) and the ACK
+// names the file, its version and the source. Agents before 0.2.19 ignore
+// gen and start the Bryce 7 Lightning from its default folder.
+void runLightning(int gen)
+{
+    Message m("START");
+    m.set("gen", (long long)gen);
+    sendCommandMessage(m);
 }
 
 // Set Client Date and Time: every checked online client gets this host's clock
@@ -2599,6 +2622,12 @@ void onNet(NetEvent* e)
                 text = format("TIME: %s clock was %s (its date %s), set to the host's time", n->name.c_str(), was.c_str(),
                               e->msg.get("date").c_str());
             else text = format("TIME: %s clock %s, left alone", n->name.c_str(), was.c_str());
+        } else if (cmd == "START" && e->msg.has("gen")) {
+            std::string ver = e->msg.get("version"), path = e->msg.get("path");
+            std::string what = "Lightning " + e->msg.get("gen") + (ver.empty() ? "" : " " + ver) + (path.empty() ? "" : " at " + path);
+            if (ok) text = format("START ok on %s: %s, found through %s", n->name.c_str(), what.c_str(), e->msg.get("found").c_str());
+            else text = format("START failed on %s: %s%s", n->name.c_str(), e->msg.get("error").c_str(),
+                               path.empty() ? "" : (" (" + what + ", found through " + e->msg.get("found") + ")").c_str());
         } else if (cmd == "TEAMVIEWER") {
             if (ok) text = format("TEAMVIEWER ok on %s: started %s, found through %s%s", n->name.c_str(),
                                   e->msg.get("path").c_str(), e->msg.get("found").c_str(),
@@ -3007,6 +3036,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CMD_VIEW_LOCAL_LOG: viewLocalLog(); return 0;
         case IDC_CMD_VIEW_REMOTE_LOG: viewRemoteLogs(); return 0;
         case IDC_CMD_SET_TIME: setClientTime(); return 0;
+        case IDC_CMD_START71: runLightning(3); return 0;
+        case IDC_CMD_START63: runLightning(2); return 0;
+        case IDC_CMD_START50: runLightning(1); return 0;
         case IDC_CMD_START_TV: startTeamViewer(); return 0;
         case IDC_CMD_MUTE: sendAudio("mute"); return 0;
         case IDC_CMD_UNMUTE: sendAudio("unmute"); return 0;

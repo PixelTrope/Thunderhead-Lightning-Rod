@@ -30,7 +30,6 @@
 #define IDC_CMD_EXIT_LR         3004
 #define IDC_CMD_CHECK_ALL       3005
 #define IDC_CMD_CHECK_NONE      3006
-#define IDC_CMD_START61         3007
 #define IDC_CMD_START63         3008
 #define IDC_CMD_SHUTDOWN_NODE   3010
 #define IDC_CMD_START_TV        3011
