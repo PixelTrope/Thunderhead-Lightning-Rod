@@ -119,7 +119,7 @@ const CommandDef kCommands[] = {
     { IDC_CMD_NETPING,         L"Network Ping",                   NULL,      true,  GroupNode },
     { IDC_CMD_WOL,             L"Send Wake On LAN Magic Packet",  NULL,      true,  GroupNode },
     { IDC_CMD_SET_TIME,        L"Set Client Date and Time",       NULL,      true,  GroupNode },
-    { IDC_CMD_START_TV,        L"Start TeamViewer",               NULL,      false, GroupNode },
+    { IDC_CMD_START_TV,        L"Start TeamViewer",               NULL,      true,  GroupNode },
     { IDC_CMD_RENAME,          L"Rename Node",                    NULL,      true,  GroupNode },
     { IDC_CMD_SHUTDOWN_NODE,   L"Shutdown Node",                  NULL,      true,  GroupNode },
     { IDC_CMD_ABORT_SHUTDOWN,  L"Abort Shutdown",                 NULL,      true,  GroupNode },
@@ -1291,6 +1291,17 @@ void sendAudio(const char* action)
     Message m("AUDIO");
     m.set("action", std::string(action));
     sendVersioned(m, m.oneLine(), kAudioAgent);
+}
+
+// Start TeamViewer: the agent finds the installed TeamViewer through the
+// registry or the Start menu, whatever its version and folder, starts it and
+// brings its window to the front. The ACK names the path and the source.
+const char* const kTeamViewerAgent = "0.2.18";
+
+void startTeamViewer()
+{
+    Message m("TEAMVIEWER");
+    sendVersioned(m, m.oneLine(), kTeamViewerAgent);
 }
 
 // Set Client Date and Time: every checked online client gets this host's clock
@@ -2588,6 +2599,11 @@ void onNet(NetEvent* e)
                 text = format("TIME: %s clock was %s (its date %s), set to the host's time", n->name.c_str(), was.c_str(),
                               e->msg.get("date").c_str());
             else text = format("TIME: %s clock %s, left alone", n->name.c_str(), was.c_str());
+        } else if (cmd == "TEAMVIEWER") {
+            if (ok) text = format("TEAMVIEWER ok on %s: started %s, found through %s%s", n->name.c_str(),
+                                  e->msg.get("path").c_str(), e->msg.get("found").c_str(),
+                                  parseBool(e->msg.get("running")) ? ", TeamViewer was already running" : "");
+            else text = format("TEAMVIEWER failed on %s: %s", n->name.c_str(), e->msg.get("error").c_str());
         } else if (cmd == "AUDIO") {
             std::string action = e->msg.get("action"), method = e->msg.get("method");
             if (ok) text = format("AUDIO %s ok on %s: audio %s%s%s", action.c_str(), n->name.c_str(),
@@ -2991,6 +3007,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CMD_VIEW_LOCAL_LOG: viewLocalLog(); return 0;
         case IDC_CMD_VIEW_REMOTE_LOG: viewRemoteLogs(); return 0;
         case IDC_CMD_SET_TIME: setClientTime(); return 0;
+        case IDC_CMD_START_TV: startTeamViewer(); return 0;
         case IDC_CMD_MUTE: sendAudio("mute"); return 0;
         case IDC_CMD_UNMUTE: sendAudio("unmute"); return 0;
         case IDC_CMD_REMOVE_OFFLINE: removeCheckedOffline(); return 0;

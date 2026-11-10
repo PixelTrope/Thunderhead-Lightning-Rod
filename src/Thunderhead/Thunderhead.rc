@@ -31,7 +31,7 @@ BEGIN
             MENUITEM "Network Ping", IDC_CMD_NETPING
             MENUITEM "Send Wake On LAN Magic Packet", IDC_CMD_WOL
             MENUITEM "Set Client Date and Time", IDC_CMD_SET_TIME
-            MENUITEM "Start TeamViewer", IDC_CMD_START_TV, GRAYED
+            MENUITEM "Start TeamViewer", IDC_CMD_START_TV
             MENUITEM "Rename Node", IDC_CMD_RENAME
             MENUITEM "Shutdown Node", IDC_CMD_SHUTDOWN_NODE
             MENUITEM "Abort Shutdown", IDC_CMD_ABORT_SHUTDOWN

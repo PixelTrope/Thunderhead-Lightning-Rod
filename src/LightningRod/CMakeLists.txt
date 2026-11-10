@@ -4,6 +4,7 @@ add_executable(LightningRod WIN32
     Lightning.cpp
     Thermal.cpp
     Audio.cpp
+    TeamViewer.cpp
     LightningRod.rc
     LightningRod.ico
 )

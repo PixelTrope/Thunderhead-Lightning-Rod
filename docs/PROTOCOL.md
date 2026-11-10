@@ -157,9 +157,10 @@ Thunderhead may send at any time:
 | BATCH | text, maximized, front | write the text (hexadecimal digits of its UTF-8 bytes) to a batch file and run it; reply ACK when started and again when ended (see Remote batch file); agents from 0.2.7 |
 | POWER | action        | run Windows' `shutdown.exe` and reply ACK with the action: `shutdown` (`-s`), `restart` (`-r`) or `coldrestart` (`-g`), each with `-f -t 66`, or `abort` (`-a`); agents from 0.2.6 |
 | AUDIO | action        | set the master mute of the default playback device: `mute` or `unmute`; reply ACK with the state read back (see Audio); agents from 0.2.16 |
+| TEAMVIEWER |          | start the installed TeamViewer, found through the registry or the Start menu, and bring its window to the front; reply ACK with where it was found (see TeamViewer); agents from 0.2.18 |
 
 The agent replies to START, STOP, PRIORITY, EXIT, RESTART, UPDATE, RENAME, REBOOT,
-SHUTDOWN, POWER, AUDIO and BATCH with (RENAME adds `name=` with the name that was applied;
+SHUTDOWN, POWER, AUDIO, TEAMVIEWER and BATCH with (RENAME adds `name=` with the name that was applied;
 PRIORITY adds `level=` as requested and `applied=` with the class Windows reports
 afterwards, and answers `ok=no` when the two differ, as when RealTime is
 requested without administrator rights and Windows grants High; POWER adds
@@ -457,6 +458,38 @@ back differs from the one asked for. The event log reads "AUDIO mute ok on
 NAME: audio muted via Core Audio" or "AUDIO mute failed on NAME: ...".
 Agents older than 0.2.16 do not know AUDIO; Thunderhead skips them with a line
 in the event log, as for the other versioned commands.
+
+## TeamViewer
+
+*Start TeamViewer* sends `TEAMVIEWER` to every checked online client. The
+agent looks for the installed TeamViewer without assuming a version or a
+folder, in this order: the product key `HKLM\SOFTWARE\TeamViewer`
+(`InstallationDirectory`, and the `VersionN` subkeys that releases 6 to 10
+used), the Add/Remove Programs entries whose key name starts with `TeamViewer`
+(`InstallLocation`, then the executable named by `DisplayIcon`, then the
+folder of `UninstallString`), `App Paths\TeamViewer.exe`, the shortcuts of the
+Start menu for all users and for the logged-on user whose name contains
+TeamViewer (resolved through IShellLink), and `TeamViewer\TeamViewer.exe`
+under each Program Files folder. The 64-bit and the 32-bit registry views are
+both read, since TeamViewer 15 exists in both builds. The first path that
+exists is started as a double-click on the shortcut would start it; when
+TeamViewer is already running, the new copy hands over to the running one,
+which shows its window, as TeamViewer itself arranges. The agent then looks
+for the largest visible top-level window of a `TeamViewer.exe` process, for
+up to 30 s, and brings it to the front in the way described under Remote
+batch file. The ACK carries `path=` (the executable started), `found=` (the
+source that named it, such as `registry HKLM\SOFTWARE\TeamViewer (32-bit view)`
+or `Start menu shortcut TeamViewer.lnk (all users)`) and `running=yes|no`
+(whether a `TeamViewer.exe` existed before the start); `ok=no` with `error=`
+when no source names an existing executable or Windows refuses the start.
+The event log reads "TEAMVIEWER ok on NAME: started C:\...\TeamViewer.exe,
+found through ..." or "TEAMVIEWER failed on NAME: ...". A node whose
+TeamViewer service is not running gets TeamViewer's own request for elevation
+to start it, on the node's screen, before any window appears; the agent's
+30 s search ends with "window not found" in its log when the prompt is still
+waiting, and the window is left where TeamViewer opens it. Agents older than
+0.2.18 do not know TEAMVIEWER; Thunderhead skips them with a line in the event
+log, as for the other versioned commands.
 
 ## Clock
 

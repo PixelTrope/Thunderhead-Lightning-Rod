@@ -14,6 +14,7 @@
 #include "Lightning.h"
 #include "Thermal.h"
 #include "Audio.h"
+#include "TeamViewer.h"
 
 #include <commctrl.h>
 #include <iphlpapi.h>
@@ -336,6 +337,8 @@ class Agent {
 public:
     Agent() : udp_(INVALID_SOCKET), tcp_(INVALID_SOCKET), intervalSec_(kDefaultReportInterval), nextReport_(0)
     {
+        tvWindowWanted_ = false;
+        tvStartMs_ = 0;
         InitializeCriticalSection(&lock_);
     }
     ~Agent() { DeleteCriticalSection(&lock_); }
@@ -649,6 +652,38 @@ private:
             ack.set("muted", boolText(muted));
             ack.set("method", method);
             sendMessage(ack);
+        } else if (m.verb == "TEAMVIEWER") {
+            // Start TeamViewer: the installed copy, wherever its installer put it, is
+            // found through the registry or the Start menu and started as its
+            // shortcut would start it; its window is then brought to the front, as a
+            // batch window is, since a window opened by a background program stays
+            // behind the others. The ACK says where TeamViewer was found and whether
+            // it was running before.
+            std::wstring path;
+            std::string how, err;
+            bool wasRunning = false;
+            bool ok = startTeamViewer(path, how, wasRunning, err);
+            logLine(ok ? format("TEAMVIEWER: started %s, found through %s%s", narrow(path).c_str(), how.c_str(),
+                                wasRunning ? ", TeamViewer was already running" : "")
+                       : "TEAMVIEWER failed: " + err);
+            Message ack("ACK");
+            ack.set("cmd", m.verb);
+            ack.set("ok", boolText(ok));
+            ack.set("error", err);
+            ack.set("path", narrow(path));
+            ack.set("found", how);
+            ack.set("running", boolText(wasRunning));
+            sendMessage(ack);
+            if (ok) {
+                tvWindowWanted_ = true;
+                tvStartMs_ = tickMs();
+                // The window exists a moment after the process; a slow node gets more
+                // tries from sessionPhase.
+                for (int i = 0; i < 20 && tvWindowWanted_; ++i) {
+                    tryTeamViewerWindow();
+                    if (tvWindowWanted_) Sleep(100);
+                }
+            }
         } else if (m.verb == "PING") {
             // Report at once, with every value rather than only the changed ones,
             // and restart the report timer from here. Agents before 0.2.11 sent PONG.
@@ -830,6 +865,22 @@ private:
         }
     }
 
+    // Looks for the TeamViewer window once TEAMVIEWER has started it, brings it
+    // to the front, and gives up 30 s after the start.
+    void tryTeamViewerWindow()
+    {
+        if (!tvWindowWanted_) return;
+        HWND w = teamViewerWindow();
+        if (w) {
+            bringToFront(w);
+            tvWindowWanted_ = false;
+            logLine("TEAMVIEWER: window found, brought to the front");
+        } else if (tickMs() - tvStartMs_ > 30000) {
+            tvWindowWanted_ = false;
+            logLine("TEAMVIEWER: window not found within 30 s, left as Windows opened it");
+        }
+    }
+
     // Reports every batch file that has ended since the last pass with a second
     // ACK: stage=finished, the exit code of cmd.exe and the running time.
     bool pollBatches()
@@ -859,6 +910,7 @@ private:
     void sessionPhase()
     {
         while (tcp_ != INVALID_SOCKET) {
+            tryTeamViewerWindow();
             if (!pollBatches()) { dropSession("batch result send failed"); return; }
             unsigned long long now = tickMs();
             if (now >= nextReport_) {
@@ -903,6 +955,8 @@ private:
     MessageParser parser_;
     Message sent_;                   // every report value as last sent to this host
     std::vector<RunningBatch> batches_;   // batch files started by BATCH and not yet ended
+    bool tvWindowWanted_;                 // TEAMVIEWER started TeamViewer and its window is still to be found
+    unsigned long long tvStartMs_;
     int intervalSec_;
     unsigned long long nextReport_;
     CRITICAL_SECTION lock_;
