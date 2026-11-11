@@ -16,6 +16,7 @@
 #include "Version.h"
 #include "NodeStore.h"
 #include "Server.h"
+#include "Theme.h"
 #include "resource.h"
 
 #include <commctrl.h>
@@ -38,6 +39,7 @@ namespace {
 
 const UINT WM_NET = WM_APP + 1;
 const UINT WM_UPDATE_DONE = WM_APP + 2;   // lParam: UpdateResult*
+const UINT WM_THEME_CHANGED = WM_APP + 5; // to every other top-level window of this thread: dress for the current scheme
 const UINT_PTR kTimerId = 1;
 
 HINSTANCE g_inst = NULL;
@@ -468,6 +470,7 @@ void sortByColumn(int col)
 }
 
 std::wstring g_statusExtra;
+std::wstring g_statusText;    // what the status bar shows; the owner-drawn text in Dark Mode
 
 // Without an argument the last event text stays; with one it is replaced.
 void updateStatusBar(const wchar_t* extra = NULL)
@@ -487,7 +490,22 @@ void updateStatusBar(const wchar_t* extra = NULL)
                total, online, rendering, checked, g_store->settings.intervalSec, (int)kDiscoveryPort,
                (int)g_server->tcpPort(), g_statusExtra.c_str());
     buf[255] = L'\0';
-    SendMessageW(g_status, SB_SETTEXTW, 0, (LPARAM)buf);
+    g_statusText = buf;
+    if (theme().dark) SendMessageW(g_status, SB_SETTEXTW, SBT_OWNERDRAW, (LPARAM)g_statusText.c_str());
+    else SendMessageW(g_status, SB_SETTEXTW, 0, (LPARAM)buf);
+}
+
+void drawStatusText(const DRAWITEMSTRUCT* di)
+{
+    const Theme& t = theme();
+    RECT rc = di->rcItem;
+    FillRect(di->hDC, &rc, themeBrush(t.paneBack));
+    rc.left += 2;
+    HGDIOBJ oldFont = SelectObject(di->hDC, g_font);
+    SetBkMode(di->hDC, TRANSPARENT);
+    SetTextColor(di->hDC, t.text);
+    DrawTextW(di->hDC, (const wchar_t*)di->itemData, -1, &rc, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+    SelectObject(di->hDC, oldFont);
 }
 
 // ---------------------------------------------------------------- static pane
@@ -1051,6 +1069,7 @@ HFONT g_textBoxFont = NULL;
 
 INT_PTR CALLBACK textBoxDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if (INT_PTR r = themeDialogMessage(dlg, msg, wp, lp)) return r;
     HWND edit = GetDlgItem(dlg, IDC_TEXTBOX_TEXT);
     switch (msg) {
     case WM_INITDIALOG: {
@@ -1673,8 +1692,9 @@ void keepBatchDialog(HWND dlg)
     g_batchFront = IsDlgButtonChecked(dlg, IDC_BATCH_FRONT) == BST_CHECKED;
 }
 
-INT_PTR CALLBACK batchDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM)
+INT_PTR CALLBACK batchDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if (INT_PTR r = themeDialogMessage(dlg, msg, wp, lp)) return r;
     HWND edit = GetDlgItem(dlg, IDC_BATCH_TEXT);
     switch (msg) {
     case WM_INITDIALOG: {
@@ -1931,11 +1951,29 @@ LRESULT CALLBACK logViewProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                   0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)IDC_LOG_INFO, g_inst, NULL);
         SendMessageW(v->info, WM_SETFONT, (WPARAM)g_font, TRUE);
         v->loading = false;
+        themeWindow(hwnd);
         startLogLoad(hwnd, v);
         return 0;
     }
     if (!v) return DefWindowProcW(hwnd, msg, wp, lp);
     switch (msg) {
+    case WM_THEME_CHANGED: themeWindow(hwnd); return 0;
+    case WM_ERASEBKGND: {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillRect((HDC)wp, &rc, themeBrush(theme().paneBack));
+        return 1;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORBTN:
+        if (HBRUSH b = themeCtlColor(msg, (HDC)wp, (HWND)lp)) return (LRESULT)b;
+        break;
+    case WM_DRAWITEM: {
+        const DRAWITEMSTRUCT* di = (const DRAWITEMSTRUCT*)lp;
+        if (di->hwndItem == v->refresh) return themeDrawPushButton(di) ? TRUE : FALSE;
+        break;
+    }
     case WM_SIZE: layoutLogView(hwnd, v); return 0;
     case WM_SETFOCUS: SetFocus(v->text); return 0;
     case WM_COMMAND:
@@ -2044,6 +2082,7 @@ struct RenameRequest { std::wstring info; std::wstring name; bool reboot; };
 
 INT_PTR CALLBACK renameDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if (INT_PTR r = themeDialogMessage(dlg, msg, wp, lp)) return r;
     static RenameRequest* req = NULL;
     switch (msg) {
     case WM_INITDIALOG:
@@ -2144,6 +2183,22 @@ static LRESULT CALLBACK copyProgressProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM 
     CopyProgress* cp = (CopyProgress*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     switch (msg) {
     case WM_CREATE: SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)((CREATESTRUCTW*)lp)->lpCreateParams); return 0;
+    case WM_THEME_CHANGED: themeWindow(hwnd); return 0;
+    case WM_ERASEBKGND: {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillRect((HDC)wp, &rc, themeBrush(theme().paneBack));
+        return 1;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN:
+        if (HBRUSH b = themeCtlColor(msg, (HDC)wp, (HWND)lp)) return (LRESULT)b;
+        break;
+    case WM_DRAWITEM: {
+        const DRAWITEMSTRUCT* di = (const DRAWITEMSTRUCT*)lp;
+        if (cp && di->hwndItem == cp->button) return themeDrawPushButton(di) ? TRUE : FALSE;
+        break;
+    }
     case WM_COMMAND:
         if (LOWORD(wp) == IDCANCEL && cp) {
             if (cp->finished) DestroyWindow(hwnd);
@@ -2205,6 +2260,7 @@ static void copyProgressOpen(CopyProgress& cp)
     SendMessageW(cp.bar, PBM_SETRANGE32, 0, 1000);
     HWND texts[] = { cp.client, cp.file, cp.bytes, cp.button };
     for (int i = 0; i < 4; ++i) SendMessageW(texts[i], WM_SETFONT, (WPARAM)g_font, TRUE);
+    themeWindow(cp.wnd);
     copyProgressShowBytes(cp, 0);
     ShowWindow(cp.wnd, SW_SHOWNORMAL);
     UpdateWindow(cp.wnd);
@@ -2522,12 +2578,27 @@ void removeCheckedOffline()
 
 // ---------------------------------------------------------------- dialogs
 
+// What the Settings dialog edits. The Dark Mode switch takes effect as it is
+// flipped, so that the scheme can be judged; Cancel puts the old one back.
+struct SettingsDlgData { int sec; bool dark; bool darkAtStart; };
+
+void applyTheme(bool dark);
+
 INT_PTR CALLBACK intervalDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
+    SettingsDlgData* d = (SettingsDlgData*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
+    if (msg == WM_DRAWITEM && ((const DRAWITEMSTRUCT*)lp)->CtlID == IDC_DARK_SWITCH) {
+        themeDrawSwitch((const DRAWITEMSTRUCT*)lp, d && d->dark);
+        return TRUE;
+    }
+    if (INT_PTR r = themeDialogMessage(dlg, msg, wp, lp)) return r;
     switch (msg) {
     case WM_INITDIALOG: {
+        d = (SettingsDlgData*)lp;
+        SetWindowLongPtrW(dlg, GWLP_USERDATA, (LONG_PTR)d);
+        SetDlgItemTextW(dlg, IDC_DARK_STATE, d->dark ? L"On" : L"Off");
         HWND combo = GetDlgItem(dlg, IDC_INTERVAL_COMBO);
-        int current = (int)lp, selected = 0;
+        int current = d->sec, selected = 0;
         for (int sec = 5, i = 0; sec <= 60; sec += 5, ++i) {
             wchar_t text[32];
             _snwprintf(text, 31, L"%d seconds", sec);
@@ -2540,14 +2611,21 @@ INT_PTR CALLBACK intervalDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         return TRUE;
     }
     case WM_COMMAND:
-        if (LOWORD(wp) == IDOK) {
-            HWND combo = GetDlgItem(dlg, IDC_INTERVAL_COMBO);
-            int i = (int)SendMessageW(combo, CB_GETCURSEL, 0, 0);
-            int sec = i < 0 ? 0 : (int)SendMessageW(combo, CB_GETITEMDATA, (WPARAM)i, 0);
-            EndDialog(dlg, sec > 0 ? sec : 0);
+        if (LOWORD(wp) == IDC_DARK_SWITCH && d) {
+            d->dark = !d->dark;
+            SetDlgItemTextW(dlg, IDC_DARK_STATE, d->dark ? L"On" : L"Off");
+            applyTheme(d->dark);
+            themeWindow(dlg);
             return TRUE;
         }
-        if (LOWORD(wp) == IDCANCEL) { EndDialog(dlg, 0); return TRUE; }
+        if (LOWORD(wp) == IDOK && d) {
+            HWND combo = GetDlgItem(dlg, IDC_INTERVAL_COMBO);
+            int i = (int)SendMessageW(combo, CB_GETCURSEL, 0, 0);
+            d->sec = i < 0 ? 0 : (int)SendMessageW(combo, CB_GETITEMDATA, (WPARAM)i, 0);
+            EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDCANCEL) { EndDialog(dlg, IDCANCEL); return TRUE; }
         break;
     }
     return FALSE;
@@ -2845,11 +2923,12 @@ COLORREF mixColor(COLORREF a, COLORREF b, int pct)
 void paintCommandPaneBackground(HDC dc)
 {
     RECT rc;
+    const Theme& t = theme();
     GetClientRect(g_commandPane, &rc);
-    FillRect(dc, &rc, GetSysColorBrush(COLOR_BTNFACE));
+    FillRect(dc, &rc, themeBrush(t.paneBack));
     CommandLayout cl = commandLayout(rc.right);
     for (int g = 0; g < kGroupCount; ++g) {
-        HBRUSH b = CreateSolidBrush(kGroups[g].band);
+        HBRUSH b = CreateSolidBrush(mixColor(kGroups[g].band, t.bandMix, t.bandPct));
         FillRect(dc, &cl.bands[g], b);
         DeleteObject(b);
     }
@@ -2857,15 +2936,20 @@ void paintCommandPaneBackground(HDC dc)
 
 // An owner-drawn command button: the group's tint on the face, a darker edge
 // of the same hue, the face pressed darker and disabled paler with grey text.
+// In Dark Mode the tints are mixed towards near-black and the edge and the
+// pressed face go lighter instead.
 bool drawCommandButton(const DRAWITEMSTRUCT* di)
 {
     const CommandDef* def = NULL;
     for (int i = 0; i < kCommandCount && !def; ++i) if (kCommands[i].id == (int)di->CtlID) def = &kCommands[i];
     if (!def) return false;
     const CommandGroup& g = kGroups[def->group];
+    const Theme& t = theme();
     bool disabled = (di->itemState & ODS_DISABLED) != 0, pressed = (di->itemState & ODS_SELECTED) != 0;
-    COLORREF face = disabled ? mixColor(g.face, g.band, 35) : pressed ? mixColor(g.face, RGB(0, 0, 0), 86) : g.face;
-    COLORREF edge = mixColor(g.face, RGB(0, 0, 0), disabled ? 80 : 62);
+    COLORREF band = mixColor(g.band, t.bandMix, t.bandPct), base = mixColor(g.face, t.bandMix, t.facePct);
+    COLORREF towards = t.dark ? RGB(255, 255, 255) : RGB(0, 0, 0);
+    COLORREF face = disabled ? mixColor(base, band, 35) : pressed ? mixColor(base, towards, 86) : base;
+    COLORREF edge = mixColor(base, towards, disabled ? 80 : 62);
     RECT rc = di->rcItem;
     HBRUSH b = CreateSolidBrush(face);
     FillRect(di->hDC, &rc, b);
@@ -2877,7 +2961,7 @@ bool drawCommandButton(const DRAWITEMSTRUCT* di)
     GetWindowTextW(di->hwndItem, text, 128);
     HGDIOBJ oldFont = SelectObject(di->hDC, g_font);
     SetBkMode(di->hDC, TRANSPARENT);
-    SetTextColor(di->hDC, disabled ? GetSysColor(COLOR_GRAYTEXT) : RGB(0, 0, 0));
+    SetTextColor(di->hDC, disabled ? t.grayText : t.text);
     RECT tr = rc;
     if (pressed) OffsetRect(&tr, 1, 1);
     DrawTextW(di->hDC, text, -1, &tr, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
@@ -2926,11 +3010,16 @@ LRESULT CALLBACK paneProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return SendMessageW(g_main, msg, wp, lp);
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLORBTN:
+        if (HBRUSH b = themeCtlColor(msg, (HDC)wp, (HWND)lp)) return (LRESULT)b;
         SetBkColor((HDC)wp, GetSysColor(COLOR_BTNFACE));
         return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
-    case WM_ERASEBKGND:
+    case WM_ERASEBKGND: {
         if (hwnd == g_commandPane) { paintCommandPaneBackground((HDC)wp); return 1; }
-        break;
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillRect((HDC)wp, &rc, themeBrush(hwnd == g_inventoryPane ? theme().windowBack : theme().paneBack));
+        return 1;
+    }
     case WM_DRAWITEM: {
         const DRAWITEMSTRUCT* di = (const DRAWITEMSTRUCT*)lp;
         if (di->CtlType == ODT_BUTTON && hwnd == g_commandPane && drawCommandButton(di)) return TRUE;
@@ -2957,14 +3046,184 @@ void drawAutoShutdownCell(HDC dc, int row, bool on)
     RestoreDC(dc, saved);
 }
 
+// The Client Inventory's appearance: a near-black header with white captions,
+// rows shaded light and medium gray in turn, and a black rule between the
+// columns (the reverse in Dark Mode; the colors are the scheme's), all painted
+// through custom draw so that the list keeps its own selection, check boxes
+// and in-place editing. The Client Details list shares the header painting.
+
+HWND headerOf(HWND list) { return list ? (HWND)SendMessageW(list, LVM_GETHEADER, 0, 0) : NULL; }
+HWND listHeader() { return headerOf(g_list); }
+
+void fillRect(HDC dc, const RECT& rc, COLORREF color)
+{
+    HBRUSH b = CreateSolidBrush(color);
+    FillRect(dc, &rc, b);
+    DeleteObject(b);
+}
+
+// The vertical rules at the right edge of every column as the header lays
+// them out, so that they follow a dragged column and the horizontal scroll,
+// between top and bottom in the list's client coordinates.
+void drawColumnRules(HDC dc, int top, int bottom)
+{
+    HWND header = listHeader();
+    if (!header) return;
+    HPEN pen = CreatePen(PS_SOLID, 1, theme().columnRule);
+    HGDIOBJ old = SelectObject(dc, pen);
+    int count = (int)SendMessageW(header, HDM_GETITEMCOUNT, 0, 0);
+    for (int i = 0; i < count; ++i) {
+        RECT rc;
+        if (!SendMessageW(header, HDM_GETITEMRECT, (WPARAM)i, (LPARAM)&rc)) continue;
+        MapWindowPoints(header, g_list, (POINT*)&rc, 2);
+        MoveToEx(dc, rc.right - 1, top, NULL);
+        LineTo(dc, rc.right - 1, bottom);
+    }
+    SelectObject(dc, old);
+    DeleteObject(pen);
+}
+
+// The check box column of one row, which the list leaves in its own
+// background color: painted over in the row's shade after the list has drawn
+// the row, with the check box put back from the list's state images.
+void drawCheckBoxCell(HDC dc, int row, COLORREF shade)
+{
+    RECT bounds, label;
+    bounds.left = LVIR_BOUNDS;
+    label.left = LVIR_LABEL;
+    if (!SendMessageW(g_list, LVM_GETITEMRECT, (WPARAM)row, (LPARAM)&bounds)) return;
+    if (!SendMessageW(g_list, LVM_GETITEMRECT, (WPARAM)row, (LPARAM)&label)) return;
+    RECT rc = bounds;
+    rc.right = label.left;
+    if (rc.right <= rc.left) return;
+    fillRect(dc, rc, shade);
+    HIMAGELIST il = (HIMAGELIST)SendMessageW(g_list, LVM_GETIMAGELIST, LVSIL_STATE, 0);
+    int cx = 0, cy = 0;
+    if (!il || !ImageList_GetIconSize(il, &cx, &cy)) return;
+    UINT state = (UINT)SendMessageW(g_list, LVM_GETITEMSTATE, (WPARAM)row, LVIS_STATEIMAGEMASK);
+    int image = (int)((state & LVIS_STATEIMAGEMASK) >> 12) - 1;
+    if (image < 0) return;
+    ImageList_Draw(il, image, dc, rc.left + (rc.right - rc.left - cx) / 2, rc.top + (rc.bottom - rc.top - cy) / 2, ILD_TRANSPARENT);
+}
+
 LRESULT onListCustomDraw(NMLVCUSTOMDRAW* cd)
 {
     switch (cd->nmcd.dwDrawStage) {
-    case CDDS_PREPAINT:     return CDRF_NOTIFYITEMDRAW;
-    case CDDS_ITEMPREPAINT: return CDRF_NOTIFYPOSTPAINT;
+    case CDDS_PREPAINT:
+        return CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT;
+    case CDDS_ITEMPREPAINT: {
+        // The row's shade goes through clrTextBk only: the list paints it under
+        // the text it draws, so the two always agree. Painting the row here
+        // ourselves blanked rows under the pointer, because the hot-tracking
+        // repaint hands the handler a DC covering the whole row while the
+        // list itself redraws only part of it.
+        int row = (int)cd->nmcd.dwItemSpec;
+        cd->clrTextBk = row % 2 == 0 ? theme().rowLight : theme().rowMedium;
+        cd->clrText = theme().rowText;
+        return CDRF_NOTIFYPOSTPAINT;
+    }
     case CDDS_ITEMPOSTPAINT: {
+        int row = (int)cd->nmcd.dwItemSpec;
         const NodeRecord* n = (const NodeRecord*)cd->nmcd.lItemlParam;
-        if (n) drawAutoShutdownCell(cd->nmcd.hdc, (int)cd->nmcd.dwItemSpec, n->autoShutdown);
+        drawCheckBoxCell(cd->nmcd.hdc, row, row % 2 == 0 ? theme().rowLight : theme().rowMedium);
+        if (n) drawAutoShutdownCell(cd->nmcd.hdc, row, n->autoShutdown);
+        RECT rc;
+        rc.left = LVIR_BOUNDS;
+        if (SendMessageW(g_list, LVM_GETITEMRECT, (WPARAM)row, (LPARAM)&rc)) drawColumnRules(cd->nmcd.hdc, rc.top, rc.bottom);
+        return CDRF_DODEFAULT;
+    }
+    case CDDS_POSTPAINT: {
+        // The stretch below the last row, which no item paints.
+        RECT rc;
+        GetClientRect(g_list, &rc);
+        int top = 0;
+        HWND header = listHeader();
+        if (header) {
+            RECT hr;
+            GetWindowRect(header, &hr);
+            MapWindowPoints(NULL, g_list, (POINT*)&hr, 2);
+            top = hr.bottom;
+        }
+        int count = (int)SendMessageW(g_list, LVM_GETITEMCOUNT, 0, 0);
+        if (count > 0) {
+            RECT last;
+            last.left = LVIR_BOUNDS;
+            if (SendMessageW(g_list, LVM_GETITEMRECT, (WPARAM)(count - 1), (LPARAM)&last) && last.bottom > top) top = last.bottom;
+        }
+        if (top < rc.bottom) drawColumnRules(cd->nmcd.hdc, top, rc.bottom);
+        return CDRF_DODEFAULT;
+    }
+    }
+    return CDRF_DODEFAULT;
+}
+
+// The header, painted item by item: dark face, a gray rule at each column's
+// right edge, the caption in white with the column's alignment, and the sort
+// arrow as a small white triangle above the caption. The list forwards the
+// header's custom draw notifications to this window.
+LRESULT onHeaderCustomDraw(NMCUSTOMDRAW* cd)
+{
+    HWND header = cd->hdr.hwndFrom;
+    switch (cd->dwDrawStage) {
+    case CDDS_PREPAINT: {
+        RECT rc;
+        GetClientRect(header, &rc);
+        fillRect(cd->hdc, rc, theme().headerBack);
+        return CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT;
+    }
+    case CDDS_ITEMPREPAINT: {
+        int col = (int)cd->dwItemSpec;
+        RECT rc = cd->rc;
+        fillRect(cd->hdc, rc, theme().headerBack);
+        RECT rule = rc;
+        rule.left = rc.right - 1;
+        fillRect(cd->hdc, rule, theme().headerRule);
+        wchar_t text[64] = L"";
+        HDITEMW hi;
+        memset(&hi, 0, sizeof(hi));
+        hi.mask = HDI_TEXT | HDI_FORMAT;
+        hi.pszText = text;
+        hi.cchTextMax = 64;
+        SendMessageW(header, HDM_GETITEMW, (WPARAM)col, (LPARAM)&hi);
+        if (hi.fmt & (HDF_SORTUP | HDF_SORTDOWN)) {
+            int cx = (rc.left + rc.right) / 2, y = rc.top + 1;
+            POINT up[3]   = { { cx - 4, y + 4 }, { cx + 5, y + 4 }, { cx, y - 1 } };
+            POINT down[3] = { { cx - 4, y },     { cx + 5, y },     { cx, y + 5 } };
+            HBRUSH white = CreateSolidBrush(theme().headerText);
+            HGDIOBJ oldBrush = SelectObject(cd->hdc, white);
+            HGDIOBJ oldPen = SelectObject(cd->hdc, GetStockObject(NULL_PEN));
+            Polygon(cd->hdc, (hi.fmt & HDF_SORTUP) ? up : down, 3);
+            SelectObject(cd->hdc, oldPen);
+            SelectObject(cd->hdc, oldBrush);
+            DeleteObject(white);
+        }
+        RECT tr = rc;
+        tr.left += 6;
+        tr.right -= 7;
+        if (cd->uItemState & CDIS_SELECTED) OffsetRect(&tr, 1, 1);
+        UINT fmt = DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX;
+        UINT just = hi.fmt & HDF_JUSTIFYMASK;
+        fmt |= just == HDF_RIGHT ? DT_RIGHT : just == HDF_CENTER ? DT_CENTER : DT_LEFT;
+        HGDIOBJ oldFont = SelectObject(cd->hdc, g_font);
+        int oldMode = SetBkMode(cd->hdc, TRANSPARENT);
+        COLORREF oldColor = SetTextColor(cd->hdc, theme().headerText);
+        DrawTextW(cd->hdc, text, -1, &tr, fmt);
+        SetTextColor(cd->hdc, oldColor);
+        SetBkMode(cd->hdc, oldMode);
+        SelectObject(cd->hdc, oldFont);
+        return CDRF_SKIPDEFAULT;
+    }
+    case CDDS_POSTPAINT: {
+        // The blank stretch right of the last column, which the header paints
+        // after its items.
+        RECT rc;
+        GetClientRect(header, &rc);
+        int count = (int)SendMessageW(header, HDM_GETITEMCOUNT, 0, 0);
+        for (int i = 0; i < count; ++i) {
+            RECT ir;
+            if (SendMessageW(header, HDM_GETITEMRECT, (WPARAM)i, (LPARAM)&ir) && ir.right > rc.left) rc.left = ir.right;
+        }
+        if (rc.left < rc.right) fillRect(cd->hdc, rc, theme().headerBack);
         return CDRF_DODEFAULT;
     }
     }
@@ -3008,11 +3267,48 @@ LRESULT onListNotify(NMHDR* hdr)
     return 0;
 }
 
-// Settings: the report interval dialog, from the button and the menu alike.
+// Dresses every window for the scheme: the main window and its children, the
+// two lists' base colors, the status bar, and every other top-level window of
+// this thread (log views, the copy progress) through WM_THEME_CHANGED.
+BOOL CALLBACK themeOtherWindow(HWND h, LPARAM)
+{
+    if (h != g_main) SendMessageW(h, WM_THEME_CHANGED, 0, 0);
+    return TRUE;
+}
+
+void applyTheme(bool dark)
+{
+    setDarkMode(dark);
+    const Theme& t = theme();
+    themeWindow(g_main);
+    SendMessageW(g_list, LVM_SETBKCOLOR, 0, (LPARAM)t.listBack);
+    SendMessageW(g_staticList, LVM_SETBKCOLOR, 0, (LPARAM)t.editBack);
+    SendMessageW(g_staticList, LVM_SETTEXTBKCOLOR, 0, (LPARAM)t.editBack);
+    SendMessageW(g_staticList, LVM_SETTEXTCOLOR, 0, (LPARAM)t.editText);
+    SendMessageW(g_status, SB_SETBKCOLOR, 0, (LPARAM)(t.dark ? t.paneBack : CLR_DEFAULT));
+    updateStatusBar();
+    EnumThreadWindows(GetCurrentThreadId(), themeOtherWindow, 0);
+    RedrawWindow(g_main, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME);
+}
+
+// Settings: the report interval and the Dark Mode switch, from the button and
+// the menu alike. The switch acts at once; Cancel restores the scheme.
 void openSettings()
 {
-    int sec = (int)DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_INTERVAL), g_main, intervalDlgProc, (LPARAM)g_store->settings.intervalSec);
-    if (sec > 0 && sec != g_store->settings.intervalSec) setIntervalAll(sec);
+    SettingsDlgData d;
+    d.sec = g_store->settings.intervalSec;
+    d.dark = d.darkAtStart = g_store->settings.darkMode;
+    if (DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_INTERVAL), g_main, intervalDlgProc, (LPARAM)&d) != IDOK) {
+        if (theme().dark != d.darkAtStart) applyTheme(d.darkAtStart);
+        return;
+    }
+    if (d.sec > 0 && d.sec != g_store->settings.intervalSec) setIntervalAll(d.sec);
+    if (d.dark != g_store->settings.darkMode) {
+        g_store->settings.darkMode = d.dark;
+        g_store->saveSettings();
+        logEvent(d.dark ? "Dark Mode on" : "Dark Mode off");
+    }
+    if (theme().dark != d.dark) applyTheme(d.dark);
 }
 
 LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -3069,7 +3365,20 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_NOTIFY: {
         NMHDR* hdr = (NMHDR*)lp;
         if (hdr->hwndFrom == g_list) return onListNotify(hdr);
+        if (hdr->code == NM_CUSTOMDRAW && (hdr->hwndFrom == listHeader() || hdr->hwndFrom == headerOf(g_staticList)))
+            return onHeaderCustomDraw((NMCUSTOMDRAW*)hdr);
         return 0;
+    }
+    case WM_ERASEBKGND: {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillRect((HDC)wp, &rc, themeBrush(theme().paneBack));
+        return 1;
+    }
+    case WM_DRAWITEM: {
+        const DRAWITEMSTRUCT* di = (const DRAWITEMSTRUCT*)lp;
+        if (di->hwndItem == g_status) { drawStatusText(di); return TRUE; }
+        break;
     }
     case WM_DESTROY:
         KillTimer(hwnd, kTimerId);
@@ -3087,6 +3396,16 @@ HFONT uiFont()
     if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0))
         return CreateFontIndirectW(&ncm.lfMessageFont);
     return (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+}
+
+// The in-place Group/Comment editor is a child of the list, so the list gets
+// its WM_CTLCOLOREDIT; in Dark Mode it answers with the scheme's colors.
+LRESULT CALLBACK listColorSubclass(HWND w, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
+{
+    if (msg == WM_CTLCOLOREDIT) {
+        if (HBRUSH b = themeCtlColor(msg, (HDC)wp, (HWND)lp)) return (LRESULT)b;
+    }
+    return DefSubclassProc(w, msg, wp, lp);
 }
 
 HWND createPane(HINSTANCE inst, int bgColor)
@@ -3152,8 +3471,9 @@ void createChildren(HINSTANCE inst)
     g_list = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL,
                              0, 0, 10, 10, g_inventoryPane, NULL, inst, NULL);
     SendMessageW(g_list, LVM_SETEXTENDEDLISTVIEWSTYLE, 0,
-                 LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_HEADERDRAGDROP | LVS_EX_CHECKBOXES);
+                 LVS_EX_FULLROWSELECT | LVS_EX_HEADERDRAGDROP | LVS_EX_CHECKBOXES);   // shading and rules come from onListCustomDraw
     SendMessageW(g_list, WM_SETFONT, (WPARAM)g_font, TRUE);
+    SetWindowSubclass(g_list, listColorSubclass, 1, 0);
     for (int i = 0; i < ColCount; ++i) {
         LVCOLUMNW col;
         memset(&col, 0, sizeof(col));
@@ -3236,7 +3556,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show)
                     L"Thunderhead", MB_OK | MB_ICONERROR);
     }
     SetTimer(g_main, kTimerId, 1000, NULL);
-    updateStatusBar();
+    applyTheme(store.settings.darkMode);   // also the first updateStatusBar()
     ShowWindow(g_main, show);
     UpdateWindow(g_main);
 

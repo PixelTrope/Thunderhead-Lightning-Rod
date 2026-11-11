@@ -11,6 +11,8 @@
 #define IDM_HELP_ABOUT          1301
 
 #define IDC_INTERVAL_COMBO      2101
+#define IDC_DARK_SWITCH         2102   // the Dark Mode two-position slider (owner-drawn button)
+#define IDC_DARK_STATE          2103   // "Off" / "On" beside it
 
 // static pane
 #define IDC_STATIC_TITLE        2201

@@ -47,6 +47,7 @@ void NodeStore::load()
         else if (key == "tcp_port") settings.tcpPort = atoi(value.c_str());
         else if (key == "agent_file") settings.agentFile = value;
         else if (key == "share_name") settings.shareName = value;
+        else if (key == "dark_mode") settings.darkMode = atoi(value.c_str()) != 0;
     }
     if (settings.shareName.empty()) settings.shareName = "LightningRod";
     if (settings.intervalSec < 5) settings.intervalSec = kDefaultReportInterval;
@@ -105,6 +106,7 @@ void NodeStore::saveSettings()
     std::string out = format("interval=%d\r\ntcp_port=%d\r\n", settings.intervalSec, settings.tcpPort);
     out += "agent_file=" + settings.agentFile + "\r\n";
     out += "share_name=" + settings.shareName + "\r\n";
+    out += format("dark_mode=%d\r\n", settings.darkMode ? 1 : 0);
     writeFile(dir_ + L"\\settings.txt", out);
 }
 

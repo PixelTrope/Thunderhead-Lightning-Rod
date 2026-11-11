@@ -47,7 +47,8 @@ struct Settings {
     int tcpPort;
     std::string agentFile;    // LightningRod.exe to push; empty = beside Thunderhead.exe
     std::string shareName;    // share on each node that maps to the agent's folder
-    Settings() : intervalSec(kDefaultReportInterval), tcpPort(kDefaultTcpPort), shareName("LightningRod") {}
+    bool darkMode;            // Thunderhead's Dark Mode (Settings)
+    Settings() : intervalSec(kDefaultReportInterval), tcpPort(kDefaultTcpPort), shareName("LightningRod"), darkMode(false) {}
 };
 
 class NodeStore {

@@ -207,11 +207,15 @@ interval=15
 tcp_port=42002
 agent_file=
 share_name=LightningRod
+dark_mode=0
 ```
 
 `agent_file` is the LightningRod.exe to push to nodes; empty means the one beside
 Thunderhead.exe. `share_name` is the share on every node that maps to the
-agent's folder.
+agent's folder. `dark_mode` is the Dark Mode switch of the Settings dialog, 1
+for the dark scheme: dark panes, dialogs, log views and status bar with light
+text, the Client Inventory's header light with black captions and its rows dark
+gray with white text and white rules, the reverse of the light scheme.
 
 `nodes.txt`, one block per node, keyed by MAC; the user-edited fields are kept
 here and survive re-imaging of the node:
