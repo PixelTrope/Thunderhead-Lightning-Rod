@@ -75,6 +75,8 @@ gpu=AMD Radeon HD 6310 Graphics
 vram_mb=384
 lightning3_path=C:\Program Files\DAZ 3D\BryceLightning7\Lightning.exe
 lightning3_version=7.1.0.109
+lightning2_path=
+lightning2_version=
 ```
 
 `mem_mb` is the physical memory the node's Windows can address, the figure
@@ -96,9 +98,11 @@ GetSystemFirmwareTable.
 
 Agents from 0.2.19 send `lightning3_path` and `lightning3_version`, the
 installed Bryce 7 / 7 Pro Lightning as found at the agent's start by the
-lookup described under Lightning lookup; both are empty when none is
-installed, and Thunderhead shows that as "not installed" and an absent field
-as blank. The window of the agent shows the same.
+lookup described under Lightning lookup, and agents from 0.2.20 also
+`lightning2_path` and `lightning2_version` for the Bryce 6.x Lightning. Each
+pair is empty when none is installed, and Thunderhead shows that as "not
+installed" and an absent field as blank. The window of the agent shows the
+same.
 
 Thunderhead replies with the report interval in seconds (5 to 60 in steps of 5,
 default 15):
@@ -520,22 +524,33 @@ generation up, in this order, and takes the first `Lightning.exe` that exists:
 4. the default folder under each Program Files folder.
 
 The file's own version resource is then read; when the installer's entry gave
-no version, that is the version reported, and when its first number is not
-the generation's (7 for Lightning 3, 6 for Lightning 2, 5 for Lightning 1)
-the start is refused with `error=` naming the file and its version, so that
-a folder holding another generation's Lightning is never started under the
-wrong button.
+no version, that is the version reported. A Bryce 7 Lightning is known to
+carry 7.x there, so Lightning 3 accepts only a file whose first number is 7;
+the numbering of the older files is not yet verified, so Lightning 2 accepts
+any file except one whose first number is another generation's (7 or 5). A
+file that fails is passed over for the next source, and when nothing else
+names one the start is refused with `error=` naming the file and its
+version, so that a folder holding another generation's Lightning is never
+started under the wrong button.
 
-For generation 3 the entries are those of the Bryce Lightning 7.0 installer
-(verified on 7.1.0.109): product key `HKLM\SOFTWARE\DAZ 3D\Bryce Lightning 7.0`
-(`HKLM\SOFTWARE\WOW6432Node\DAZ 3D\Bryce Lightning 7.0` on 64-bit Windows) with
-`Location` and `Version`, the Add/Remove Programs key named
-`Bryce Lightning 7.0 <version>`, the shortcut
-`DAZ 3D\Bryce Lightning\Bryce Lightning 7.0.lnk`, and the default folder
-`DAZ 3D\BryceLightning7`. The entries of generations 2 and 1 are not yet
-recorded; until they are, the agent answers `START gen=2` and `gen=1` with
-`ok=no` and an error saying so, and Thunderhead keeps those two controls
-inactive.
+Each DAZ installer writes a product key under `HKLM\SOFTWARE\DAZ 3D`
+(`HKLM\SOFTWARE\WOW6432Node\DAZ 3D` on 64-bit Windows) named after the product
+and its version, with `Location` and `Version`. For generation 3 the key is
+`Bryce Lightning 7.0` (verified on 7.1.0.109), the Add/Remove Programs key is
+named `Bryce Lightning 7.0 <version>`, the shortcut is
+`DAZ 3D\Bryce Lightning\Bryce Lightning 7.0.lnk`, and the default folder is
+`DAZ 3D\BryceLightning7`. For generation 2 the key is `Bryce Lightning 6.3`
+(verified on the registry export of a 32-bit Windows XP node: version
+6.3.0.84, Location `C:\Program Files\DAZ 3D\BryceLightning`); the agent tries
+every key whose name starts with `Bryce Lightning 6`, highest version first,
+so a 6.1 or 6.0 installer following the same pattern is found as well, and
+the default folders tried are `DAZ 3D\BryceLightning` and
+`DAZ 3D\Bryce Lightning`. The entries of generation 1 are not yet recorded;
+until they are, the agent answers `START gen=1` with `ok=no` and an error
+saying so, and Thunderhead keeps that control inactive. Thunderhead sends
+`gen=2` and `gen=1` only to agents from 0.2.20, because older agents would
+start the Bryce 7 Lightning in their place; the others are skipped with a
+line in the event log.
 
 The ACK carries `gen=`, `path=` (the file), `version=` and `found=` (the
 source, such as `registry HKLM\SOFTWARE\WOW6432Node\DAZ 3D\Bryce Lightning 7.0\Location`
@@ -546,7 +561,8 @@ names the running file. The event log reads "START ok on NAME: Lightning 3
 NAME: ...". When the agent restarts Lightning after acquiring a late address
 (see Agent start-up), it restarts the copy that was running, whatever its
 generation. The same lookup runs once at the agent's start and fills
-`lightning3_path` and `lightning3_version` in HELLO.
+`lightning3_path`, `lightning3_version`, `lightning2_path` and
+`lightning2_version` in HELLO.
 
 ## Clock
 

@@ -136,7 +136,7 @@ const CommandDef kCommands[] = {
     { IDC_CMD_PRIORITY,        L"Change Render Priority",         NULL,      true,  GroupRender },
     { IDC_CMD_STOP,            L"Stop Lightning",                 "STOP",    true,  GroupRender },
     { IDC_CMD_START71,         L"Run Lightning 3 (B7 & 7 Pro)",   NULL,      true,  GroupRender },
-    { IDC_CMD_START63,         L"Run Lightning 2 (B6.x)",         NULL,      false, GroupRender },
+    { IDC_CMD_START63,         L"Run Lightning 2 (B6.x)",         NULL,      true,  GroupRender },
     { IDC_CMD_START50,         L"Run Lightning 1 (B5.x)",         NULL,      false, GroupRender },
 };
 const int kCommandCount = sizeof(kCommands) / sizeof(kCommands[0]);
@@ -536,6 +536,7 @@ void showStaticPane(NodeRecord* n)
     add(L"GPU", widen(h.get("gpu")));
     add(L"VRAM MB", widen(h.get("vram_mb")));
     add(L"Lightning 3 (B7 & 7 Pro)", lightningInstallText(h, "lightning3"));
+    add(L"Lightning 2 (B6.x)", lightningInstallText(h, "lightning2"));
     bool reported = !r.verb.empty();
     add(L"Rendering", !r.has("rendering") ? std::wstring() : (parseBool(r.get("rendering")) ? L"Yes" : L"No"));
     add(L"Lightning", !r.has("lightning") ? std::wstring() : (r.get("lightning") == "running" ? L"Running" : L"Stopped"));
@@ -553,7 +554,8 @@ void showStaticPane(NodeRecord* n)
         add(L"Clock offset", std::wstring());
     }
     static const char* const knownHello[] = { "agent", "os", "cpu", "cpu_mhz", "cores", "mem_mb", "mem_installed_mb", "mem_type", "disk_total_mb", "board",
-                                              "chipset", "gpu", "vram_mb", "ip", "mac", "name", "lightning3_path", "lightning3_version" };
+                                              "chipset", "gpu", "vram_mb", "ip", "mac", "name", "lightning3_path", "lightning3_version",
+                                              "lightning2_path", "lightning2_version" };
     static const char* const knownReport[] = { "cpu_pct", "cpu_temp_c", "disk_free_mb", "lightning", "lightning_cpu_pct",
                                                "mem_free_mb", "rendering", "uptime_s", "clock", "utc_ms" };
     for (std::map<std::string, std::string>::const_iterator it = h.fields.begin(); it != h.fields.end(); ++it) {
@@ -1319,12 +1321,17 @@ void startTeamViewer()
 // of that generation through its installer's registry entries, the Start menu
 // or the default folder (Lightning lookup in docs/PROTOCOL.md) and the ACK
 // names the file, its version and the source. Agents before 0.2.19 ignore
-// gen and start the Bryce 7 Lightning from its default folder.
+// gen and start the Bryce 7 Lightning from its default folder, so the Bryce 6
+// and Bryce 5 buttons go only to agents that know those generations' entries
+// (0.2.20 for Lightning 2); older agents are skipped with an event log line.
+const char* const kLightning2Agent = "0.2.20";
+
 void runLightning(int gen)
 {
     Message m("START");
     m.set("gen", (long long)gen);
-    sendCommandMessage(m);
+    if (gen == 3) sendCommandMessage(m);
+    else sendVersioned(m, m.oneLine(), kLightning2Agent);
 }
 
 // Set Client Date and Time: every checked online client gets this host's clock

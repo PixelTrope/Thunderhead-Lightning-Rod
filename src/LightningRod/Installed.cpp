@@ -132,12 +132,12 @@ std::wstring shortcutTarget(const std::wstring& lnk)
     return out;
 }
 
-static std::wstring shortcutUnder(const std::wstring& folder, const std::wstring& nameLower, const wchar_t* targetEndsWith, std::wstring& lnkName)
+static void shortcutsUnder(const std::wstring& folder, const std::wstring& nameLower, const wchar_t* targetEndsWith,
+                           const char* who, std::vector<ShortcutHit>& hits)
 {
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW((folder + L"\\*").c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return std::wstring();
-    std::wstring out;
+    if (h == INVALID_HANDLE_VALUE) return;
     std::vector<std::wstring> dirs;
     do {
         if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
@@ -148,15 +148,19 @@ static std::wstring shortcutUnder(const std::wstring& folder, const std::wstring
         for (size_t i = 0; i < lower.size(); ++i) lower[i] = (wchar_t)towlower(lower[i]);
         if (lower.find(nameLower) == std::wstring::npos) continue;
         std::wstring target = shortcutTarget(full);
-        if (fileExists(target) && endsWithNoCase(target, targetEndsWith)) { out = target; lnkName = fd.cFileName; break; }
+        if (!fileExists(target) || !endsWithNoCase(target, targetEndsWith)) continue;
+        ShortcutHit hit;
+        hit.path = target;
+        hit.how = format("Start menu shortcut %s (%s)", narrow(fd.cFileName).c_str(), who);
+        hits.push_back(hit);
     } while (FindNextFileW(h, &fd));
     FindClose(h);
-    for (size_t i = 0; i < dirs.size() && out.empty(); ++i) out = shortcutUnder(dirs[i], nameLower, targetEndsWith, lnkName);
-    return out;
+    for (size_t i = 0; i < dirs.size(); ++i) shortcutsUnder(dirs[i], nameLower, targetEndsWith, who, hits);
 }
 
-std::wstring startMenuTarget(const wchar_t* nameContains, const wchar_t* targetEndsWith, std::string& how)
+std::vector<ShortcutHit> startMenuTargets(const wchar_t* nameContains, const wchar_t* targetEndsWith)
 {
+    std::vector<ShortcutHit> hits;
     std::wstring nameLower = nameContains;
     for (size_t i = 0; i < nameLower.size(); ++i) nameLower[i] = (wchar_t)towlower(nameLower[i]);
     const int folders[] = { CSIDL_COMMON_PROGRAMS, CSIDL_PROGRAMS };
@@ -164,10 +168,17 @@ std::wstring startMenuTarget(const wchar_t* nameContains, const wchar_t* targetE
     for (int i = 0; i < 2; ++i) {
         wchar_t base[MAX_PATH];
         if (FAILED(SHGetFolderPathW(NULL, folders[i], NULL, SHGFP_TYPE_CURRENT, base))) continue;
-        std::wstring lnk, p = shortcutUnder(base, nameLower, targetEndsWith, lnk);
-        if (!p.empty()) { how = format("Start menu shortcut %s (%s)", narrow(lnk).c_str(), names[i]); return p; }
+        shortcutsUnder(base, nameLower, targetEndsWith, names[i], hits);
     }
-    return std::wstring();
+    return hits;
+}
+
+std::wstring startMenuTarget(const wchar_t* nameContains, const wchar_t* targetEndsWith, std::string& how)
+{
+    std::vector<ShortcutHit> hits = startMenuTargets(nameContains, targetEndsWith);
+    if (hits.empty()) return std::wstring();
+    how = hits[0].how;
+    return hits[0].path;
 }
 
 // ---------------------------------------------------------------- files

@@ -35,6 +35,10 @@ std::wstring shortcutTarget(const std::wstring& lnk);
 // user, recursively) whose file name contains nameContains and whose target
 // exists and ends with targetEndsWith; how says which shortcut.
 std::wstring startMenuTarget(const wchar_t* nameContains, const wchar_t* targetEndsWith, std::string& how);
+// Every such shortcut's target in the order found, for a caller that chooses
+// among several (a Start menu holding more than one Lightning generation).
+struct ShortcutHit { std::wstring path; std::string how; };
+std::vector<ShortcutHit> startMenuTargets(const wchar_t* nameContains, const wchar_t* targetEndsWith);
 // The first <Program Files folder>\tail that exists, over Program Files (x86),
 // Program Files and the 64-bit Program Files; empty when none does.
 std::wstring programFilesFile(const wchar_t* tail);

@@ -351,15 +351,20 @@ public:
         // Start menu fallback, wants COM on this thread.
         {
             HRESULT co = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-            LightningInstall li;
-            std::string err;
-            if (findLightning(3, li, err)) {
-                info_.lightning3Path = narrow(li.path);
-                info_.lightning3Version = li.version;
-                logLine(format("%s: %s, version %s, found through %s", lightningLabel(3), info_.lightning3Path.c_str(),
-                               li.version.empty() ? "unknown" : li.version.c_str(), li.found.c_str()));
-            } else {
-                logLine(err);
+            const int gens[] = { 3, 2 };
+            for (int g = 0; g < 2; ++g) {
+                LightningInstall li;
+                std::string err;
+                std::string& path = gens[g] == 3 ? info_.lightning3Path : info_.lightning2Path;
+                std::string& version = gens[g] == 3 ? info_.lightning3Version : info_.lightning2Version;
+                if (findLightning(gens[g], li, err)) {
+                    path = narrow(li.path);
+                    version = li.version;
+                    logLine(format("%s: %s, version %s, found through %s", lightningLabel(gens[g]), path.c_str(),
+                                   version.empty() ? "unknown" : version.c_str(), li.found.c_str()));
+                } else {
+                    logLine(err);
+                }
             }
             if (SUCCEEDED(co)) CoUninitialize();
         }
@@ -555,6 +560,8 @@ private:
         m.set("vram_mb", (long long)info_.vramMb);
         m.set("lightning3_path", info_.lightning3Path);
         m.set("lightning3_version", info_.lightning3Version);
+        m.set("lightning2_path", info_.lightning2Path);
+        m.set("lightning2_version", info_.lightning2Version);
         return sendMessage(m);
     }
 
@@ -1117,6 +1124,8 @@ void refreshAll()
     setRow(row++, L"VRAM MB",             widen(format("%d", i.vramMb)));
     setRow(row++, L"Lightning 3 (B7 & 7 Pro)", i.lightning3Path.empty() ? std::wstring(L"not installed")
                                                : widen(i.lightning3Version.empty() ? i.lightning3Path : i.lightning3Version + " at " + i.lightning3Path));
+    setRow(row++, L"Lightning 2 (B6.x)", i.lightning2Path.empty() ? std::wstring(L"not installed")
+                                        : widen(i.lightning2Version.empty() ? i.lightning2Path : i.lightning2Version + " at " + i.lightning2Path));
     refreshClock();
 }
 

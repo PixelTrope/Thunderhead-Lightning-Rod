@@ -57,7 +57,7 @@ BEGIN
             MENUITEM "Change Render Priority", IDC_CMD_PRIORITY
             MENUITEM "Stop Lightning", IDC_CMD_STOP
             MENUITEM "Run Lightning 3 (B7 && 7 Pro)", IDC_CMD_START71
-            MENUITEM "Run Lightning 2 (B6.x)", IDC_CMD_START63, GRAYED
+            MENUITEM "Run Lightning 2 (B6.x)", IDC_CMD_START63
             MENUITEM "Run Lightning 1 (B5.x)", IDC_CMD_START50, GRAYED
         END
     END

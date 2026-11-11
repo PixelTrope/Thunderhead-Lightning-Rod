@@ -20,6 +20,8 @@ struct StaticInfo {
     std::string memType;    // DDR3, DDR4 ... from the SMBIOS memory device records; empty when the firmware gives none
     std::string lightning3Path;     // the installed Bryce 7 Lightning.exe (filled by main from Lightning.cpp); empty when none
     std::string lightning3Version;  // its version, from the installer's registry entry or the file
+    std::string lightning2Path;     // the installed Bryce 6.x Lightning.exe, likewise; empty when none
+    std::string lightning2Version;
     int diskTotalMb;        // size of C:
     std::string board;      // baseboard manufacturer and product
     std::string chipset;    // host bridge description
