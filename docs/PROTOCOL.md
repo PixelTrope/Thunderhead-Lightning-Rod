@@ -112,6 +112,11 @@ SET
 interval=15
 ```
 
+Two more messages follow the SET of every HELLO: `AUDIO action=unmute` or
+`action=mute` as the *All Lightning Rods Audio* switch of Settings stands (to
+agents from 0.2.16), and `SOUND action=scheme` with the file names of the
+agent's own sound events (to agents from 0.2.21); see Audio.
+
 The agent then sends a REPORT every `interval` seconds. Only values that change
 during a session are in it; everything fixed for the session is in HELLO and
 is never repeated, and Thunderhead never polls. The first REPORT after HELLO
@@ -170,9 +175,10 @@ Thunderhead may send at any time:
 | POWER | action        | run Windows' `shutdown.exe` and reply ACK with the action: `shutdown` (`-s`), `restart` (`-r`) or `coldrestart` (`-g`), each with `-f -t 66`, or `abort` (`-a`); agents from 0.2.6 |
 | AUDIO | action        | set the master mute of the default playback device: `mute` or `unmute`; reply ACK with the state read back (see Audio); agents from 0.2.16 |
 | TEAMVIEWER |          | start the installed TeamViewer, found through the registry or the Start menu, and bring its window to the front; reply ACK with where it was found (see TeamViewer); agents from 0.2.18 |
+| SOUND | action, file, logon, hello, logoff | `action=play`: play `file`, a name in the agent's `sounds` folder, on the node's playback device; `action=scheme`: take the file names of the agent's own three sound events; reply ACK with `action=` and `file=` (see Audio); agents from 0.2.21 |
 
 The agent replies to START, STOP, PRIORITY, EXIT, RESTART, UPDATE, RENAME, REBOOT,
-SHUTDOWN, POWER, AUDIO, TEAMVIEWER and BATCH with (RENAME adds `name=` with the name that was applied;
+SHUTDOWN, POWER, AUDIO, TEAMVIEWER, SOUND and BATCH with (RENAME adds `name=` with the name that was applied;
 START adds `gen=`, `path=`, `version=` and `found=` as described under Lightning lookup;
 PRIORITY adds `level=` as requested and `applied=` with the class Windows reports
 afterwards, and answers `ok=no` when the two differ, as when RealTime is
@@ -208,6 +214,10 @@ tcp_port=42002
 agent_file=
 share_name=LightningRod
 dark_mode=0
+th_audio=1
+lr_audio=1
+sound_scheme=custom
+sound.Startup=fanfare.mp3
 ```
 
 `agent_file` is the LightningRod.exe to push to nodes; empty means the one beside
@@ -216,6 +226,14 @@ agent's folder. `dark_mode` is the Dark Mode switch of the Settings dialog, 1
 for the dark scheme: dark panes, dialogs, log views and status bar with light
 text, the Client Inventory's header light with black captions and its rows dark
 gray with white text and white rules, the reverse of the light scheme.
+`th_audio` and `lr_audio` are the *Thunderhead Audio* and *All Lightning Rods
+Audio* switches of Settings, `sound_scheme` is `default` or `custom`, and each
+`sound.<Category>` line assigns a file of the `sounds` folder to a category of
+the custom scheme; see Audio. The three audio keys are absent until the
+settings are first saved and then read as 1, 1 and `default`.
+
+`sounds\` holds the sound files: the repository's `assets\sounds`, which the
+build copies beside the executable, plus any file *Sound Schemes* copies in.
 
 `nodes.txt`, one block per node, keyed by MAC; the user-edited fields are kept
 here and survive re-imaging of the node:
@@ -242,9 +260,13 @@ is only stored for now; the shutdown daemon that will act on it is not designed 
 ## Agent files
 
 The agent lives in `C:\LightningRod` on each node, shared as `\\NODE\LightningRod`,
-and writes `C:\LightningRod\LightningRod-YYYY-MM-DD.log`. It keeps no other state. Its window
+and writes `C:\LightningRod\LightningRod-YYYY-MM-DD.log`. Its sounds are in
+`C:\LightningRod\sounds`, put there by the agent update, with `scheme.txt`,
+the file names of its own sound events as the last SOUND scheme message set
+them (see Audio); it keeps no other state. Its window
 shows the Thunderhead it reports to (name, IP, MAC), its own start time and
-running time, and every value it has sent, refreshed at each report; closing
+running time, every value it has sent, refreshed at each report, and the
+sounds folder with the number of files in it; closing
 the window stops the agent. *Open Client's Shared Folder* in Thunderhead opens
 `\\NAME\<share_name>\` of every checked client in Windows Explorer. *Copy files or
 folder to Client* asks for files or one folder, then copies the selection to that
@@ -270,7 +292,11 @@ before anything on the node is stopped. The copy goes by address rather than
 name because freshly cloned nodes share a name; when the address is refused
 and the name resolves to that address, `\\<node name>\<share_name>\` is
 tried as well, since some nodes accept the host's credentials only under their
-name. Only when the file is in place is UPDATE sent.
+name. Only when the file is in place is UPDATE sent. With the agent file in
+place, the files of Thunderhead's `sounds` folder are copied to `sounds\` under
+the same share, those missing there or differing in size or write time, so
+that the updated agent holds every sound the host can ask it to play; the
+event log's staging line counts them.
 
 When the share refuses the credentials Windows offers, as a freshly cloned
 node does whose account or password is not the host's, Thunderhead shows the
@@ -475,6 +501,91 @@ back differs from the one asked for. The event log reads "AUDIO mute ok on
 NAME: audio muted via Core Audio" or "AUDIO mute failed on NAME: ...".
 Agents older than 0.2.16 do not know AUDIO; Thunderhead skips them with a line
 in the event log, as for the other versioned commands.
+
+The *All Lightning Rods Audio* switch of Settings sends the same command
+without a click: `AUDIO action=unmute` while the switch is on and
+`action=mute` while it is off, to every client as its HELLO arrives, and to
+every online client when the switch is changed. The *Thunderhead Audio*
+switch beside it silences Thunderhead's own sounds, described next, and the
+*Play Here* buttons; neither switch is tied to the other.
+
+### Sound files, categories and schemes
+
+Both programs play `.wav` files through PlaySound, from a copy held in memory
+after the first play so that an event sound starts without a disk read, and
+`.mp3` files through the multimedia command interface (MCI, the MPEGVideo
+device), which decodes in the process itself: no player program, no window,
+and the device is closed the moment the sound has ended. A sound still
+playing gives way to the next. The files live in `sounds\` beside each
+executable. The 38 files of the repository's `assets\sounds`, named
+`ThunderheadLightningRod <Category>.wav`, define the 38 categories and form
+the default scheme, in which each category plays its own file. The custom
+scheme of Thunderhead's *Sound Schemes* dialog assigns another file of the
+folder to a category: *Browse* takes a `.wav` or `.mp3`, copies it into the
+folder when it comes from elsewhere (a file bearing a default scheme name is
+never replaced), and assigns it to the selected category; *Use Default* drops
+the assignment; *Play* and a double click play the file; *Default* and
+*Custom* choose the scheme in force. The scheme is saved in `settings.txt`
+(`sound_scheme`, `sound.<Category>`) and, since the agents' own events follow
+it, sent to every online agent as described below.
+
+### Sound events
+
+| App | Event | Category (default file) |
+|-----|-------|-------------------------|
+| TH | App Opens | Startup |
+| TH | App Receives HELLO from Client | Proximity Notification |
+| TH | App Closed or Closes | Shutdown |
+| TH | Client that was Online went Offline | Minimize |
+| LR | App Opens | Logon |
+| LR | App Sends HELLO to Host | Proximity Connection |
+| LR | App Closed or Closes | Logoff Sound |
+
+Thunderhead plays its four itself, the closing one to its end (5 s at most)
+before the window goes. The agent plays Logon as its window appears, Proximity
+Connection when Thunderhead's SET answers its HELLO, which is the same
+exchange, and the Logoff Sound to its end (4 s at most) before it stops for
+EXIT, RESTART, UPDATE or a closed window; its log has one line per sound, with
+the file, or the reason it did not play.
+
+The agent plays each event's file from its own `sounds` folder: the
+category's default file, or the file that Thunderhead's scheme message named.
+After every HELLO, and whenever *Sound Schemes* is changed, Thunderhead sends
+agents from 0.2.21
+
+```
+SOUND
+action=scheme
+logon=
+hello=fanfare.mp3
+logoff=
+```
+
+with the file name assigned to the category of each of the agent's events,
+empty for the default. The agent keeps the names in `sounds\scheme.txt` and
+reads them at its next start, so that the Logon sound honours them too; a name
+holding a path separator is treated as empty. The ACK carries `action=scheme`.
+
+### Play Sound
+
+*Play Sound* lists the `.wav` and `.mp3` files of Thunderhead's `sounds`
+folder. *Play Here* (or a double click) plays the selected file on the host;
+*Play to Clients* sends
+
+```
+SOUND
+action=play
+file=ThunderheadLightningRod Ding.wav
+```
+
+to every checked online client, which plays the file of that name from its
+own `sounds` folder and answers at once, `ok=yes` when playback started, or
+`ok=no` with `error=` when the name is not in the folder, holds a path
+separator, or the device refused it. The event log reads "SOUND play ok on
+NAME: file" or "SOUND play failed on NAME: ...". Agents older than 0.2.21 do
+not know SOUND; Thunderhead skips them with a line in the event log, as for
+the other versioned commands, and a node whose agent came by an older update
+has no `sounds` folder until *Update Checked* copies it.
 
 ## TeamViewer
 

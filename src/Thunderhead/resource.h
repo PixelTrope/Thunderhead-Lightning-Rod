@@ -6,6 +6,8 @@
 #define IDD_RENAME              104
 #define IDD_BATCH               105
 #define IDD_TEXTBOX             106
+#define IDD_SOUND               107
+#define IDD_SCHEMES             108
 
 #define IDM_FILE_EXIT           1001
 #define IDM_HELP_ABOUT          1301
@@ -13,6 +15,10 @@
 #define IDC_INTERVAL_COMBO      2101
 #define IDC_DARK_SWITCH         2102   // the Dark Mode two-position slider (owner-drawn button)
 #define IDC_DARK_STATE          2103   // "Off" / "On" beside it
+#define IDC_TH_AUDIO_SWITCH     2104   // Thunderhead Audio slider
+#define IDC_TH_AUDIO_STATE      2105
+#define IDC_LR_AUDIO_SWITCH     2106   // All Lightning Rods Audio slider
+#define IDC_LR_AUDIO_STATE      2107
 
 // static pane
 #define IDC_STATIC_TITLE        2201
@@ -55,7 +61,8 @@
 #define IDC_CMD_REMOVE_OFFLINE  3029
 #define IDC_CMD_START50         3030
 #define IDC_CMD_SETTINGS        3031
-#define IDC_CMD_LAST            3031
+#define IDC_CMD_SCHEMES         3032
+#define IDC_CMD_LAST            3032
 
 // rename dialog
 #define IDC_RENAME_INFO         2301
@@ -72,3 +79,18 @@
 
 // text display box
 #define IDC_TEXTBOX_TEXT        2601
+
+// Play Sound dialog
+#define IDC_SOUND_INFO          2701
+#define IDC_SOUND_LIST          2702
+#define IDC_SOUND_PLAY_HERE     2703
+#define IDC_SOUND_PLAY_CLIENTS  2704
+
+// Sound Schemes dialog
+#define IDC_SCHEME_DEFAULT      2801
+#define IDC_SCHEME_CUSTOM       2802
+#define IDC_SCHEME_INFO         2803
+#define IDC_SCHEME_LIST         2804
+#define IDC_SCHEME_BROWSE       2805
+#define IDC_SCHEME_RESET        2806
+#define IDC_SCHEME_PLAY         2807

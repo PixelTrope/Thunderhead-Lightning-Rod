@@ -15,6 +15,7 @@
 #include "Thermal.h"
 #include "Audio.h"
 #include "TeamViewer.h"
+#include "Sound.h"
 
 #include <commctrl.h>
 #include <iphlpapi.h>
@@ -50,6 +51,96 @@ std::wstring exeDirectory()
     std::wstring p(path, n);
     size_t slash = p.rfind(L'\\');
     return slash == std::wstring::npos ? L"." : p.substr(0, slash);
+}
+
+// ---- sounds ---------------------------------------------------------------
+// The agent's sounds live in sounds\ beside it, put there by Thunderhead with
+// the agent update. Each of the agent's three events plays the default file of
+// its category unless Thunderhead's SOUND scheme message named another file;
+// the names are kept in sounds\scheme.txt so that the Logon sound at the next
+// start honours them as well. The agent thread sets them, the window thread
+// reads them, hence the lock.
+CRITICAL_SECTION g_soundLock;
+std::wstring g_soundNames[kSoundEventCount];   // by event; empty = the category's default file
+
+std::wstring soundDir() { return exeDirectory() + L"\\" + kSoundFolder; }
+std::wstring schemeFile() { return soundDir() + L"\\scheme.txt"; }
+
+void loadSoundScheme()
+{
+    FILE* f = _wfopen(schemeFile().c_str(), L"rb");
+    if (!f) return;
+    std::string text;
+    char buf[1024];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, n);
+    fclose(f);
+    std::vector<std::string> lines = split(text, '\n');
+    for (size_t i = 0; i < lines.size(); ++i) {
+        size_t eq = lines[i].find('=');
+        if (eq == std::string::npos) continue;
+        std::string key = trim(lines[i].substr(0, eq)), value = trim(lines[i].substr(eq + 1));
+        for (int e = 0; e < kSoundEventCount; ++e)
+            if (key == kSoundEvents[e].key) g_soundNames[e] = widen(value);
+    }
+}
+
+void saveSoundScheme()
+{
+    std::string text;
+    for (int e = 0; e < kSoundEventCount; ++e)
+        if (kSoundEvents[e].app[0] == L'L') text += std::string(kSoundEvents[e].key) + "=" + narrow(g_soundNames[e]) + "\r\n";
+    CreateDirectoryW(soundDir().c_str(), NULL);
+    FILE* f = _wfopen(schemeFile().c_str(), L"wb");
+    if (!f) { logLine("scheme.txt could not be written: " + lastErrorText((int)GetLastError())); return; }
+    fwrite(text.data(), 1, text.size(), f);
+    fclose(f);
+}
+
+// Takes the file names of the agent's events from a SOUND scheme message:
+// logon=, hello=, logoff=, each a name in the sounds folder or empty for the
+// default. Returns what was set, for the log.
+std::string setSoundScheme(const Message& m)
+{
+    std::string text;
+    EnterCriticalSection(&g_soundLock);
+    for (int e = 0; e < kSoundEventCount; ++e) {
+        if (kSoundEvents[e].app[0] != L'L' || !m.has(kSoundEvents[e].key)) continue;
+        std::string name = trim(m.get(kSoundEvents[e].key));
+        if (name.find_first_of("\\/:") != std::string::npos) name.clear();   // a name, never a path
+        g_soundNames[e] = widen(name);
+        text += std::string(text.empty() ? "" : ", ") + kSoundEvents[e].key + "=" + (name.empty() ? "default" : name);
+    }
+    saveSoundScheme();
+    LeaveCriticalSection(&g_soundLock);
+    return text;
+}
+
+std::wstring soundFileFor(SoundEvent e)
+{
+    EnterCriticalSection(&g_soundLock);
+    std::wstring name = g_soundNames[e];
+    LeaveCriticalSection(&g_soundLock);
+    if (name.empty()) name = soundDefaultFile(kSoundEvents[e].category);
+    return soundDir() + L"\\" + name;
+}
+
+void playEventSound(SoundEvent e)
+{
+    std::string err;
+    std::wstring file = soundFileFor(e);
+    if (soundPlay(file, err)) logLine(format("sound %s: %s", kSoundEvents[e].key, narrow(file).c_str()));
+    else logLine(format("sound %s failed: %s", kSoundEvents[e].key, err.c_str()));
+}
+
+// The Logoff sound, played to its end (4 s at most) before the process ends.
+void playCloseSound()
+{
+    std::string err;
+    std::wstring file = soundFileFor(SoundLrClose);
+    if (soundPlayAndWait(file, 4000, err)) logLine(format("sound %s: %s", kSoundEvents[SoundLrClose].key, narrow(file).c_str()));
+    else logLine(format("sound %s failed: %s", kSoundEvents[SoundLrClose].key, err.c_str()));
+    soundShutdown();
 }
 
 // What the window shows; copied out of the agent under its lock.
@@ -339,6 +430,7 @@ public:
     {
         tvWindowWanted_ = false;
         tvStartMs_ = 0;
+        helloSoundPending_ = false;
         InitializeCriticalSection(&lock_);
     }
     ~Agent() { DeleteCriticalSection(&lock_); }
@@ -562,7 +654,12 @@ private:
         m.set("lightning3_version", info_.lightning3Version);
         m.set("lightning2_path", info_.lightning2Path);
         m.set("lightning2_version", info_.lightning2Version);
-        return sendMessage(m);
+        bool ok = sendMessage(m);
+        // The sound of this event waits for Thunderhead's SET, which answers the
+        // HELLO within the same exchange: by then a scheme message that names
+        // another file for it may have arrived too.
+        if (ok) helloSoundPending_ = true;
+        return ok;
     }
 
     bool sendReport()
@@ -640,6 +737,36 @@ private:
             status_.intervalSec = intervalSec_;
             LeaveCriticalSection(&lock_);
             notify();
+            if (helloSoundPending_) { helloSoundPending_ = false; playEventSound(SoundLrHello); }
+        } else if (m.verb == "SOUND") {
+            // action=play file=NAME plays NAME from the agent's sounds folder on
+            // the node's playback device and answers at once; action=scheme
+            // names the files of the agent's own events (see setSoundScheme).
+            std::string action = trim(m.get("action")), file = trim(m.get("file")), err;
+            bool ok = false;
+            if (action == "play") {
+                if (file.empty() || file.find_first_of("\\/:") != std::string::npos) err = "file must be a name in the sounds folder";
+                else {
+                    std::wstring path = soundDir() + L"\\" + widen(file);
+                    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) err = file + " is not in " + narrow(soundDir());
+                    else ok = soundPlay(path, err);
+                }
+                logLine(format("SOUND play %s: %s%s%s", file.c_str(), ok ? "ok" : "failed", err.empty() ? "" : ": ", err.c_str()));
+            } else if (action == "scheme") {
+                std::string set = setSoundScheme(m);
+                ok = true;
+                logLine("SOUND scheme: " + (set.empty() ? std::string("nothing named") : set));
+            } else {
+                err = "unknown action \"" + action + "\"";
+                logLine("SOUND failed: " + err);
+            }
+            Message ack("ACK");
+            ack.set("cmd", m.verb);
+            ack.set("ok", boolText(ok));
+            ack.set("error", err);
+            ack.set("action", action);
+            ack.set("file", file);
+            sendMessage(ack);
         } else if (m.verb == "START" || m.verb == "STOP") {
             // START gen=3|2|1 (3 when absent) starts the installed Lightning of that
             // generation, found as docs/PROTOCOL.md describes under Lightning lookup;
@@ -764,6 +891,7 @@ private:
             sendMessage(ack);
             if (!ok) { logLine("UPDATE: could not start the update helper"); return; }
             logLine("UPDATE received, helper started, stopping for replacement");
+            playCloseSound();
             closesocket(tcp_);
             tcp_ = INVALID_SOCKET;
             if (g_singleInstance) { CloseHandle(g_singleInstance); g_singleInstance = NULL; }
@@ -900,6 +1028,7 @@ private:
             ack.set("error", "");
             sendMessage(ack);
             logLine(m.verb == "EXIT" ? "EXIT received, stopping" : "RESTART received, relaunching");
+            playCloseSound();
             closesocket(tcp_);
             tcp_ = INVALID_SOCKET;
             if (g_singleInstance) { CloseHandle(g_singleInstance); g_singleInstance = NULL; }
@@ -1002,6 +1131,7 @@ private:
     std::vector<RunningBatch> batches_;   // batch files started by BATCH and not yet ended
     bool tvWindowWanted_;                 // TEAMVIEWER started TeamViewer and its window is still to be found
     unsigned long long tvStartMs_;
+    bool helloSoundPending_;              // HELLO sent; the Proximity Connection sound plays when Thunderhead's SET answers it
     int intervalSec_;
     unsigned long long nextReport_;
     CRITICAL_SECTION lock_;
@@ -1126,6 +1256,7 @@ void refreshAll()
                                                : widen(i.lightning3Version.empty() ? i.lightning3Path : i.lightning3Version + " at " + i.lightning3Path));
     setRow(row++, L"Lightning 2 (B6.x)", i.lightning2Path.empty() ? std::wstring(L"not installed")
                                         : widen(i.lightning2Version.empty() ? i.lightning2Path : i.lightning2Version + " at " + i.lightning2Path));
+    setRow(row++, L"Sounds",              widen(format("%u file(s) in ", (unsigned)soundFilesIn(soundDir()).size())) + soundDir());
     refreshClock();
 }
 
@@ -1158,7 +1289,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         relaunchSelf();
         ExitProcess(0);
     case WM_TIMER: if (wp == kClockTimer) refreshClock(); return 0;
-    case WM_CLOSE: DestroyWindow(hwnd); return 0;
+    case WM_CLOSE: playCloseSound(); DestroyWindow(hwnd); return 0;
     case WM_DESTROY: KillTimer(hwnd, kClockTimer); PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -1271,6 +1402,8 @@ int main(int argc, char** argv)
     GetLocalTime(&g_started);
     g_startedMs = tickMs();
     g_log.open(exeDirectory(), L"LightningRod");
+    InitializeCriticalSection(&g_soundLock);
+    loadSoundScheme();
     DeleteFileW((exeDirectory() + L"\\LightningRod.update.exe").c_str());   // left by the previous update
     DeleteFileW((exeDirectory() + L"\\update.go").c_str());
     DeleteFileW((exeDirectory() + L"\\LightningRod.new").c_str());
@@ -1293,6 +1426,7 @@ int main(int argc, char** argv)
     ShowWindow(g_window, SW_SHOWNORMAL);
     UpdateWindow(g_window);
     SetTimer(g_window, kClockTimer, 1000, NULL);
+    playEventSound(SoundLrOpen);
 
     HANDLE thread = CreateThread(NULL, 0, agentThread, NULL, 0, NULL);
     if (!thread) { logLine("agent thread failed"); return 1; }
@@ -1304,6 +1438,7 @@ int main(int argc, char** argv)
     }
     logLine("window closed, agent stopping");
     g_window = NULL;
+    soundShutdown();
     netShutdown();
     ExitProcess(0);
 }

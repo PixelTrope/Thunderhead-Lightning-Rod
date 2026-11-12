@@ -48,6 +48,10 @@ void NodeStore::load()
         else if (key == "agent_file") settings.agentFile = value;
         else if (key == "share_name") settings.shareName = value;
         else if (key == "dark_mode") settings.darkMode = atoi(value.c_str()) != 0;
+        else if (key == "th_audio") settings.thAudio = atoi(value.c_str()) != 0;
+        else if (key == "lr_audio") settings.lrAudio = atoi(value.c_str()) != 0;
+        else if (key == "sound_scheme") settings.customScheme = toLower(value) == "custom";
+        else if (key.compare(0, 6, "sound.") == 0 && !value.empty()) settings.sounds[key.substr(6)] = value;
     }
     if (settings.shareName.empty()) settings.shareName = "LightningRod";
     if (settings.intervalSec < 5) settings.intervalSec = kDefaultReportInterval;
@@ -107,6 +111,11 @@ void NodeStore::saveSettings()
     out += "agent_file=" + settings.agentFile + "\r\n";
     out += "share_name=" + settings.shareName + "\r\n";
     out += format("dark_mode=%d\r\n", settings.darkMode ? 1 : 0);
+    out += format("th_audio=%d\r\n", settings.thAudio ? 1 : 0);
+    out += format("lr_audio=%d\r\n", settings.lrAudio ? 1 : 0);
+    out += std::string("sound_scheme=") + (settings.customScheme ? "custom" : "default") + "\r\n";
+    for (std::map<std::string, std::string>::const_iterator it = settings.sounds.begin(); it != settings.sounds.end(); ++it)
+        out += "sound." + it->first + "=" + it->second + "\r\n";
     writeFile(dir_ + L"\\settings.txt", out);
 }
 

@@ -13,3 +13,6 @@ add_executable(Thunderhead WIN32
     Thunderhead.ico
 )
 target_link_libraries(Thunderhead PRIVATE common comctl32 uxtheme version shell32 ole32 mpr iphlpapi ws2_32)
+# The default sound scheme, assets/sounds, is read from sounds\ beside the executable.
+add_custom_command(TARGET Thunderhead POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets/sounds $<TARGET_FILE_DIR:Thunderhead>/sounds)

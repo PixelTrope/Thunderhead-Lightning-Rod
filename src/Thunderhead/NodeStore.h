@@ -2,6 +2,7 @@
 
 #include "Protocol.h"
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -48,7 +49,12 @@ struct Settings {
     std::string agentFile;    // LightningRod.exe to push; empty = beside Thunderhead.exe
     std::string shareName;    // share on each node that maps to the agent's folder
     bool darkMode;            // Thunderhead's Dark Mode (Settings)
-    Settings() : intervalSec(kDefaultReportInterval), tcpPort(kDefaultTcpPort), shareName("LightningRod"), darkMode(false) {}
+    bool thAudio;             // Thunderhead Audio switch (Settings): Thunderhead's own event sounds
+    bool lrAudio;             // All Lightning Rods Audio switch (Settings): AUDIO unmute or mute to every connecting client
+    bool customScheme;        // sound_scheme=custom: the assignments in sounds apply; otherwise every category plays its default file
+    std::map<std::string, std::string> sounds;   // category -> file name in the sounds folder (custom scheme); absent = default
+    Settings() : intervalSec(kDefaultReportInterval), tcpPort(kDefaultTcpPort), shareName("LightningRod"), darkMode(false),
+                 thAudio(true), lrAudio(true), customScheme(false) {}
 };
 
 class NodeStore {

@@ -17,6 +17,7 @@
 #include "NodeStore.h"
 #include "Server.h"
 #include "Theme.h"
+#include "Sound.h"
 #include "resource.h"
 
 #include <commctrl.h>
@@ -134,7 +135,8 @@ const CommandDef kCommands[] = {
     { IDC_CMD_EXIT_LR,         L"Exit LR",                        "EXIT",    true,  GroupRod },
     { IDC_CMD_MUTE,            L"Mute Checked Clients",           NULL,      true,  GroupAudio },
     { IDC_CMD_UNMUTE,          L"Unmute Checked Clients",         NULL,      true,  GroupAudio },
-    { IDC_CMD_SOUND,           L"Play Sound",                     NULL,      false, GroupAudio },
+    { IDC_CMD_SOUND,           L"Play Sound",                     NULL,      true,  GroupAudio },
+    { IDC_CMD_SCHEMES,         L"Sound Schemes",                  NULL,      true,  GroupAudio },
     { IDC_CMD_PRIORITY,        L"Change Render Priority",         NULL,      true,  GroupRender },
     { IDC_CMD_STOP,            L"Stop Lightning",                 "STOP",    true,  GroupRender },
     { IDC_CMD_START71,         L"Run Lightning 3 (B7 & 7 Pro)",   NULL,      true,  GroupRender },
@@ -176,6 +178,34 @@ void logNode(const NodeRecord& n, const std::string& text)
         it = g_nodeLogs.insert(std::make_pair(key, l)).first;
     }
     it->second->write(text);
+}
+
+// ---------------------------------------------------------------- sounds
+
+// Thunderhead's sounds live in sounds\ beside it: the repository's
+// assets\sounds, which the build copies there. A category plays its default
+// file, "ThunderheadLightningRod <Category>.wav", unless the custom scheme is
+// on and assigns another file of that folder to it.
+std::wstring soundDir() { return g_dir + L"\\" + kSoundFolder; }
+
+std::wstring soundNameForCategory(const wchar_t* category)
+{
+    if (g_store && g_store->settings.customScheme) {
+        std::map<std::string, std::string>::const_iterator it = g_store->settings.sounds.find(narrow(category));
+        if (it != g_store->settings.sounds.end() && !it->second.empty()) return widen(it->second);
+    }
+    return soundDefaultFile(category);
+}
+
+std::wstring soundPathForEvent(SoundEvent e) { return soundDir() + L"\\" + soundNameForCategory(kSoundEvents[e].category); }
+
+// Plays the sound of one of Thunderhead's own events; nothing while
+// Thunderhead Audio is off. A failure is one line in the event log.
+void playEventSound(SoundEvent e)
+{
+    if (!g_store || !g_store->settings.thAudio) return;
+    std::string err;
+    if (!soundPlay(soundPathForEvent(e), err)) logEvent(format("sound %s not played: %s", kSoundEvents[e].key, err.c_str()));
 }
 
 std::wstring durationText(long long seconds)
@@ -754,7 +784,7 @@ void checkOutdated()
     updateStatusBar(widen(format("|  %d of %d online clients are older than %s", outdated, online, version.c_str())).c_str());
 }
 
-struct UpdateJob { std::string name; std::string ip; std::wstring source; std::wstring share; std::wstring dir; };
+struct UpdateJob { std::string name; std::string ip; std::wstring source; std::wstring share; std::wstring dir; std::wstring sounds; };
 struct UpdateResult {
     std::string name; int phase; bool ok; std::string text; std::wstring dir;
     bool needCredentials;            // a share refused the credentials Windows offered
@@ -803,6 +833,36 @@ DWORD promptShareCredentials(HWND owner, const std::wstring& dir)
     return WNetAddConnection3W(owner, &nr, NULL, NULL, CONNECT_INTERACTIVE | CONNECT_PROMPT | CONNECT_CMD_SAVECRED | CONNECT_TEMPORARY);
 }
 
+// Copies the files of Thunderhead's sounds folder to sounds\ under the node's
+// share, those missing there or differing in size or write time (CopyFile
+// keeps the write time), as part of the staging, so that an updated agent
+// holds every file the host can ask it to play. Returns text for the log.
+std::string copySoundsTo(const std::wstring& from, const std::wstring& shareDir)
+{
+    std::wstring to = shareDir + kSoundFolder;    // shareDir ends with a backslash
+    if (!CreateDirectoryW(to.c_str(), NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+        return "; sounds folder not created on the node: " + lastErrorText((int)GetLastError());
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((from + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return "; no sounds folder beside Thunderhead to copy";
+    unsigned copied = 0, same = 0, failed = 0;
+    std::string firstError;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        std::wstring src = from + L"\\" + fd.cFileName, dst = to + L"\\" + fd.cFileName;
+        WIN32_FILE_ATTRIBUTE_DATA have;
+        if (GetFileAttributesExW(dst.c_str(), GetFileExInfoStandard, &have) &&
+            have.nFileSizeLow == fd.nFileSizeLow && have.nFileSizeHigh == fd.nFileSizeHigh &&
+            CompareFileTime(&have.ftLastWriteTime, &fd.ftLastWriteTime) == 0) { ++same; continue; }
+        if (CopyFileW(src.c_str(), dst.c_str(), FALSE)) ++copied;
+        else { ++failed; if (firstError.empty()) firstError = narrow(fd.cFileName) + ": " + lastErrorText((int)GetLastError()); }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    std::string text = format("; sounds: %u file(s) copied, %u already there", copied, same);
+    if (failed) text += format(", %u failed (%s)", failed, firstError.c_str());
+    return text;
+}
+
 // Phase 1, worker thread: places the agent file beside the running agent as
 // LightningRod.new while everything on the node is still running, so a share
 // that cannot be written is reported before anything is stopped.
@@ -829,6 +889,7 @@ DWORD WINAPI updateStageThread(LPVOID p)
             if (!res->needCredentials && isCredentialError(err)) { res->needCredentials = true; res->credDir = dirs[i]; }
         }
     }
+    if (res->ok) res->text += copySoundsTo(job->sounds, res->dir);
     if (!res->ok) res->text = errors;
     delete job;
     if (!PostMessageW(g_main, WM_UPDATE_DONE, 0, (LPARAM)res)) delete res;
@@ -882,6 +943,7 @@ void startUpdateThread(NodeRecord* n, LPTHREAD_START_ROUTINE fn, const char* wha
     job->source = pushFilePath();
     job->share = widen(g_store->settings.shareName);
     job->dir = n->updateDir;
+    job->sounds = soundDir();
     HANDLE t = CreateThread(NULL, 0, fn, job, 0, NULL);
     if (t) { CloseHandle(t); return; }
     delete job;
@@ -1323,6 +1385,71 @@ void sendAudio(const char* action)
     Message m("AUDIO");
     m.set("action", std::string(action));
     sendVersioned(m, m.oneLine(), kAudioAgent);
+}
+
+// One message to one online client, logged as the others are.
+bool sendToNode(NodeRecord* n, const Message& m, const std::string& label)
+{
+    if (!n->online || !g_server->send(n->conn, m)) return false;
+    logEvent(format("%s -> %s", label.c_str(), n->name.c_str()));
+    logNode(*n, "-> " + label);
+    return true;
+}
+
+// All Lightning Rods Audio (Settings): AUDIO unmute when the switch is on,
+// mute when it is off, to a client as it connects and to every online client
+// when the switch changes. Agents before kAudioAgent are passed over.
+void sendAudioSwitch(NodeRecord* n, bool on)
+{
+    if (compareVersions(n->hello.get("agent"), kAudioAgent) < 0) return;
+    Message m("AUDIO");
+    m.set("action", std::string(on ? "unmute" : "mute"));
+    sendToNode(n, m, m.oneLine());
+}
+
+void sendAudioAll(bool on)
+{
+    std::vector<NodeRecord*>& nodes = g_store->nodes();
+    for (size_t i = 0; i < nodes.size(); ++i) if (nodes[i]->online) sendAudioSwitch(nodes[i], on);
+}
+
+// Sounds on the agent: SOUND action=scheme names the files of the agent's own
+// events (logon=, hello=, logoff=; empty for the category's default file), as
+// the scheme here assigns them; SOUND action=play file=NAME plays a file of
+// the agent's sounds folder. Agents from 0.2.21 know SOUND.
+const char* const kSoundAgent = "0.2.21";
+
+Message soundSchemeMessage()
+{
+    Message m("SOUND");
+    m.set("action", std::string("scheme"));
+    for (int e = 0; e < kSoundEventCount; ++e) {
+        if (kSoundEvents[e].app[0] != L'L') continue;
+        std::wstring name = soundNameForCategory(kSoundEvents[e].category);
+        m.set(kSoundEvents[e].key, name == soundDefaultFile(kSoundEvents[e].category) ? std::string() : narrow(name));
+    }
+    return m;
+}
+
+void sendSoundScheme(NodeRecord* n)
+{
+    if (compareVersions(n->hello.get("agent"), kSoundAgent) < 0) return;
+    Message m = soundSchemeMessage();
+    sendToNode(n, m, m.oneLine());
+}
+
+void sendSoundSchemeAll()
+{
+    std::vector<NodeRecord*>& nodes = g_store->nodes();
+    for (size_t i = 0; i < nodes.size(); ++i) if (nodes[i]->online) sendSoundScheme(nodes[i]);
+}
+
+void sendPlaySound(const std::wstring& name)
+{
+    Message m("SOUND");
+    m.set("action", std::string("play"));
+    m.set("file", narrow(name));
+    sendVersioned(m, m.oneLine(), kSoundAgent);
 }
 
 // Start TeamViewer: the agent finds the installed TeamViewer through the
@@ -2532,6 +2659,7 @@ void setOffline(NodeRecord* n, const std::string& reason)
     n->conn = -1;
     logEvent(format("%s offline: %s", n->name.c_str(), reason.c_str()));
     logNode(*n, "offline: " + reason);
+    playEventSound(SoundThClientOffline);
     refreshRow(n);
     if (g_staticNode == n) showStaticPane(n);
 }
@@ -2576,20 +2704,295 @@ void removeCheckedOffline()
     updateStatusBar();
 }
 
+// ---------------------------------------------------------------- Play Sound
+
+struct PlaySoundDlg { std::vector<std::wstring> files; };
+
+std::wstring selectedSound(HWND dlg, const PlaySoundDlg* d)
+{
+    int i = (int)SendDlgItemMessageW(dlg, IDC_SOUND_LIST, LB_GETCURSEL, 0, 0);
+    return (d && i >= 0 && i < (int)d->files.size()) ? d->files[i] : std::wstring();
+}
+
+// Plays a file here, on the host; a word when Thunderhead Audio is off.
+void previewSound(HWND owner, const std::wstring& path, const wchar_t* title)
+{
+    if (path.empty()) return;
+    if (soundMuted()) {
+        MessageBoxW(owner, L"Thunderhead Audio is off (Settings), so nothing is heard here.", title, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    std::string err;
+    if (!soundPlay(path, err)) MessageBoxW(owner, widen(err).c_str(), title, MB_OK | MB_ICONWARNING);
+}
+
+INT_PTR CALLBACK playSoundDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (INT_PTR r = themeDialogMessage(dlg, msg, wp, lp)) return r;
+    PlaySoundDlg* d = (PlaySoundDlg*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
+    switch (msg) {
+    case WM_INITDIALOG: {
+        d = (PlaySoundDlg*)lp;
+        SetWindowLongPtrW(dlg, GWLP_USERDATA, (LONG_PTR)d);
+        HWND list = GetDlgItem(dlg, IDC_SOUND_LIST);
+        SendMessageW(list, WM_SETFONT, (WPARAM)g_font, TRUE);
+        for (size_t i = 0; i < d->files.size(); ++i) SendMessageW(list, LB_ADDSTRING, 0, (LPARAM)d->files[i].c_str());
+        if (!d->files.empty()) SendMessageW(list, LB_SETCURSEL, 0, 0);
+        int checkedOnline = 0;
+        std::vector<NodeRecord*> targets = checkedNodes();
+        for (size_t i = 0; i < targets.size(); ++i) if (targets[i]->online) ++checkedOnline;
+        std::wstring info = widen(format("%u sound(s).  Play to Clients reaches %d checked online client(s).", (unsigned)d->files.size(), checkedOnline));
+        if (soundMuted()) info += L"  Thunderhead Audio is off: Play Here is silent.";
+        SetDlgItemTextW(dlg, IDC_SOUND_INFO, (info + L"\n" + soundDir()).c_str());
+        return TRUE;
+    }
+    case WM_COMMAND:
+        if ((LOWORD(wp) == IDC_SOUND_LIST && HIWORD(wp) == LBN_DBLCLK) || LOWORD(wp) == IDC_SOUND_PLAY_HERE) {
+            std::wstring name = selectedSound(dlg, d);
+            if (!name.empty()) previewSound(dlg, soundDir() + L"\\" + name, L"Play Sound");
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDC_SOUND_PLAY_CLIENTS) {
+            std::wstring name = selectedSound(dlg, d);
+            if (!name.empty()) sendPlaySound(name);
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDCANCEL || LOWORD(wp) == IDOK) { EndDialog(dlg, IDCANCEL); return TRUE; }
+        break;
+    }
+    return FALSE;
+}
+
+// Play Sound: the files of the sounds folder; one is played here or sent to
+// the checked clients, which play their own copy of it.
+void openPlaySound()
+{
+    PlaySoundDlg d;
+    d.files = soundFilesIn(soundDir());
+    DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_SOUND), g_main, playSoundDlgProc, (LPARAM)&d);
+}
+
+// ---------------------------------------------------------------- Sound Schemes
+
+// The Default scheme plays each category's own file; the Custom scheme plays
+// the file assigned to a category here, its default where none is assigned.
+struct SchemeDlg {
+    bool custom;
+    std::map<std::string, std::string> sounds;   // category -> file name in the sounds folder
+};
+
+std::wstring schemeFileOf(const SchemeDlg* d, int cat)
+{
+    if (d->custom) {
+        std::map<std::string, std::string>::const_iterator it = d->sounds.find(narrow(kSoundCategories[cat]));
+        if (it != d->sounds.end() && !it->second.empty()) return widen(it->second);
+    }
+    return soundDefaultFile(kSoundCategories[cat]);
+}
+
+int selectedCategory(HWND dlg)
+{
+    return (int)SendDlgItemMessageW(dlg, IDC_SCHEME_LIST, LVM_GETNEXTITEM, (WPARAM)-1, LVNI_SELECTED);
+}
+
+void selectCategory(HWND dlg, int cat)
+{
+    LVITEMW item;
+    memset(&item, 0, sizeof(item));
+    item.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
+    item.state = LVIS_SELECTED | LVIS_FOCUSED;
+    SendDlgItemMessageW(dlg, IDC_SCHEME_LIST, LVM_SETITEMSTATE, (WPARAM)cat, (LPARAM)&item);
+    SendDlgItemMessageW(dlg, IDC_SCHEME_LIST, LVM_ENSUREVISIBLE, (WPARAM)cat, FALSE);
+}
+
+void fillSchemeList(HWND dlg, const SchemeDlg* d)
+{
+    HWND list = GetDlgItem(dlg, IDC_SCHEME_LIST);
+    int count = (int)SendMessageW(list, LVM_GETITEMCOUNT, 0, 0);
+    for (int cat = 0; cat < kSoundCategoryCount; ++cat) {
+        if (cat >= count) {
+            LVITEMW item;
+            memset(&item, 0, sizeof(item));
+            item.mask = LVIF_TEXT;
+            item.iItem = cat;
+            item.pszText = (LPWSTR)kSoundCategories[cat];
+            SendMessageW(list, LVM_INSERTITEMW, 0, (LPARAM)&item);
+            const SoundEventDef* ev = soundEventOfCategory(kSoundCategories[cat]);
+            setCell(list, cat, 1, ev ? std::wstring(ev->app) + L": " + ev->label : std::wstring());
+        }
+        std::wstring file = schemeFileOf(d, cat);
+        bool isDefault = file == soundDefaultFile(kSoundCategories[cat]);
+        bool exists = GetFileAttributesW((soundDir() + L"\\" + file).c_str()) != INVALID_FILE_ATTRIBUTES;
+        setCell(list, cat, 2, file + (isDefault ? L"" : L"   (custom)") + (exists ? L"" : L"   [missing]"));
+    }
+    CheckRadioButton(dlg, IDC_SCHEME_DEFAULT, IDC_SCHEME_CUSTOM, d->custom ? IDC_SCHEME_CUSTOM : IDC_SCHEME_DEFAULT);
+    EnableWindow(GetDlgItem(dlg, IDC_SCHEME_RESET), d->custom);
+}
+
+bool browseSoundFile(HWND owner, std::wstring& path)
+{
+    IFileOpenDialog* dlg = NULL;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg))) || !dlg) {
+        MessageBoxW(owner, L"The file dialog could not be created.", L"Sound Schemes", MB_OK | MB_ICONERROR);
+        return false;
+    }
+    const COMDLG_FILTERSPEC types[3] = { { L"Sound files (*.wav;*.mp3)", L"*.wav;*.mp3" }, { L"Wave files (*.wav)", L"*.wav" }, { L"MP3 files (*.mp3)", L"*.mp3" } };
+    dlg->SetFileTypes(3, types);
+    DWORD opts = 0;
+    dlg->GetOptions(&opts);
+    dlg->SetOptions(opts | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_FILEMUSTEXIST);
+    dlg->SetTitle(L"Select the sound file for the category");
+    dlg->SetOkButtonLabel(L"Assign");
+    bool ok = false;
+    if (SUCCEEDED(dlg->Show(owner))) {
+        IShellItem* item = NULL;
+        if (SUCCEEDED(dlg->GetResult(&item)) && item) {
+            PWSTR p = NULL;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &p)) && p) { path = p; CoTaskMemFree(p); ok = true; }
+            item->Release();
+        }
+    }
+    dlg->Release();
+    return ok;
+}
+
+// Whether name is one of the default scheme's own files, which are never overwritten.
+bool isDefaultSoundName(const std::wstring& name)
+{
+    for (int cat = 0; cat < kSoundCategoryCount; ++cat)
+        if (_wcsicmp(soundDefaultFile(kSoundCategories[cat]).c_str(), name.c_str()) == 0) return true;
+    return false;
+}
+
+// Browse: a .wav or .mp3 for the selected category. A file from outside the
+// sounds folder is copied into it first, so that the folder stays the one
+// source of every sound, here and, with the next agent update, on the nodes.
+void assignBrowsed(HWND dlg, SchemeDlg* d)
+{
+    int cat = selectedCategory(dlg);
+    if (cat < 0) { MessageBoxW(dlg, L"Select the category first.", L"Sound Schemes", MB_OK | MB_ICONINFORMATION); return; }
+    std::wstring path;
+    if (!browseSoundFile(dlg, path)) return;
+    if (!soundFileSupported(path)) { MessageBoxW(dlg, L"Only .wav and .mp3 files are played.", L"Sound Schemes", MB_OK | MB_ICONWARNING); return; }
+    std::wstring name = leafName(path), dest = soundDir() + L"\\" + name;
+    if (_wcsicmp(path.c_str(), dest.c_str()) != 0) {
+        if (isDefaultSoundName(name)) {
+            MessageBoxW(dlg, (name + L" is the name of a default scheme file, which is not replaced. Rename the file and assign it again.").c_str(),
+                        L"Sound Schemes", MB_OK | MB_ICONWARNING);
+            return;
+        }
+        if (GetFileAttributesW(dest.c_str()) != INVALID_FILE_ATTRIBUTES &&
+            MessageBoxW(dlg, (name + L" is in the sounds folder already. Replace it with the selected file?").c_str(), L"Sound Schemes",
+                        MB_YESNO | MB_ICONQUESTION) != IDYES)
+            return;
+        CreateDirectoryW(soundDir().c_str(), NULL);
+        if (!CopyFileW(path.c_str(), dest.c_str(), FALSE)) {
+            MessageBoxW(dlg, widen("The file could not be copied into the sounds folder: " + lastErrorText((int)GetLastError())).c_str(),
+                        L"Sound Schemes", MB_OK | MB_ICONERROR);
+            return;
+        }
+    }
+    d->sounds[narrow(kSoundCategories[cat])] = narrow(name);
+    d->custom = true;
+    fillSchemeList(dlg, d);
+    selectCategory(dlg, cat);
+}
+
+INT_PTR CALLBACK schemeDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (INT_PTR r = themeDialogMessage(dlg, msg, wp, lp)) return r;
+    SchemeDlg* d = (SchemeDlg*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
+    switch (msg) {
+    case WM_INITDIALOG: {
+        d = (SchemeDlg*)lp;
+        SetWindowLongPtrW(dlg, GWLP_USERDATA, (LONG_PTR)d);
+        HWND list = GetDlgItem(dlg, IDC_SCHEME_LIST);
+        SendMessageW(list, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+        SendMessageW(list, WM_SETFONT, (WPARAM)g_font, TRUE);
+        const Theme& t = theme();
+        SendMessageW(list, LVM_SETBKCOLOR, 0, (LPARAM)t.editBack);
+        SendMessageW(list, LVM_SETTEXTBKCOLOR, 0, (LPARAM)t.editBack);
+        SendMessageW(list, LVM_SETTEXTCOLOR, 0, (LPARAM)t.editText);
+        const wchar_t* titles[3] = { L"Category", L"Event", L"File in the sounds folder" };
+        const int widths[3] = { 150, 220, 380 };
+        for (int i = 0; i < 3; ++i) {
+            LVCOLUMNW col;
+            memset(&col, 0, sizeof(col));
+            col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+            col.pszText = (LPWSTR)titles[i];
+            col.cx = widths[i];
+            col.iSubItem = i;
+            SendMessageW(list, LVM_INSERTCOLUMNW, (WPARAM)i, (LPARAM)&col);
+        }
+        SetDlgItemTextW(dlg, IDC_SCHEME_INFO, L"Browse assigns a .wav or .mp3 file to the selected category of the Custom scheme.");
+        fillSchemeList(dlg, d);
+        selectCategory(dlg, 0);
+        return TRUE;
+    }
+    case WM_NOTIFY: {
+        NMHDR* h = (NMHDR*)lp;
+        if (d && h->idFrom == IDC_SCHEME_LIST && h->code == NM_DBLCLK) {
+            int cat = selectedCategory(dlg);
+            if (cat >= 0) previewSound(dlg, soundDir() + L"\\" + schemeFileOf(d, cat), L"Sound Schemes");
+            return TRUE;
+        }
+        break;
+    }
+    case WM_COMMAND: {
+        int id = LOWORD(wp);
+        if (!d) break;
+        if (id == IDC_SCHEME_DEFAULT || id == IDC_SCHEME_CUSTOM) { d->custom = id == IDC_SCHEME_CUSTOM; fillSchemeList(dlg, d); return TRUE; }
+        if (id == IDC_SCHEME_BROWSE) { assignBrowsed(dlg, d); return TRUE; }
+        if (id == IDC_SCHEME_RESET) {
+            int cat = selectedCategory(dlg);
+            if (cat >= 0) { d->sounds.erase(narrow(kSoundCategories[cat])); fillSchemeList(dlg, d); selectCategory(dlg, cat); }
+            return TRUE;
+        }
+        if (id == IDC_SCHEME_PLAY) {
+            int cat = selectedCategory(dlg);
+            if (cat >= 0) previewSound(dlg, soundDir() + L"\\" + schemeFileOf(d, cat), L"Sound Schemes");
+            return TRUE;
+        }
+        if (id == IDOK) { EndDialog(dlg, IDOK); return TRUE; }
+        if (id == IDCANCEL) { EndDialog(dlg, IDCANCEL); return TRUE; }
+        break;
+    }
+    }
+    return FALSE;
+}
+
+// Sound Schemes: the scheme and its assignments are saved in settings.txt; the
+// agents' own events follow it, so every online agent is told the new one.
+void openSoundSchemes()
+{
+    SchemeDlg d;
+    d.custom = g_store->settings.customScheme;
+    d.sounds = g_store->settings.sounds;
+    if (DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_SCHEMES), g_main, schemeDlgProc, (LPARAM)&d) != IDOK) return;
+    if (d.custom == g_store->settings.customScheme && d.sounds == g_store->settings.sounds) return;
+    g_store->settings.customScheme = d.custom;
+    g_store->settings.sounds = d.sounds;
+    g_store->saveSettings();
+    logEvent(d.custom ? format("sound scheme: custom, %u assignment(s)", (unsigned)d.sounds.size()) : std::string("sound scheme: default"));
+    sendSoundSchemeAll();
+}
+
 // ---------------------------------------------------------------- dialogs
 
 // What the Settings dialog edits. The Dark Mode switch takes effect as it is
 // flipped, so that the scheme can be judged; Cancel puts the old one back.
-struct SettingsDlgData { int sec; bool dark; bool darkAtStart; };
+struct SettingsDlgData { int sec; bool dark; bool darkAtStart; bool thAudio; bool lrAudio; };
 
 void applyTheme(bool dark);
 
 INT_PTR CALLBACK intervalDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
     SettingsDlgData* d = (SettingsDlgData*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
-    if (msg == WM_DRAWITEM && ((const DRAWITEMSTRUCT*)lp)->CtlID == IDC_DARK_SWITCH) {
-        themeDrawSwitch((const DRAWITEMSTRUCT*)lp, d && d->dark);
-        return TRUE;
+    if (msg == WM_DRAWITEM) {
+        const DRAWITEMSTRUCT* di = (const DRAWITEMSTRUCT*)lp;
+        if (di->CtlID == IDC_DARK_SWITCH) { themeDrawSwitch(di, d && d->dark); return TRUE; }
+        if (di->CtlID == IDC_TH_AUDIO_SWITCH) { themeDrawSwitch(di, d && d->thAudio); return TRUE; }
+        if (di->CtlID == IDC_LR_AUDIO_SWITCH) { themeDrawSwitch(di, d && d->lrAudio); return TRUE; }
     }
     if (INT_PTR r = themeDialogMessage(dlg, msg, wp, lp)) return r;
     switch (msg) {
@@ -2597,6 +3000,8 @@ INT_PTR CALLBACK intervalDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         d = (SettingsDlgData*)lp;
         SetWindowLongPtrW(dlg, GWLP_USERDATA, (LONG_PTR)d);
         SetDlgItemTextW(dlg, IDC_DARK_STATE, d->dark ? L"On" : L"Off");
+        SetDlgItemTextW(dlg, IDC_TH_AUDIO_STATE, d->thAudio ? L"On" : L"Off");
+        SetDlgItemTextW(dlg, IDC_LR_AUDIO_STATE, d->lrAudio ? L"On" : L"Off");
         HWND combo = GetDlgItem(dlg, IDC_INTERVAL_COMBO);
         int current = d->sec, selected = 0;
         for (int sec = 5, i = 0; sec <= 60; sec += 5, ++i) {
@@ -2616,6 +3021,18 @@ INT_PTR CALLBACK intervalDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             SetDlgItemTextW(dlg, IDC_DARK_STATE, d->dark ? L"On" : L"Off");
             applyTheme(d->dark);
             themeWindow(dlg);
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDC_TH_AUDIO_SWITCH && d) {
+            d->thAudio = !d->thAudio;
+            SetDlgItemTextW(dlg, IDC_TH_AUDIO_STATE, d->thAudio ? L"On" : L"Off");
+            InvalidateRect(GetDlgItem(dlg, IDC_TH_AUDIO_SWITCH), NULL, TRUE);
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDC_LR_AUDIO_SWITCH && d) {
+            d->lrAudio = !d->lrAudio;
+            SetDlgItemTextW(dlg, IDC_LR_AUDIO_STATE, d->lrAudio ? L"On" : L"Off");
+            InvalidateRect(GetDlgItem(dlg, IDC_LR_AUDIO_SWITCH), NULL, TRUE);
             return TRUE;
         }
         if (LOWORD(wp) == IDOK && d) {
@@ -2663,6 +3080,9 @@ void onNet(NetEvent* e)
                         e->msg.get("agent").c_str(), isNew ? " (new client)" : ""));
         logNode(*n, "<- " + e->msg.oneLine());
         logNode(*n, format("-> SET interval=%d", g_store->settings.intervalSec));
+        playEventSound(SoundThHello);
+        sendAudioSwitch(n, g_store->settings.lrAudio);   // All Lightning Rods Audio
+        sendSoundScheme(n);                              // the files of the agent's own events
         refreshRow(n);
         if (g_staticNode == n) showStaticPane(n);
         break;
@@ -2718,6 +3138,10 @@ void onNet(NetEvent* e)
                                   e->msg.get("path").c_str(), e->msg.get("found").c_str(),
                                   parseBool(e->msg.get("running")) ? ", TeamViewer was already running" : "");
             else text = format("TEAMVIEWER failed on %s: %s", n->name.c_str(), e->msg.get("error").c_str());
+        } else if (cmd == "SOUND") {
+            std::string action = e->msg.get("action"), file = e->msg.get("file");
+            if (ok) text = format("SOUND %s ok on %s%s%s", action.c_str(), n->name.c_str(), file.empty() ? "" : ": ", file.c_str());
+            else text = format("SOUND %s failed on %s: %s", action.c_str(), n->name.c_str(), e->msg.get("error").c_str());
         } else if (cmd == "AUDIO") {
             std::string action = e->msg.get("action"), method = e->msg.get("method");
             if (ok) text = format("AUDIO %s ok on %s: audio %s%s%s", action.c_str(), n->name.c_str(),
@@ -3298,6 +3722,8 @@ void openSettings()
     SettingsDlgData d;
     d.sec = g_store->settings.intervalSec;
     d.dark = d.darkAtStart = g_store->settings.darkMode;
+    d.thAudio = g_store->settings.thAudio;
+    d.lrAudio = g_store->settings.lrAudio;
     if (DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_INTERVAL), g_main, intervalDlgProc, (LPARAM)&d) != IDOK) {
         if (theme().dark != d.darkAtStart) applyTheme(d.darkAtStart);
         return;
@@ -3309,6 +3735,19 @@ void openSettings()
         logEvent(d.dark ? "Dark Mode on" : "Dark Mode off");
     }
     if (theme().dark != d.dark) applyTheme(d.dark);
+    if (d.thAudio != g_store->settings.thAudio) {
+        g_store->settings.thAudio = d.thAudio;
+        g_store->saveSettings();
+        soundSetMuted(!d.thAudio);
+        logEvent(d.thAudio ? "Thunderhead Audio on" : "Thunderhead Audio off");
+    }
+    if (d.lrAudio != g_store->settings.lrAudio) {
+        g_store->settings.lrAudio = d.lrAudio;
+        g_store->saveSettings();
+        logEvent(d.lrAudio ? "All Lightning Rods Audio on: AUDIO unmute to every online client"
+                           : "All Lightning Rods Audio off: AUDIO mute to every online client");
+        sendAudioAll(d.lrAudio);
+    }
 }
 
 LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -3318,7 +3757,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_COMMAND: {
         int id = LOWORD(wp);
         switch (id) {
-        case IDM_FILE_EXIT: DestroyWindow(g_main); return 0;
+        case IDM_FILE_EXIT: SendMessageW(g_main, WM_CLOSE, 0, 0); return 0;
         case IDC_CMD_SETTINGS: openSettings(); return 0;
         case IDM_HELP_ABOUT:
             MessageBoxW(g_main, L"Thunderhead " TLR_VERSION_WSTRING L"\nBryce Lightning render farm console.\n\n"
@@ -3345,6 +3784,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CMD_START_TV: startTeamViewer(); return 0;
         case IDC_CMD_MUTE: sendAudio("mute"); return 0;
         case IDC_CMD_UNMUTE: sendAudio("unmute"); return 0;
+        case IDC_CMD_SOUND: openPlaySound(); return 0;
+        case IDC_CMD_SCHEMES: openSoundSchemes(); return 0;
         case IDC_CMD_REMOVE_OFFLINE: removeCheckedOffline(); return 0;
         case IDC_CMD_SHUTDOWN_NODE: shutdownChecked(); return 0;
         case IDC_CMD_ABORT_SHUTDOWN: sendPower("abort"); return 0;
@@ -3379,6 +3820,14 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         const DRAWITEMSTRUCT* di = (const DRAWITEMSTRUCT*)lp;
         if (di->hwndItem == g_status) { drawStatusText(di); return TRUE; }
         break;
+    }
+    case WM_CLOSE: {
+        // The Shutdown sound plays to its end (5 s at most) before the window goes.
+        std::string err;
+        if (g_store->settings.thAudio && !soundPlayAndWait(soundPathForEvent(SoundThClose), 5000, err))
+            logEvent(format("sound %s not played: %s", kSoundEvents[SoundThClose].key, err.c_str()));
+        DestroyWindow(hwnd);
+        return 0;
     }
     case WM_DESTROY:
         KillTimer(hwnd, kTimerId);
@@ -3557,8 +4006,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show)
     }
     SetTimer(g_main, kTimerId, 1000, NULL);
     applyTheme(store.settings.darkMode);   // also the first updateStatusBar()
+    soundSetMuted(!store.settings.thAudio);
     ShowWindow(g_main, show);
     UpdateWindow(g_main);
+    playEventSound(SoundThOpen);
 
     // Hot keys while the main window has the focus: Ctrl+A checks every client,
     // Ctrl+D checks none. They arrive as WM_COMMAND with the button's id. The
@@ -3581,6 +4032,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show)
     logEvent("Thunderhead stopped");
     for (std::map<std::string, Logger*>::iterator it = g_nodeLogs.begin(); it != g_nodeLogs.end(); ++it) delete it->second;
     g_nodeLogs.clear();
+    soundShutdown();
     netShutdown();
     DeleteObject(g_font);
     return 0;
