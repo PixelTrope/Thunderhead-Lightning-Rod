@@ -59,6 +59,12 @@ Server* g_server = NULL;
 Logger g_events;
 std::map<std::string, Logger*> g_nodeLogs;
 
+// SMB1 relay lookups; defined with the relay code below.
+bool isRelay(const NodeRecord* n);
+std::string relayTarget(const NodeRecord* n);
+NodeRecord* nodeAtIp(const std::string& ip);
+NodeRecord* relayFor(const NodeRecord* n);
+
 // ---------------------------------------------------------------- inventory columns
 
 enum Column {
@@ -585,6 +591,14 @@ void showStaticPane(NodeRecord* n)
     add(L"VRAM MB", widen(h.get("vram_mb")));
     add(L"Lightning 3 (B7 & 7 Pro)", lightningInstallText(h, "lightning3"));
     add(L"Lightning 2 (B6.x)", lightningInstallText(h, "lightning2"));
+    if (isRelay(n)) {
+        NodeRecord* target = nodeAtIp(relayTarget(n));
+        add(L"SMB1 relay", widen("to " + relayTarget(n) + (target ? " (" + target->name + ")" : std::string()) +
+                                 (n->relayProbe.empty() ? std::string() : "; its share " + n->relayProbe)));
+    } else if (h.has("relay")) {
+        add(L"SMB1 relay", L"off");
+    }
+    if (NodeRecord* via = relayFor(n)) add(L"Reached through relay", widen(via->name + " (" + via->ip + ")"));
     bool reported = !r.verb.empty();
     add(L"Rendering", !r.has("rendering") ? std::wstring() : (parseBool(r.get("rendering")) ? L"Yes" : L"No"));
     add(L"Lightning", !r.has("lightning") ? std::wstring() : (r.get("lightning") == "running" ? L"Running" : L"Stopped"));
@@ -603,7 +617,7 @@ void showStaticPane(NodeRecord* n)
     }
     static const char* const knownHello[] = { "agent", "os", "cpu", "cpu_mhz", "cores", "mem_mb", "mem_installed_mb", "mem_type", "disk_total_mb", "board",
                                               "chipset", "gpu", "vram_mb", "ip", "mac", "name", "lightning3_path", "lightning3_version",
-                                              "lightning2_path", "lightning2_version" };
+                                              "lightning2_path", "lightning2_version", "relay", "relay_ip" };
     static const char* const knownReport[] = { "cpu_pct", "cpu_temp_c", "disk_free_mb", "lightning", "lightning_cpu_pct",
                                                "mem_free_mb", "rendering", "uptime_s", "clock", "utc_ms" };
     for (std::map<std::string, std::string>::const_iterator it = h.fields.begin(); it != h.fields.end(); ++it) {
@@ -784,7 +798,159 @@ void checkOutdated()
     updateStatusBar(widen(format("|  %d of %d online clients are older than %s", outdated, online, version.c_str())).c_str());
 }
 
-struct UpdateJob { std::string name; std::string ip; std::wstring source; std::wstring share; std::wstring dir; std::wstring sounds; };
+// ---------------------------------------------------------------- SMB1 relay
+
+// A Windows XP client's share speaks SMB1, which this host no longer does. An
+// agent from kRelayAgent on a Windows 7 node whose Settings say Act as SMB1
+// Relay for that client's address announces relay=yes and relay_ip= in HELLO.
+// Every share operation of that client (update staging with the sounds folder,
+// Copy Files or Folder, View Remote Log) then goes through it: the files are
+// written to relay\<job>\ under the relay node's share, which this host can
+// reach, and RELAY op=push has the relay copy them on over SMB1; RELAY op=pull
+// fetches a file the other way. The client's commands still go to its own
+// session, which needs no file sharing.
+const char* const kRelayAgent = "0.3.0";
+
+bool isRelay(const NodeRecord* n) { return n && parseBool(n->hello.get("relay")); }
+std::string relayTarget(const NodeRecord* n) { return n ? n->hello.get("relay_ip") : std::string(); }
+
+NodeRecord* nodeAtIp(const std::string& ip)
+{
+    if (ip.empty()) return NULL;
+    std::vector<NodeRecord*>& nodes = g_store->nodes();
+    for (size_t i = 0; i < nodes.size(); ++i) if (nodes[i]->ip == ip) return nodes[i];
+    return NULL;
+}
+
+// The online relay set to n's address, or NULL.
+NodeRecord* relayFor(const NodeRecord* n)
+{
+    if (!n || n->ip.empty()) return NULL;
+    std::vector<NodeRecord*>& nodes = g_store->nodes();
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        NodeRecord* r = nodes[i];
+        if (r != n && r->online && isRelay(r) && relayTarget(r) == n->ip && compareVersions(r->hello.get("agent"), kRelayAgent) >= 0) return r;
+    }
+    return NULL;
+}
+
+// A worker thread's wait for the ACK of one RELAY job, keyed by job id; the
+// main thread hands the ACK over in relayAckDelivered.
+struct RelayWait { HANDLE done; Message ack; bool got; };
+CRITICAL_SECTION g_relayLock;
+std::map<std::string, RelayWait*> g_relayWaits;
+unsigned g_relayJobSeq = 0;
+
+std::string newRelayJob()
+{
+    EnterCriticalSection(&g_relayLock);
+    std::string job = format("th%lu-%u", (unsigned long)GetCurrentProcessId(), ++g_relayJobSeq);
+    LeaveCriticalSection(&g_relayLock);
+    return job;
+}
+
+bool relayAckDelivered(const Message& ack)
+{
+    EnterCriticalSection(&g_relayLock);
+    std::map<std::string, RelayWait*>::iterator it = g_relayWaits.find(ack.get("job"));
+    bool found = it != g_relayWaits.end();
+    if (found) { it->second->ack = ack; it->second->got = true; SetEvent(it->second->done); }
+    LeaveCriticalSection(&g_relayLock);
+    return found;
+}
+
+// Worker threads: sends m, which carries job=, to the relay's connection and
+// waits for the ACK of that job, calling pump every 100 ms when one is given
+// (the copy progress window). False with err on refusal, failure or timeout.
+bool relayRequest(int relayConn, const Message& m, DWORD timeoutMs, Message& ack, std::string& err, void (*pump)(void*) = NULL, void* arg = NULL)
+{
+    std::string job = m.get("job");
+    RelayWait* w = new RelayWait();
+    w->done = CreateEventW(NULL, TRUE, FALSE, NULL);
+    w->got = false;
+    EnterCriticalSection(&g_relayLock);
+    g_relayWaits[job] = w;
+    LeaveCriticalSection(&g_relayLock);
+    bool sent = g_server->send(relayConn, m);
+    DWORD start = GetTickCount();
+    while (sent) {
+        if (WaitForSingleObject(w->done, pump ? 100 : timeoutMs) == WAIT_OBJECT_0) break;
+        if (GetTickCount() - start >= timeoutMs) break;
+        if (pump) pump(arg);
+    }
+    EnterCriticalSection(&g_relayLock);
+    g_relayWaits.erase(job);
+    bool got = w->got;
+    ack = w->ack;
+    LeaveCriticalSection(&g_relayLock);
+    CloseHandle(w->done);
+    delete w;
+    if (!sent) { err = "the relay's connection is gone"; return false; }
+    if (!got) { err = format("no answer from the relay within %u s", (unsigned)(timeoutMs / 1000)); return false; }
+    if (!parseBool(ack.get("ok"))) { err = ack.get("error"); return false; }
+    return true;
+}
+
+Message relayMessage(const char* op, const std::string& job, const std::string& destIp, const std::wstring& share)
+{
+    Message m("RELAY");
+    m.set("op", std::string(op));
+    m.set("job", job);
+    m.set("dest", destIp);
+    m.set("share", narrow(share));
+    return m;
+}
+
+// relay\<job>\ under the relay node's share: where the files for a relayed client are staged.
+std::wstring relayStageDir(const std::string& relayIp, const std::wstring& share, const std::string& job)
+{
+    return L"\\\\" + widen(relayIp) + L"\\" + share + L"\\relay\\" + widen(job) + L"\\";
+}
+
+// Creates the folders of a UNC path (ending with a backslash) below its share.
+bool makeDirs(const std::wstring& path)
+{
+    size_t start = 0;
+    if (path.compare(0, 2, L"\\\\") == 0) {
+        size_t s1 = path.find(L'\\', 2);
+        size_t s2 = s1 == std::wstring::npos ? std::wstring::npos : path.find(L'\\', s1 + 1);
+        if (s2 == std::wstring::npos) return false;
+        start = s2 + 1;
+    }
+    for (size_t i = start; i < path.size(); ++i) {
+        if (path[i] != L'\\') continue;
+        std::wstring part = path.substr(0, i);
+        if (!CreateDirectoryW(part.c_str(), NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return false;
+    }
+    return true;
+}
+
+// Deletes a folder (ending with a backslash) with everything in it.
+void removeTree(const std::wstring& dir)
+{
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) removeTree(dir + fd.cFileName + L"\\");
+            else DeleteFileW((dir + fd.cFileName).c_str());
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    std::wstring bare = dir;
+    while (!bare.empty() && bare[bare.size() - 1] == L'\\') bare.erase(bare.size() - 1);
+    RemoveDirectoryW(bare.c_str());
+}
+
+static std::string byteText(ULONGLONG bytes);
+
+// ---------------------------------------------------------------- agent update
+
+struct UpdateJob {
+    std::string name; std::string ip; std::wstring source; std::wstring share; std::wstring dir; std::wstring sounds;
+    bool viaRelay; int relayConn; std::string relayName, relayIp;   // the client's share is reached through a relay
+};
 struct UpdateResult {
     std::string name; int phase; bool ok; std::string text; std::wstring dir;
     bool needCredentials;            // a share refused the credentials Windows offered
@@ -874,6 +1040,39 @@ DWORD WINAPI updateStageThread(LPVOID p)
     res->phase = 1;
     res->ok = false;
     res->needCredentials = false;
+    if (job->viaRelay) {
+        // The agent file and the sounds go to relay\<job> under the relay's
+        // share; the relay copies them to the root of the client's share, where
+        // the client's own helper swaps LightningRod.new in after UPDATE.
+        std::string relayJob = newRelayJob(), err;
+        std::wstring root = L"\\\\" + widen(job->relayIp) + L"\\" + job->share + L"\\";
+        std::wstring stage = relayStageDir(job->relayIp, job->share, relayJob);
+        if (!makeDirs(stage)) {
+            int e = (int)GetLastError();
+            err = "staging folder " + narrow(stage) + " on relay " + job->relayName + " could not be created: " + lastErrorText(e);
+            if (isCredentialError(e)) { res->needCredentials = true; res->credDir = root; }
+        } else if (!CopyFileW(job->source.c_str(), (stage + L"LightningRod.new").c_str(), FALSE)) {
+            err = "copy to " + narrow(stage) + " failed: " + lastErrorText((int)GetLastError());
+            removeTree(stage);
+        } else {
+            std::string sounds = copySoundsTo(job->sounds, stage);
+            Message ack;
+            if (relayRequest(job->relayConn, relayMessage("push", relayJob, job->ip, job->share), 10 * 60 * 1000, ack, err)) {
+                res->ok = true;
+                res->dir = L"\\\\" + widen(job->ip) + L"\\" + job->share + L"\\";
+                res->text = format("agent staged as LightningRod.new in %s through relay %s (%s file(s), %s)%s", narrow(res->dir).c_str(),
+                                   job->relayName.c_str(), ack.get("files").c_str(),
+                                   byteText(_strtoui64(ack.get("bytes").c_str(), NULL, 10)).c_str(), sounds.c_str());
+            } else {
+                err = "relay " + job->relayName + " could not copy to \\\\" + job->ip + "\\" + narrow(job->share) + "\\: " + err;
+                removeTree(stage);
+            }
+        }
+        if (!res->ok) res->text = err;
+        delete job;
+        if (!PostMessageW(g_main, WM_UPDATE_DONE, 0, (LPARAM)res)) delete res;
+        return 0;
+    }
     std::vector<std::wstring> dirs;
     dirs.push_back(L"\\\\" + widen(job->ip) + L"\\" + job->share + L"\\");
     if (nameResolvesTo(job->name, job->ip)) dirs.push_back(L"\\\\" + widen(job->name) + L"\\" + job->share + L"\\");
@@ -944,6 +1143,11 @@ void startUpdateThread(NodeRecord* n, LPTHREAD_START_ROUTINE fn, const char* wha
     job->share = widen(g_store->settings.shareName);
     job->dir = n->updateDir;
     job->sounds = soundDir();
+    NodeRecord* relay = relayFor(n);
+    job->viaRelay = relay != NULL;
+    job->relayConn = relay ? relay->conn : -1;
+    if (relay) { job->relayName = relay->name; job->relayIp = relay->ip; }
+    n->updateViaRelay = job->viaRelay;
     HANDLE t = CreateThread(NULL, 0, fn, job, 0, NULL);
     if (t) { CloseHandle(t); return; }
     delete job;
@@ -1037,6 +1241,7 @@ void updateChecked()
         n->updatePrompted = false;
         n->updateStartMs = tickMs();
         logEvent(format("%s update: agent %s, staging %s from %s", n->name.c_str(), n->hello.get("agent").c_str(), version.c_str(), narrow(file).c_str()));
+        if (NodeRecord* relay = relayFor(n)) logEvent(format("%s update: its share is reached through SMB1 relay %s", n->name.c_str(), relay->name.c_str()));
         refreshRow(n);
         startUpdateThread(n, updateStageThread, "staging");
     }
@@ -1919,6 +2124,10 @@ struct LogSource {
     std::vector<std::wstring> dirs;
     std::string name, ip;
     std::wstring share, pattern;
+    bool viaRelay;                   // the client's share is SMB1: RELAY op=pull through the relay
+    int relayConn;
+    std::string relayName, relayIp;
+    LogSource() : viaRelay(false), relayConn(-1) {}
 };
 struct LogView { std::wstring title; LogSource src; HWND text, refresh, info; bool loading, prompted; };
 struct LogJob { HWND window; LogSource src; };
@@ -1996,6 +2205,29 @@ DWORD WINAPI logLoadThread(LPVOID p)
     LogText* res = new LogText();
     res->ok = false;
     res->needCredentials = false;
+    if (job->src.viaRelay) {
+        std::string relayJob = newRelayJob(), err;
+        Message m = relayMessage("pull", relayJob, job->src.ip, job->src.share);
+        m.set("pattern", narrow(job->src.pattern));
+        Message ack;
+        std::wstring stage = relayStageDir(job->src.relayIp, job->src.share, relayJob);
+        if (!relayRequest(job->src.relayConn, m, 2 * 60 * 1000, ack, err)) {
+            res->text = widen("relay " + job->src.relayName + ": " + err);
+        } else {
+            std::wstring file = stage + widen(ack.get("file"));
+            if (readLogFile(file, res->text, res->info, err)) {
+                res->ok = true;
+                res->file = L"\\\\" + widen(job->src.ip) + L"\\" + job->src.share + L"\\" + widen(ack.get("file"));
+                res->info += L", through relay " + widen(job->src.relayName);
+            } else {
+                res->text = widen("the relayed copy " + narrow(file) + " could not be read: " + err);
+            }
+            removeTree(stage);
+        }
+        delete job;
+        if (!PostMessageW(window, WM_LOG_LOADED, 0, (LPARAM)res)) delete res;
+        return 0;
+    }
     std::vector<std::wstring> dirs = job->src.dirs;
     if (!job->src.name.empty() && (job->src.ip.empty() || nameResolvesTo(job->src.name, job->src.ip)))
         dirs.push_back(L"\\\\" + widen(job->src.name) + L"\\" + job->src.share + L"\\");
@@ -2193,11 +2425,20 @@ void viewRemoteLogs()
         src.ip = n->ip;
         src.share = widen(g_store->settings.shareName);
         src.pattern = L"LightningRod-*.log";
+        NodeRecord* relay = relayFor(n);
+        if (relay) {
+            src.viaRelay = true;
+            src.relayConn = relay->conn;
+            src.relayName = relay->name;
+            src.relayIp = relay->ip;
+            src.dirs.clear();
+        }
         std::string label = n->name.empty() ? n->mac : n->name;
         openLogView(widen(label) + L" log", src);
         ++opened;
-        logEvent(format("View Remote Log: %s, \\\\%s\\%s\\LightningRod-*.log%s", label.c_str(),
+        logEvent(format("View Remote Log: %s, \\\\%s\\%s\\LightningRod-*.log%s%s", label.c_str(),
                         n->ip.empty() ? n->name.c_str() : n->ip.c_str(), g_store->settings.shareName.c_str(),
+                        relay ? (" through relay " + relay->name).c_str() : "",
                         n->online ? "" : " (offline, last known address)"));
     }
     updateStatusBar(widen(format("|  %d log window(s) opened", opened)).c_str());
@@ -2264,6 +2505,10 @@ void openSharedFolders()
     for (size_t i = 0; i < nodes.size(); ++i) {
         NodeRecord* n = nodes[i];
         if (n->name.empty()) { logEvent(format("%s has no name yet; shared folder not opened", n->mac.c_str())); continue; }
+        if (NodeRecord* relay = relayFor(n)) {
+            logEvent(format("%s: its share is SMB1, reached through relay %s; it cannot be opened from this host", n->name.c_str(), relay->name.c_str()));
+            continue;
+        }
         paths->push_back("\\\\" + n->name + "\\" + g_store->settings.shareName + "\\");
     }
     if (paths->empty()) { delete paths; return; }
@@ -2275,9 +2520,19 @@ void openSharedFolders()
 
 // ---------------------------------------------------------------- copy to clients
 
+struct CopyTarget {
+    std::string name;
+    std::wstring share;                 // \\NAME\<share>
+    std::wstring shareName;
+    bool viaRelay;                      // an SMB1 share: staged under the relay's share, then RELAY op=push
+    int relayConn;
+    std::string relayName, relayIp, destIp;
+    CopyTarget() : viaRelay(false), relayConn(-1) {}
+};
+
 struct CopyJob {
-    std::vector<std::wstring> sources;                        // files, or one folder
-    std::vector<std::pair<std::string, std::wstring> > targets; // client name, \\NAME\<share>
+    std::vector<std::wstring> sources;  // files, or one folder
+    std::vector<CopyTarget> targets;
 };
 
 // The copy progress window: Thunderhead's own, because the Windows shell
@@ -2346,6 +2601,8 @@ static void copyProgressPump(CopyProgress& cp)
         if (!cp.wnd || !IsDialogMessageW(cp.wnd, &m)) { TranslateMessage(&m); DispatchMessageW(&m); }
     }
 }
+
+static void copyPump(void* cp) { copyProgressPump(*(CopyProgress*)cp); }
 
 static void copyProgressShowBytes(CopyProgress& cp, ULONGLONG at)
 {
@@ -2486,21 +2743,27 @@ DWORD WINAPI copyToClientsThread(LPVOID param)
     ULONGLONG bytesAll = 0;
     std::string lastError;
     for (size_t i = 0; i < job->targets.size() && !cp.cancelled; ++i) {
-        const std::string& name = job->targets[i].first;
-        std::wstring to = job->targets[i].second;
+        const CopyTarget& tg = job->targets[i];
+        const std::string& name = tg.name;
+        // A relayed client's files go to relay\<job> under the relay's share first.
+        std::string relayJob;
+        std::wstring to = tg.share, probe;
+        if (tg.viaRelay) { relayJob = newRelayJob(); to = relayStageDir(tg.relayIp, tg.shareName, relayJob); }
         if (to.empty() || to[to.size() - 1] != L'\\') to += L'\\';
+        probe = tg.viaRelay ? L"\\\\" + widen(tg.relayIp) + L"\\" + tg.shareName + L"\\" : to;
         if (cp.wnd) {
-            SetWindowTextW(cp.client, widen(format("Client %s (%u of %u): %s", name.c_str(), (unsigned)i + 1, (unsigned)job->targets.size(), narrow(to).c_str())).c_str());
+            SetWindowTextW(cp.client, widen(format("Client %s (%u of %u): %s%s", name.c_str(), (unsigned)i + 1, (unsigned)job->targets.size(),
+                                                   tg.viaRelay ? ("\\\\" + tg.destIp + "\\" + narrow(tg.shareName) + "\\ through relay " + tg.relayName).c_str() : narrow(to).c_str(), "")).c_str());
             SetWindowTextW(cp.file, L"Connecting...");
             copyProgressPump(cp);
         }
         // The share must answer before anything is copied; a refusal gets the credential prompt.
-        if (GetFileAttributesW(to.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        if (GetFileAttributesW(probe.c_str()) == INVALID_FILE_ATTRIBUTES) {
             DWORD e = GetLastError();
             if (e == ERROR_ACCESS_DENIED || e == ERROR_LOGON_FAILURE || e == ERROR_INVALID_PASSWORD || e == ERROR_SESSION_CREDENTIAL_CONFLICT)
-                e = promptShareCredentials(cp.wnd ? cp.wnd : g_main, to) == NO_ERROR && GetFileAttributesW(to.c_str()) != INVALID_FILE_ATTRIBUTES ? NO_ERROR : GetLastError();
+                e = promptShareCredentials(cp.wnd ? cp.wnd : g_main, probe) == NO_ERROR && GetFileAttributesW(probe.c_str()) != INVALID_FILE_ATTRIBUTES ? NO_ERROR : GetLastError();
             if (e != NO_ERROR) {
-                lastError = format("%s is not reachable (%s)", narrow(to).c_str(), lastErrorText((int)e).c_str());
+                lastError = format("%s is not reachable (%s)", narrow(probe).c_str(), lastErrorText((int)e).c_str());
                 logEvent(format("copy to %s failed: %s", name.c_str(), lastError.c_str()));
                 ++clientsFailed;
                 cp.done += perClient;
@@ -2508,11 +2771,34 @@ DWORD WINAPI copyToClientsThread(LPVOID param)
                 continue;
             }
         }
+        if (tg.viaRelay && !makeDirs(to)) {
+            lastError = format("staging folder %s could not be created (%s)", narrow(to).c_str(), lastErrorText((int)GetLastError()).c_str());
+            logEvent(format("copy to %s failed: %s", name.c_str(), lastError.c_str()));
+            ++clientsFailed;
+            cp.done += perClient;
+            copyProgressShowBytes(cp, cp.done);
+            continue;
+        }
         std::string err;
         unsigned files = 0;
         ULONGLONG before = cp.done;
         bool ok = true;
         for (size_t k = 0; k < job->sources.size() && ok; ++k) ok = copyTree(job->sources[k], to, cp, err, files);
+        if (tg.viaRelay) {
+            if (ok && !cp.cancelled) {
+                // The relay copies the staged files on over SMB1; Cancel waits for it, since the relay has no abort.
+                if (cp.wnd) {
+                    SetWindowTextW(cp.file, widen("Relay " + tg.relayName + " is copying to \\\\" + tg.destIp + "\\" + narrow(tg.shareName) + "\\ ...").c_str());
+                    copyProgressPump(cp);
+                }
+                Message ack;
+                std::string rerr;
+                ok = relayRequest(tg.relayConn, relayMessage("push", relayJob, tg.destIp, tg.shareName), 30 * 60 * 1000, ack, rerr, copyPump, &cp);
+                if (!ok) { err = "relay " + tg.relayName + ": " + rerr; removeTree(to); }
+            } else {
+                removeTree(to);
+            }
+        }
         filesAll += files;
         bytesAll += cp.done - before;
         if (cp.cancelled) logEvent(format("copy to %s cancelled after %u file(s), %s", name.c_str(), files, byteText(cp.done - before).c_str()));
@@ -2601,7 +2887,19 @@ void copyToClients()
     for (size_t i = 0; i < nodes.size(); ++i) {
         NodeRecord* n = nodes[i];
         if (n->name.empty()) { logEvent(format("%s has no name yet; nothing copied to it", n->mac.c_str())); continue; }
-        job->targets.push_back(std::make_pair(n->name, L"\\\\" + widen(n->name) + L"\\" + widen(g_store->settings.shareName)));
+        CopyTarget tg;
+        tg.name = n->name;
+        tg.shareName = widen(g_store->settings.shareName);
+        tg.share = L"\\\\" + widen(n->name) + L"\\" + tg.shareName;
+        tg.destIp = n->ip;
+        if (NodeRecord* relay = relayFor(n)) {
+            tg.viaRelay = true;
+            tg.relayConn = relay->conn;
+            tg.relayName = relay->name;
+            tg.relayIp = relay->ip;
+            logEvent(format("copy to %s goes through SMB1 relay %s", n->name.c_str(), relay->name.c_str()));
+        }
+        job->targets.push_back(tg);
     }
     if (job->targets.empty()) { delete job; return; }
     logEvent(format("copying %u item(s) from %s to %u client(s)", (unsigned)sources.size(),
@@ -3064,25 +3362,44 @@ void onNet(NetEvent* e)
         bool renamed = !name.empty() && name != n->name;
         if (renamed) n->name = name;
         if (isNew || renamed) g_store->save();
+        // An agent sends HELLO again within its session when its Settings changed
+        // (the SMB1 relay values); that renews the static fields and nothing else.
+        bool again = n->online && n->conn == e->conn;
         if (n->online && n->conn != e->conn) g_server->close(n->conn);   // replaced by a new session
         n->online = true;
         n->conn = e->conn;
         n->ip = e->ip;
         n->hello = e->msg;
-        n->report = Message();
+        if (!again) n->report = Message();
         n->lastReportMs = now;
-        n->onlineSinceMs = now;
+        if (!again) n->onlineSinceMs = now;
         if (n->updating) {
             n->updating = false;
             logEvent(format("%s update finished: agent %s is back", n->name.c_str(), e->msg.get("agent").c_str()));
         }
-        logEvent(format("%s online from %s, agent %s%s", n->name.c_str(), n->ip.c_str(),
-                        e->msg.get("agent").c_str(), isNew ? " (new client)" : ""));
+        if (again) logEvent(format("%s sent HELLO again (agent %s)", n->name.c_str(), e->msg.get("agent").c_str()));
+        else logEvent(format("%s online from %s, agent %s%s", n->name.c_str(), n->ip.c_str(),
+                             e->msg.get("agent").c_str(), isNew ? " (new client)" : ""));
         logNode(*n, "<- " + e->msg.oneLine());
         logNode(*n, format("-> SET interval=%d", g_store->settings.intervalSec));
-        playEventSound(SoundThHello);
-        sendAudioSwitch(n, g_store->settings.lrAudio);   // All Lightning Rods Audio
-        sendSoundScheme(n);                              // the files of the agent's own events
+        if (!again) {
+            playEventSound(SoundThHello);
+            sendAudioSwitch(n, g_store->settings.lrAudio);   // All Lightning Rods Audio
+            sendSoundScheme(n);                              // the files of the agent's own events
+        }
+        if (isRelay(n)) {
+            NodeRecord* target = nodeAtIp(relayTarget(n));
+            logEvent(format("%s acts as SMB1 relay to %s%s", n->name.c_str(), relayTarget(n).c_str(),
+                            target ? (" (" + target->name + ")").c_str() : ""));
+            n->relayProbe.clear();
+            if (compareVersions(e->msg.get("agent"), kRelayAgent) >= 0) {
+                Message probe = relayMessage("probe", std::string(), relayTarget(n), widen(g_store->settings.shareName));
+                sendToNode(n, probe, probe.oneLine());
+            }
+            if (target && g_staticNode == target) showStaticPane(target);
+        } else if (NodeRecord* via = relayFor(n)) {
+            logEvent(format("%s: share operations go through SMB1 relay %s", n->name.c_str(), via->name.c_str()));
+        }
         refreshRow(n);
         if (g_staticNode == n) showStaticPane(n);
         break;
@@ -3138,6 +3455,21 @@ void onNet(NetEvent* e)
                                   e->msg.get("path").c_str(), e->msg.get("found").c_str(),
                                   parseBool(e->msg.get("running")) ? ", TeamViewer was already running" : "");
             else text = format("TEAMVIEWER failed on %s: %s", n->name.c_str(), e->msg.get("error").c_str());
+        } else if (cmd == "RELAY") {
+            std::string op = e->msg.get("op"), dest = e->msg.get("dest");
+            if (op == "probe") {
+                n->relayProbe = ok ? "opens from there" : "does not open from there: " + e->msg.get("error");
+                text = ok ? format("RELAY probe ok on %s: \\\\%s\\%s\\ opens from there", n->name.c_str(), dest.c_str(), g_store->settings.shareName.c_str())
+                          : format("RELAY probe failed on %s: %s", n->name.c_str(), e->msg.get("error").c_str());
+                if (g_staticNode == n) showStaticPane(n);
+            } else {
+                relayAckDelivered(e->msg);   // the worker thread waiting for this job goes on
+                std::string file = e->msg.get("file");
+                text = ok ? format("RELAY %s ok on %s: %s file(s), %s %s \\\\%s\\%s\\%s%s", op.c_str(), n->name.c_str(), e->msg.get("files").c_str(),
+                                   byteText(_strtoui64(e->msg.get("bytes").c_str(), NULL, 10)).c_str(), op == "pull" ? "from" : "to",
+                                   dest.c_str(), g_store->settings.shareName.c_str(), file.empty() ? "" : ": ", file.c_str())
+                          : format("RELAY %s failed on %s: %s", op.c_str(), n->name.c_str(), e->msg.get("error").c_str());
+            }
         } else if (cmd == "SOUND") {
             std::string action = e->msg.get("action"), file = e->msg.get("file");
             if (ok) text = format("SOUND %s ok on %s%s%s", action.c_str(), n->name.c_str(), file.empty() ? "" : ": ", file.c_str());
@@ -3196,7 +3528,8 @@ void onNet(NetEvent* e)
         if (n) {
             setOffline(n, e->text);
             if (n->updating && n->updateStaged) {
-                startUpdateThread(n, updateFinishThread, "finish");
+                if (n->updateViaRelay) logEvent(n->name + " update: staged through a relay; the node swaps the agent in by itself, waiting for it to reconnect");
+                else startUpdateThread(n, updateFinishThread, "finish");
             } else if (n->updating) {
                 n->updating = false;
                 refreshRow(n);
@@ -3962,6 +4295,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show)
 {
     g_inst = inst;
     g_dir = exeDirectory();
+    InitializeCriticalSection(&g_relayLock);
     g_events.open(g_dir + L"\\logs", L"thunderhead");
     CreateDirectoryW((g_dir + L"\\logs\\nodes").c_str(), NULL);
     logEvent("Thunderhead " TLR_VERSION_STRING " starting");

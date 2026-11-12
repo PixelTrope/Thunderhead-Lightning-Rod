@@ -16,6 +16,7 @@
 #include "Audio.h"
 #include "TeamViewer.h"
 #include "Sound.h"
+#include "resource.h"
 
 #include <commctrl.h>
 #include <iphlpapi.h>
@@ -53,6 +54,195 @@ std::wstring exeDirectory()
     return slash == std::wstring::npos ? L"." : p.substr(0, slash);
 }
 
+std::string readTextFile(const std::wstring& path)
+{
+    FILE* f = _wfopen(path.c_str(), L"rb");
+    if (!f) return std::string();
+    std::string text;
+    char buf[1024];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, n);
+    fclose(f);
+    return text;
+}
+
+bool writeTextFile(const std::wstring& path, const std::string& text)
+{
+    FILE* f = _wfopen(path.c_str(), L"wb");
+    if (!f) return false;
+    fwrite(text.data(), 1, text.size(), f);
+    fclose(f);
+    return true;
+}
+
+// ---- settings and the SMB1 relay ------------------------------------------
+// settings.txt beside the agent holds the Settings dialog: relay=yes|no and
+// relay_ip=, the Windows XP client this node relays file sharing for. Windows
+// 10 no longer speaks SMB1 to an XP share, so Thunderhead copies the files for
+// that client into this node's shared folder and asks this agent, through
+// RELAY, to copy them on over SMB1 (or to fetch a file back). The window
+// thread edits the values, the agent thread reads them, hence the lock.
+CRITICAL_SECTION g_settingsLock;
+bool g_relay = false;
+std::string g_relayIp;
+volatile long g_rehello = 0;     // set by the window thread: send HELLO again with the new values
+
+std::wstring settingsFile() { return exeDirectory() + L"\\settings.txt"; }
+std::wstring relayDir() { return exeDirectory() + L"\\relay"; }   // staging folders of RELAY jobs, relay\<job>
+
+void loadSettings()
+{
+    std::vector<std::string> lines = split(readTextFile(settingsFile()), '\n');
+    for (size_t i = 0; i < lines.size(); ++i) {
+        size_t eq = lines[i].find('=');
+        if (eq == std::string::npos) continue;
+        std::string key = trim(lines[i].substr(0, eq)), value = trim(lines[i].substr(eq + 1));
+        if (key == "relay") g_relay = parseBool(value);
+        else if (key == "relay_ip") g_relayIp = value;
+    }
+    if (g_relayIp.empty()) g_relay = false;
+}
+
+void saveSettings()
+{
+    std::string text = std::string("relay=") + boolText(g_relay) + "\r\nrelay_ip=" + g_relayIp + "\r\n";
+    if (!writeTextFile(settingsFile(), text)) logLine("settings.txt could not be written: " + lastErrorText((int)GetLastError()));
+}
+
+void relaySnapshot(bool& relay, std::string& ip)
+{
+    EnterCriticalSection(&g_settingsLock);
+    relay = g_relay;
+    ip = g_relayIp;
+    LeaveCriticalSection(&g_settingsLock);
+}
+
+std::string relayText()
+{
+    bool relay;
+    std::string ip;
+    relaySnapshot(relay, ip);
+    return relay ? "to " + ip : std::string("off");
+}
+
+// A dotted IPv4 address with four parts, as the Settings dialog accepts it.
+bool validIpText(const std::string& s)
+{
+    std::vector<std::string> parts = split(s, '.');
+    if (parts.size() != 4) return false;
+    for (size_t i = 0; i < 4; ++i) {
+        if (parts[i].empty() || parts[i].size() > 3) return false;
+        for (size_t k = 0; k < parts[i].size(); ++k) if (parts[i][k] < '0' || parts[i][k] > '9') return false;
+        if (atoi(parts[i].c_str()) > 255) return false;
+    }
+    return true;
+}
+
+// Copies every file under src (which ends with a backslash) to dst (likewise),
+// folders included, existing files overwritten, and stops at the first failure.
+bool copyTreeTo(const std::wstring& src, const std::wstring& dst, unsigned& files, unsigned long long& bytes, std::string& err)
+{
+    if (!CreateDirectoryW(dst.c_str(), NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
+        err = narrow(dst) + ": " + lastErrorText((int)GetLastError());
+        return false;
+    }
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((src + L"*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) { err = narrow(src) + ": " + lastErrorText((int)GetLastError()); return false; }
+    bool ok = true;
+    do {
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            ok = copyTreeTo(src + fd.cFileName + L"\\", dst + fd.cFileName + L"\\", files, bytes, err);
+        } else if (CopyFileW((src + fd.cFileName).c_str(), (dst + fd.cFileName).c_str(), FALSE)) {
+            ++files;
+            bytes += ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+        } else {
+            err = narrow(dst + fd.cFileName) + ": " + lastErrorText((int)GetLastError());
+            ok = false;
+        }
+    } while (ok && FindNextFileW(h, &fd));
+    FindClose(h);
+    return ok;
+}
+
+// Deletes a folder (ending with a backslash) with everything in it.
+void removeTree(const std::wstring& dir)
+{
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) removeTree(dir + fd.cFileName + L"\\");
+            else DeleteFileW((dir + fd.cFileName).c_str());
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    std::wstring bare = dir;
+    while (!bare.empty() && bare[bare.size() - 1] == L'\\') bare.erase(bare.size() - 1);
+    RemoveDirectoryW(bare.c_str());
+}
+
+// One RELAY job, run on a thread of its own so that reports go on while a
+// copy over SMB1 takes its time; the agent thread sends the ACK when it ends.
+struct RelayTask {
+    HANDLE thread;
+    std::string op, job, dest, share, pattern;
+    bool ok;
+    std::string error, file;
+    unsigned files;
+    unsigned long long bytes;
+    RelayTask() : thread(NULL), ok(false), files(0), bytes(0) {}
+};
+
+DWORD WINAPI relayTaskThread(LPVOID p)
+{
+    RelayTask* t = (RelayTask*)p;
+    std::wstring destRoot = L"\\\\" + widen(t->dest) + L"\\" + widen(t->share) + L"\\";
+    std::wstring stage = relayDir() + L"\\" + widen(t->job) + L"\\";
+    if (t->op == "push") {
+        // Everything Thunderhead placed under relay\<job> goes to the root of the
+        // destination share, folders and all; the staging folder goes afterwards.
+        if (GetFileAttributesW(stage.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            t->error = "nothing staged in " + narrow(stage);
+        } else {
+            t->ok = copyTreeTo(stage, destRoot, t->files, t->bytes, t->error);
+            removeTree(stage);
+        }
+    } else if (t->op == "pull") {
+        // The newest file matching the pattern, by name, from the destination
+        // share into relay\<job>, where Thunderhead reads it over this node's share.
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((destRoot + widen(t->pattern)).c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) {
+            t->error = narrow(destRoot + widen(t->pattern)) + ": " + lastErrorText((int)GetLastError());
+        } else {
+            std::wstring best;
+            do {
+                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && (best.empty() || _wcsicmp(fd.cFileName, best.c_str()) > 0)) best = fd.cFileName;
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+            if (best.empty()) t->error = narrow(destRoot + widen(t->pattern)) + ": no such file";
+            else {
+                CreateDirectoryW(relayDir().c_str(), NULL);
+                CreateDirectoryW(stage.c_str(), NULL);
+                if (CopyFileW((destRoot + best).c_str(), (stage + best).c_str(), FALSE)) {
+                    WIN32_FILE_ATTRIBUTE_DATA fa;
+                    if (GetFileAttributesExW((stage + best).c_str(), GetFileExInfoStandard, &fa))
+                        t->bytes = ((unsigned long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
+                    t->files = 1;
+                    t->file = narrow(best);
+                    t->ok = true;
+                } else {
+                    t->error = narrow(destRoot + best) + ": " + lastErrorText((int)GetLastError());
+                }
+            }
+        }
+    }
+    return 0;
+}
+
 // ---- sounds ---------------------------------------------------------------
 // The agent's sounds live in sounds\ beside it, put there by Thunderhead with
 // the agent update. Each of the agent's three events plays the default file of
@@ -68,14 +258,7 @@ std::wstring schemeFile() { return soundDir() + L"\\scheme.txt"; }
 
 void loadSoundScheme()
 {
-    FILE* f = _wfopen(schemeFile().c_str(), L"rb");
-    if (!f) return;
-    std::string text;
-    char buf[1024];
-    size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, n);
-    fclose(f);
-    std::vector<std::string> lines = split(text, '\n');
+    std::vector<std::string> lines = split(readTextFile(schemeFile()), '\n');
     for (size_t i = 0; i < lines.size(); ++i) {
         size_t eq = lines[i].find('=');
         if (eq == std::string::npos) continue;
@@ -91,10 +274,7 @@ void saveSoundScheme()
     for (int e = 0; e < kSoundEventCount; ++e)
         if (kSoundEvents[e].app[0] == L'L') text += std::string(kSoundEvents[e].key) + "=" + narrow(g_soundNames[e]) + "\r\n";
     CreateDirectoryW(soundDir().c_str(), NULL);
-    FILE* f = _wfopen(schemeFile().c_str(), L"wb");
-    if (!f) { logLine("scheme.txt could not be written: " + lastErrorText((int)GetLastError())); return; }
-    fwrite(text.data(), 1, text.size(), f);
-    fclose(f);
+    if (!writeTextFile(schemeFile(), text)) logLine("scheme.txt could not be written: " + lastErrorText((int)GetLastError()));
 }
 
 // Takes the file names of the agent's events from a SOUND scheme message:
@@ -461,8 +641,8 @@ public:
             if (SUCCEEDED(co)) CoUninitialize();
         }
         status_.info = info_;
-        logLine(format("Lightning Rod %s starting: %s mac=%s ip=%s", TLR_VERSION_STRING,
-                       info_.name.c_str(), info_.mac.c_str(), info_.ip.c_str()));
+        logLine(format("Lightning Rod %s starting: %s mac=%s ip=%s, SMB1 relay %s", TLR_VERSION_STRING,
+                       info_.name.c_str(), info_.mac.c_str(), info_.ip.c_str(), relayText().c_str()));
         logLine(format("os=%s cpu=%s %d MHz cores=%d mem=%d MB usable, %d MB installed, type %s disk=%d MB board=%s chipset=%s gpu=%s vram=%d MB",
                        info_.os.c_str(), info_.cpu.c_str(), info_.cpuMhz, info_.cores, info_.memMb, info_.memInstalledMb,
                        info_.memType.empty() ? "n/a" : info_.memType.c_str(), info_.diskTotalMb,
@@ -631,8 +811,13 @@ private:
         return sendAll(tcp_, m.encode());
     }
 
-    bool sendHello()
+    // fresh is false when HELLO is sent again within a session (the Settings
+    // dialog changed the relay values): the connection sound is not repeated.
+    bool sendHello(bool fresh = true)
     {
+        bool relay;
+        std::string relayIp;
+        relaySnapshot(relay, relayIp);
         Message m("HELLO");
         m.set("mac", info_.mac);
         m.set("name", info_.name);
@@ -654,11 +839,13 @@ private:
         m.set("lightning3_version", info_.lightning3Version);
         m.set("lightning2_path", info_.lightning2Path);
         m.set("lightning2_version", info_.lightning2Version);
+        m.set("relay", boolText(relay));
+        m.set("relay_ip", relay ? relayIp : std::string());
         bool ok = sendMessage(m);
         // The sound of this event waits for Thunderhead's SET, which answers the
         // HELLO within the same exchange: by then a scheme message that names
         // another file for it may have arrived too.
-        if (ok) helloSoundPending_ = true;
+        if (ok && fresh) helloSoundPending_ = true;
         return ok;
     }
 
@@ -738,6 +925,54 @@ private:
             LeaveCriticalSection(&lock_);
             notify();
             if (helloSoundPending_) { helloSoundPending_ = false; playEventSound(SoundLrHello); }
+        } else if (m.verb == "RELAY") {
+            // SMB1 relay work for the Windows XP client this node is set to relay
+            // to (Settings): op=probe answers whether \\dest\share\ can be opened
+            // from here; op=push copies everything Thunderhead staged under
+            // relay\<job> in this node's shared folder to the root of that share;
+            // op=pull fetches the newest file matching pattern= from it into
+            // relay\<job>. push and pull run on a thread and are acknowledged
+            // when they end; dest= must be the address set in Settings.
+            std::string op = trim(m.get("op")), job = trim(m.get("job")), dest = trim(m.get("dest")), share = trim(m.get("share")), err;
+            bool relay;
+            std::string relayIp;
+            relaySnapshot(relay, relayIp);
+            if (!relay) err = "this agent is not set to act as an SMB1 relay";
+            else if (dest != relayIp) err = "this agent relays to " + relayIp + ", not to " + dest;
+            else if (share.empty() || share.find_first_of("\\/") != std::string::npos) err = "share name missing";
+            else if (op != "probe" && op != "push" && op != "pull") err = "unknown op \"" + op + "\"";
+            else if (op != "probe" && (job.empty() || job.find_first_of("\\/:.") != std::string::npos)) err = "job must be a plain name";
+            if (err.empty() && op == "probe") {
+                std::wstring root = L"\\\\" + widen(dest) + L"\\" + widen(share) + L"\\";
+                if (GetFileAttributesW(root.c_str()) == INVALID_FILE_ATTRIBUTES) err = narrow(root) + ": " + lastErrorText((int)GetLastError());
+            }
+            if (err.empty() && op != "probe") {
+                RelayTask* t = new RelayTask();
+                t->op = op;
+                t->job = job;
+                t->dest = dest;
+                t->share = share;
+                t->pattern = trim(m.get("pattern"));
+                if (t->pattern.empty()) t->pattern = "*";
+                t->thread = CreateThread(NULL, 0, relayTaskThread, t, 0, NULL);
+                if (t->thread) {
+                    relays_.push_back(t);
+                    logLine(format("RELAY %s job %s to \\\\%s\\%s\\ started", op.c_str(), job.c_str(), dest.c_str(), share.c_str()));
+                    return;   // the ACK follows from pollRelays when the copy has ended
+                }
+                err = "could not start the copy thread";
+                delete t;
+            }
+            logLine(format("RELAY %s%s%s: %s%s%s", op.c_str(), job.empty() ? "" : " job ", job.c_str(), err.empty() ? "ok" : "failed",
+                           err.empty() ? "" : ": ", err.c_str()));
+            Message ack("ACK");
+            ack.set("cmd", m.verb);
+            ack.set("ok", boolText(err.empty()));
+            ack.set("error", err);
+            ack.set("op", op);
+            ack.set("job", job);
+            ack.set("dest", dest);
+            sendMessage(ack);
         } else if (m.verb == "SOUND") {
             // action=play file=NAME plays NAME from the agent's sounds folder on
             // the node's playback device and answers at once; action=scheme
@@ -1081,11 +1316,43 @@ private:
         return true;
     }
 
+    // Acknowledges every RELAY push or pull that has ended since the last pass.
+    bool pollRelays()
+    {
+        for (size_t i = 0; i < relays_.size(); ) {
+            if (WaitForSingleObject(relays_[i]->thread, 0) != WAIT_OBJECT_0) { ++i; continue; }
+            RelayTask* t = relays_[i];
+            relays_.erase(relays_.begin() + i);
+            CloseHandle(t->thread);
+            logLine(format("RELAY %s job %s: %s, %u file(s), %llu bytes%s%s%s", t->op.c_str(), t->job.c_str(), t->ok ? "ok" : "failed",
+                           t->files, t->bytes, t->file.empty() ? "" : ", ", t->file.c_str(), t->error.empty() ? "" : (": " + t->error).c_str()));
+            Message ack("ACK");
+            ack.set("cmd", "RELAY");
+            ack.set("ok", boolText(t->ok));
+            ack.set("error", t->error);
+            ack.set("op", t->op);
+            ack.set("job", t->job);
+            ack.set("dest", t->dest);
+            ack.set("files", (long long)t->files);
+            ack.set("bytes", format("%llu", t->bytes));
+            ack.set("file", t->file);
+            bool sent = sendMessage(ack);
+            delete t;
+            if (!sent) return false;
+        }
+        return true;
+    }
+
     void sessionPhase()
     {
         while (tcp_ != INVALID_SOCKET) {
             tryTeamViewerWindow();
             if (!pollBatches()) { dropSession("batch result send failed"); return; }
+            if (!pollRelays()) { dropSession("relay result send failed"); return; }
+            if (InterlockedExchange(&g_rehello, 0)) {
+                if (!sendHello(false)) { dropSession("hello send failed"); return; }
+                logLine("HELLO sent again: SMB1 relay " + relayText());
+            }
             unsigned long long now = tickMs();
             if (now >= nextReport_) {
                 if (!sendReport()) { dropSession("report send failed"); return; }
@@ -1129,6 +1396,7 @@ private:
     MessageParser parser_;
     Message sent_;                   // every report value as last sent to this host
     std::vector<RunningBatch> batches_;   // batch files started by BATCH and not yet ended
+    std::vector<RelayTask*> relays_;      // RELAY copies running and not yet acknowledged
     bool tvWindowWanted_;                 // TEAMVIEWER started TeamViewer and its window is still to be found
     unsigned long long tvStartMs_;
     bool helloSoundPending_;              // HELLO sent; the Proximity Connection sound plays when Thunderhead's SET answers it
@@ -1257,6 +1525,7 @@ void refreshAll()
     setRow(row++, L"Lightning 2 (B6.x)", i.lightning2Path.empty() ? std::wstring(L"not installed")
                                         : widen(i.lightning2Version.empty() ? i.lightning2Path : i.lightning2Version + " at " + i.lightning2Path));
     setRow(row++, L"Sounds",              widen(format("%u file(s) in ", (unsigned)soundFilesIn(soundDir()).size())) + soundDir());
+    setRow(row++, L"SMB1 relay",          widen(relayText()));
     refreshClock();
 }
 
@@ -1275,11 +1544,92 @@ void layout(HWND hwnd)
     SendMessageW(g_list, LVM_SETCOLUMNWIDTH, 1, (LPARAM)valueWidth);
 }
 
+// Settings: Act as SMB1 Relay and the address of the Windows XP client relayed
+// to. OK with a change saves settings.txt and has the agent send HELLO again,
+// so that Thunderhead learns the new values at once.
+INT_PTR CALLBACK settingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_INITDIALOG: {
+        bool relay;
+        std::string ip;
+        relaySnapshot(relay, ip);
+        CheckDlgButton(dlg, IDC_RELAY_CHECK, relay ? BST_CHECKED : BST_UNCHECKED);
+        SetDlgItemTextW(dlg, IDC_RELAY_IP, widen(ip).c_str());
+        SendDlgItemMessageW(dlg, IDC_RELAY_IP, EM_LIMITTEXT, 15, 0);
+        EnableWindow(GetDlgItem(dlg, IDC_RELAY_IP), relay);
+        SetDlgItemTextW(dlg, IDC_RELAY_INFO,
+                        L"Thunderhead copies files for that client into this node's shared folder, and this agent copies them on "
+                        L"to \\\\<address>\\LightningRod\\ over SMB1, which Windows 10 no longer speaks to Windows XP. "
+                        L"This node must be able to open that share with its own logon.");
+        return TRUE;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDC_RELAY_CHECK) {
+            bool on = IsDlgButtonChecked(dlg, IDC_RELAY_CHECK) == BST_CHECKED;
+            EnableWindow(GetDlgItem(dlg, IDC_RELAY_IP), on);
+            if (on) SetFocus(GetDlgItem(dlg, IDC_RELAY_IP));
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDOK) {
+            bool on = IsDlgButtonChecked(dlg, IDC_RELAY_CHECK) == BST_CHECKED;
+            wchar_t buf[64];
+            GetDlgItemTextW(dlg, IDC_RELAY_IP, buf, 64);
+            std::string ip = trim(narrow(buf));
+            if (on) {
+                AgentStatus s;
+                g_agent->snapshot(s);
+                if (!validIpText(ip)) {
+                    MessageBoxW(dlg, L"Enter the IP address of the Windows XP client as four numbers, for example 42.32.22.156.",
+                                L"Lightning Rod Settings", MB_OK | MB_ICONWARNING);
+                    return TRUE;
+                }
+                if (ip == s.info.ip) {
+                    MessageBoxW(dlg, L"That is this node's own address. Enter the address of the Windows XP client to relay to.",
+                                L"Lightning Rod Settings", MB_OK | MB_ICONWARNING);
+                    return TRUE;
+                }
+            }
+            bool was;
+            std::string wasIp;
+            relaySnapshot(was, wasIp);
+            EnterCriticalSection(&g_settingsLock);
+            g_relay = on;
+            g_relayIp = on ? ip : wasIp;
+            saveSettings();
+            LeaveCriticalSection(&g_settingsLock);
+            if (was != on || (on && ip != wasIp)) {
+                logLine("Settings: SMB1 relay " + relayText());
+                InterlockedExchange(&g_rehello, 1);
+            }
+            EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDCANCEL) { EndDialog(dlg, IDCANCEL); return TRUE; }
+        break;
+    }
+    return FALSE;
+}
+
 LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
     case WM_SIZE: layout(hwnd); return 0;
     case WM_AGENT_UPDATE: refreshAll(); return 0;
+    case WM_COMMAND:
+        switch (LOWORD(wp)) {
+        case IDM_LR_EXIT: PostMessageW(hwnd, WM_CLOSE, 0, 0); return 0;
+        case IDM_LR_SETTINGS:
+            DialogBoxW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDD_LR_SETTINGS), hwnd, settingsDlgProc);
+            refreshAll();
+            return 0;
+        case IDM_LR_ABOUT:
+            MessageBoxW(hwnd, L"Lightning Rod " TLR_VERSION_WSTRING L"\nNode agent of the Bryce Lightning render farm.\n\n"
+                        L"Reports to Thunderhead " TLR_VERSION_WSTRING L" and carries out its commands on this node.",
+                        L"About Lightning Rod", MB_OK | MB_ICONINFORMATION);
+            return 0;
+        }
+        return 0;
     case WM_NETWORK_ERROR:
         // MB_ICONERROR plays the Critical Stop sound; OK starts a fresh agent.
         SetWindowTextW(g_hostText, L"Network Error: Invalid IP address");
@@ -1313,8 +1663,9 @@ bool createWindow(HINSTANCE inst, const std::string& nodeName)
     wc.hInstance = inst;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
+    wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(IDI_LR_APP));
     wc.lpszClassName = L"LightningRodMain";
+    wc.lpszMenuName = MAKEINTRESOURCEW(IDR_LR_MENU);
     RegisterClassW(&wc);
 
     std::wstring title = L"Lightning Rod " TLR_VERSION_WSTRING L" on " + widen(nodeName);
@@ -1403,7 +1754,10 @@ int main(int argc, char** argv)
     g_startedMs = tickMs();
     g_log.open(exeDirectory(), L"LightningRod");
     InitializeCriticalSection(&g_soundLock);
+    InitializeCriticalSection(&g_settingsLock);
     loadSoundScheme();
+    loadSettings();
+    removeTree(relayDir() + L"\\");   // staging left by RELAY jobs of a previous run
     DeleteFileW((exeDirectory() + L"\\LightningRod.update.exe").c_str());   // left by the previous update
     DeleteFileW((exeDirectory() + L"\\update.go").c_str());
     DeleteFileW((exeDirectory() + L"\\LightningRod.new").c_str());

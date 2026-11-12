@@ -1,7 +1,38 @@
 #include <windows.h>
+#include "resource.h"
 #include "../common/Version.h"
 
-1 ICON "LightningRod.ico"
+IDI_LR_APP ICON "LightningRod.ico"
+
+IDR_LR_MENU MENU
+BEGIN
+    POPUP "&File"
+    BEGIN
+        MENUITEM "E&xit", IDM_LR_EXIT
+    END
+    POPUP "&Control"
+    BEGIN
+        MENUITEM "&Settings", IDM_LR_SETTINGS
+    END
+    POPUP "&Help"
+    BEGIN
+        MENUITEM "&About Lightning Rod", IDM_LR_ABOUT
+    END
+END
+
+// MS Shell Dlg maps to the dialog font of every Windows from XP on.
+IDD_LR_SETTINGS DIALOGEX 0, 0, 270, 118
+STYLE DS_MODALFRAME | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Lightning Rod Settings"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    AUTOCHECKBOX    "Act as SMB1 Relay", IDC_RELAY_CHECK, 10, 10, 250, 10
+    LTEXT           "Relay to this Windows XP client (IP address):", -1, 24, 28, 236, 10
+    EDITTEXT        IDC_RELAY_IP, 24, 40, 110, 13, ES_AUTOHSCROLL | WS_DISABLED
+    LTEXT           "", IDC_RELAY_INFO, 10, 60, 250, 34
+    DEFPUSHBUTTON   "OK", IDOK, 156, 98, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 210, 98, 50, 14
+END
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION     TLR_VERSION_MAJOR, TLR_VERSION_MINOR, TLR_VERSION_PATCH, 0

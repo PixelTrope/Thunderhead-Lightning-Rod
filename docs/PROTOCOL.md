@@ -77,6 +77,8 @@ lightning3_path=C:\Program Files\DAZ 3D\BryceLightning7\Lightning.exe
 lightning3_version=7.1.0.109
 lightning2_path=
 lightning2_version=
+relay=no
+relay_ip=
 ```
 
 `mem_mb` is the physical memory the node's Windows can address, the figure
@@ -103,6 +105,12 @@ lookup described under Lightning lookup, and agents from 0.2.20 also
 pair is empty when none is installed, and Thunderhead shows that as "not
 installed" and an absent field as blank. The window of the agent shows the
 same.
+
+Agents from 0.3.0 send `relay=yes|no` and `relay_ip=`: whether the agent's
+Settings make it an SMB1 relay, and the address of the Windows XP client it
+relays for (see SMB1 relay). Such an agent sends HELLO again, on the same
+connection, when its Settings change; Thunderhead takes the new static fields
+from it and treats the session as unbroken.
 
 Thunderhead replies with the report interval in seconds (5 to 60 in steps of 5,
 default 15):
@@ -176,9 +184,10 @@ Thunderhead may send at any time:
 | AUDIO | action        | set the master mute of the default playback device: `mute` or `unmute`; reply ACK with the state read back (see Audio); agents from 0.2.16 |
 | TEAMVIEWER |          | start the installed TeamViewer, found through the registry or the Start menu, and bring its window to the front; reply ACK with where it was found (see TeamViewer); agents from 0.2.18 |
 | SOUND | action, file, logon, hello, logoff | `action=play`: play `file`, a name in the agent's `sounds` folder, on the node's playback device; `action=scheme`: take the file names of the agent's own three sound events; reply ACK with `action=` and `file=` (see Audio); agents from 0.2.21 |
+| RELAY | op, job, dest, share, pattern | SMB1 relay work for the client at `dest`: `op=probe` answers whether `\\dest\share\` opens from the node; `op=push` copies what Thunderhead staged under `relay\<job>` in the node's own share to the root of that share; `op=pull` fetches the newest file matching `pattern` from it into `relay\<job>`; reply ACK with `op=`, `job=`, `dest=`, `files=`, `bytes=` and `file=` (see SMB1 relay); agents from 0.3.0 |
 
 The agent replies to START, STOP, PRIORITY, EXIT, RESTART, UPDATE, RENAME, REBOOT,
-SHUTDOWN, POWER, AUDIO, TEAMVIEWER, SOUND and BATCH with (RENAME adds `name=` with the name that was applied;
+SHUTDOWN, POWER, AUDIO, TEAMVIEWER, SOUND, RELAY and BATCH with (RENAME adds `name=` with the name that was applied;
 START adds `gen=`, `path=`, `version=` and `found=` as described under Lightning lookup;
 PRIORITY adds `level=` as requested and `applied=` with the class Windows reports
 afterwards, and answers `ok=no` when the two differ, as when RealTime is
@@ -263,10 +272,13 @@ The agent lives in `C:\LightningRod` on each node, shared as `\\NODE\LightningRo
 and writes `C:\LightningRod\LightningRod-YYYY-MM-DD.log`. Its sounds are in
 `C:\LightningRod\sounds`, put there by the agent update, with `scheme.txt`,
 the file names of its own sound events as the last SOUND scheme message set
-them (see Audio); it keeps no other state. Its window
+them (see Audio). `settings.txt` beside it holds its Settings dialog
+(`relay=yes|no`, `relay_ip=`), and `relay\` holds the staging folders of
+RELAY jobs while they run; it keeps no other state. Its window has the menu
+File (Exit), Control (Settings) and Help (About) and
 shows the Thunderhead it reports to (name, IP, MAC), its own start time and
-running time, every value it has sent, refreshed at each report, and the
-sounds folder with the number of files in it; closing
+running time, every value it has sent, refreshed at each report, the
+sounds folder with the number of files in it, and the SMB1 relay setting; closing
 the window stops the agent. *Open Client's Shared Folder* in Thunderhead opens
 `\\NAME\<share_name>\` of every checked client in Windows Explorer. *Copy files or
 folder to Client* asks for files or one folder, then copies the selection to that
@@ -276,7 +288,9 @@ copy holds its window back for about a second, which is longer than most copies
 to a share take): the client being written, the file being written, a bar over
 the bytes of the whole job, Cancel, and at the end the result, which stays until
 Close. Existing files are overwritten; a share that refuses the connection gets
-the standard credential prompt once; the event log has one line per client.
+the standard credential prompt once; the event log has one line per client. A
+client reached through an SMB1 relay is copied to through the relay, and its
+shared folder cannot be opened from this host (see SMB1 relay).
 
 ## Agent update
 
@@ -321,8 +335,73 @@ renames `LightningRod.new` over `LightningRod.exe` through the share once the
 agent's connection has closed and then creates `update.go`. If the node has not
 reconnected after ten minutes, Thunderhead drops the Updating state and logs it.
 
-This path uses Windows file sharing and therefore covers the Windows 7 nodes;
-the XP nodes need SMB1 on the host or another transfer method, to be decided.
+This path uses Windows file sharing and therefore covers the Windows 7 nodes.
+A Windows XP node's share is reached through an SMB1 relay (see SMB1 relay):
+the agent file and the sounds are staged under `relay\<job>\` in the relay
+node's share, the relay copies them to the root of the XP node's share, and
+UPDATE then goes to the XP node as to any other; its helper swaps the file in
+by itself, so no finish phase runs over the share (an XP agent older than
+0.2.5, which waits for `update.go`, cannot be updated this way). The event
+log's staging line names the relay and the files it copied.
+
+## SMB1 relay
+
+A Windows XP node's file server speaks SMB1 only, which Windows 10 no longer
+speaks once its SMB 1.0/CIFS client is removed; a Windows 7 node speaks both.
+The agent's Settings dialog (Control, Settings) has *Act as SMB1 Relay* and,
+once that is ticked, the IP address of the Windows XP client to relay for. The
+values go to `settings.txt` beside the agent, HELLO is sent again at once with
+`relay=yes` and `relay_ip=`, and from then on Thunderhead treats the client at
+that address as relayed whenever the relay is online: the client's commands
+still go over its own session, which needs no file sharing, but every share
+operation of the client is done through the relay. The Client Details of the
+relay show *SMB1 relay: to ADDRESS (NAME); its share opens from there* or the
+error the relay met, from the `RELAY op=probe` Thunderhead sends after each
+HELLO of a relay; the details of the client show *Reached through relay NAME*.
+The relay node must be able to open `\\ADDRESS\<share_name>\` with its own
+logon (the same local account name and password on both machines passes
+through); no credentials travel in a message.
+
+The operations and their messages:
+
+* *Update Checked*: Thunderhead writes `LightningRod.new` and the `sounds`
+  folder to `\\RELAY\<share_name>\relay\<job>\`, then sends the relay
+
+```
+RELAY
+op=push
+job=th1234-5
+dest=42.32.22.156
+share=LightningRod
+```
+
+  The relay copies everything under `relay\<job>` to the root of
+  `\\dest\share\`, folders included, deletes the staging folder, and
+  acknowledges with `files=` and `bytes=`, or `ok=no` with `error=` at the
+  first file that fails. Thunderhead then sends UPDATE to the client.
+* *Copy Files or Folder to Client*: the selection goes to the same staging
+  folder, with the progress window following the bytes, then `RELAY op=push`;
+  the window reads "Relay NAME is copying to \\ADDRESS\share\ ..." while
+  the relay works, and Cancel waits for that step, since the relay has no
+  abort. A staging that fails before the push is removed again.
+* *View Remote Log*: Thunderhead sends `RELAY op=pull` with
+  `pattern=LightningRod-*.log`; the relay copies the newest matching file, by
+  name, from the client's share into `relay\<job>\` and acknowledges with
+  `file=`; Thunderhead reads it from the relay's share, deletes the staging
+  folder, and the window's line names the relay. Refresh repeats the pull.
+* *Open Client's Shared Folder* cannot open an SMB1 share from this host; the
+  event log says so and names the relay.
+
+The ACK of every RELAY carries `op=`, `job=`, `dest=`, `files=`, `bytes=` and,
+for a pull, `file=`. `push` and `pull` run on a thread of the relay agent, so
+its reports go on while a copy takes its time, and are acknowledged when they
+end; Thunderhead's worker thread waits for that ACK (10 min for an update, 30
+min for a copy, 2 min for a log) and reports a relay that does not answer. A
+RELAY whose `dest=` is not the address set in the relay's Settings, or that
+reaches an agent not set as a relay, is refused with `ok=no`. The relay agent
+deletes whatever is left under `relay\` when it starts. Agents older than
+0.3.0 know neither the Settings dialog nor RELAY, and a relay must run 0.3.0
+or later to be used.
 
 ## Rename and reboot
 
