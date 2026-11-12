@@ -110,7 +110,8 @@ Agents from 0.3.0 send `relay=yes|no` and `relay_ip=`: whether the agent's
 Settings make it an SMB1 relay, and the address of the Windows XP client it
 relays for (see SMB1 relay). Such an agent sends HELLO again, on the same
 connection, when its Settings change; Thunderhead takes the new static fields
-from it and treats the session as unbroken.
+from it and treats the session as unbroken. Both sides play their HELLO sound
+for that HELLO as for any other.
 
 Thunderhead replies with the report interval in seconds (5 to 60 in steps of 5,
 default 15):
@@ -355,9 +356,10 @@ values go to `settings.txt` beside the agent, HELLO is sent again at once with
 that address as relayed whenever the relay is online: the client's commands
 still go over its own session, which needs no file sharing, but every share
 operation of the client is done through the relay. The Client Details of the
-relay show *SMB1 relay: to ADDRESS (NAME); its share opens from there* or the
-error the relay met, from the `RELAY op=probe` Thunderhead sends after each
-HELLO of a relay; the details of the client show *Reached through relay NAME*.
+relay show *Relay Node: Yes* and *Relay IP: ADDRESS (NAME); its share opens
+from there*, or the error the relay met, from the `RELAY op=probe` Thunderhead
+sends after each HELLO of a relay (an agent that does not act as a relay shows
+*Relay Node: No*); the details of the client show *Reached through relay NAME*.
 The relay node must be able to open `\\ADDRESS\<share_name>\` with its own
 logon (the same local account name and password on both machines passes
 through); no credentials travel in a message.
@@ -599,14 +601,15 @@ playing gives way to the next. The files live in `sounds\` beside each
 executable. The 38 files of the repository's `assets\sounds`, named
 `ThunderheadLightningRod <Category>.wav`, define the 38 categories and form
 the default scheme, in which each category plays its own file. The custom
-scheme of Thunderhead's *Sound Schemes* dialog assigns another file of the
-folder to a category: *Browse* takes a `.wav` or `.mp3`, copies it into the
+scheme, edited in the *Sound scheme* section at the bottom of Thunderhead's
+Settings dialog, assigns another file of the folder to a category: *Browse* takes a `.wav` or `.mp3`, copies it into the
 folder when it comes from elsewhere (a file bearing a default scheme name is
 never replaced), and assigns it to the selected category; *Use Default* drops
 the assignment; *Play* and a double click play the file; *Default* and
 *Custom* choose the scheme in force. The scheme is saved in `settings.txt`
-(`sound_scheme`, `sound.<Category>`) and, since the agents' own events follow
-it, sent to every online agent as described below.
+(`sound_scheme`, `sound.<Category>`) when Settings is closed with OK and, since
+the agents' own events follow it, sent to every online agent as described
+below.
 
 ### Sound events
 
@@ -619,18 +622,21 @@ it, sent to every online agent as described below.
 | LR | App Opens | Logon |
 | LR | App Sends HELLO to Host | Proximity Connection |
 | LR | App Closed or Closes | Logoff Sound |
+| LR | App Sends Report to Host | Navigation Start |
 
 Thunderhead plays its four itself, the closing one to its end (5 s at most)
 before the window goes. The agent plays Logon as its window appears, Proximity
 Connection when Thunderhead's SET answers its HELLO, which is the same
-exchange, and the Logoff Sound to its end (4 s at most) before it stops for
-EXIT, RESTART, UPDATE or a closed window; its log has one line per sound, with
-the file, or the reason it did not play.
+exchange, Navigation Start after every REPORT it sends (the regular ones and
+the one a PING asks for), and the Logoff Sound to its end (4 s at most) before
+it stops for EXIT, RESTART, UPDATE or a closed window; its log has one line per
+sound, with the file, or the reason it did not play, except that the report
+sound is logged only when it fails.
 
 The agent plays each event's file from its own `sounds` folder: the
 category's default file, or the file that Thunderhead's scheme message named.
-After every HELLO, and whenever *Sound Schemes* is changed, Thunderhead sends
-agents from 0.2.21
+After every HELLO, and whenever the scheme is changed in Settings, Thunderhead
+sends agents from 0.2.21
 
 ```
 SOUND
@@ -638,6 +644,7 @@ action=scheme
 logon=
 hello=fanfare.mp3
 logoff=
+report=
 ```
 
 with the file name assigned to the category of each of the agent's events,

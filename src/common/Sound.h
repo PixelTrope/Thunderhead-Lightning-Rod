@@ -23,7 +23,7 @@ int soundCategoryIndex(const std::wstring& category);      // -1 when the name i
 // event in the SOUND scheme message Thunderhead sends to an agent.
 enum SoundEvent {
     SoundThOpen, SoundThHello, SoundThClose, SoundThClientOffline,
-    SoundLrOpen, SoundLrHello, SoundLrClose,
+    SoundLrOpen, SoundLrHello, SoundLrClose, SoundLrReport,
     kSoundEventCount
 };
 struct SoundEventDef { SoundEvent event; const wchar_t* app; const wchar_t* label; const wchar_t* category; const char* key; };

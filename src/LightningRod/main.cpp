@@ -305,11 +305,13 @@ std::wstring soundFileFor(SoundEvent e)
     return soundDir() + L"\\" + name;
 }
 
-void playEventSound(SoundEvent e)
+// logSuccess is false for the report sound, which plays every interval and
+// would otherwise fill the log; a failure is always logged.
+void playEventSound(SoundEvent e, bool logSuccess = true)
 {
     std::string err;
     std::wstring file = soundFileFor(e);
-    if (soundPlay(file, err)) logLine(format("sound %s: %s", kSoundEvents[e].key, narrow(file).c_str()));
+    if (soundPlay(file, err)) { if (logSuccess) logLine(format("sound %s: %s", kSoundEvents[e].key, narrow(file).c_str())); }
     else logLine(format("sound %s failed: %s", kSoundEvents[e].key, err.c_str()));
 }
 
@@ -811,9 +813,7 @@ private:
         return sendAll(tcp_, m.encode());
     }
 
-    // fresh is false when HELLO is sent again within a session (the Settings
-    // dialog changed the relay values): the connection sound is not repeated.
-    bool sendHello(bool fresh = true)
+    bool sendHello()
     {
         bool relay;
         std::string relayIp;
@@ -844,8 +844,9 @@ private:
         bool ok = sendMessage(m);
         // The sound of this event waits for Thunderhead's SET, which answers the
         // HELLO within the same exchange: by then a scheme message that names
-        // another file for it may have arrived too.
-        if (ok && fresh) helloSoundPending_ = true;
+        // another file for it may have arrived too. Every HELLO plays it, the
+        // one sent again after a Settings change as well.
+        if (ok) helloSoundPending_ = true;
         return ok;
     }
 
@@ -896,6 +897,7 @@ private:
             GetLocalTime(&status_.lastReportTime);
             LeaveCriticalSection(&lock_);
             notify();
+            playEventSound(SoundLrReport, false);   // every report sent, the regular ones and those PING asks for
         }
         return ok;
     }
@@ -1350,7 +1352,7 @@ private:
             if (!pollBatches()) { dropSession("batch result send failed"); return; }
             if (!pollRelays()) { dropSession("relay result send failed"); return; }
             if (InterlockedExchange(&g_rehello, 0)) {
-                if (!sendHello(false)) { dropSession("hello send failed"); return; }
+                if (!sendHello()) { dropSession("hello send failed"); return; }
                 logLine("HELLO sent again: SMB1 relay " + relayText());
             }
             unsigned long long now = tickMs();

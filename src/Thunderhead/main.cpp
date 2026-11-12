@@ -142,7 +142,6 @@ const CommandDef kCommands[] = {
     { IDC_CMD_MUTE,            L"Mute Checked Clients",           NULL,      true,  GroupAudio },
     { IDC_CMD_UNMUTE,          L"Unmute Checked Clients",         NULL,      true,  GroupAudio },
     { IDC_CMD_SOUND,           L"Play Sound",                     NULL,      true,  GroupAudio },
-    { IDC_CMD_SCHEMES,         L"Sound Schemes",                  NULL,      true,  GroupAudio },
     { IDC_CMD_PRIORITY,        L"Change Render Priority",         NULL,      true,  GroupRender },
     { IDC_CMD_STOP,            L"Stop Lightning",                 "STOP",    true,  GroupRender },
     { IDC_CMD_START71,         L"Run Lightning 3 (B7 & 7 Pro)",   NULL,      true,  GroupRender },
@@ -591,12 +590,13 @@ void showStaticPane(NodeRecord* n)
     add(L"VRAM MB", widen(h.get("vram_mb")));
     add(L"Lightning 3 (B7 & 7 Pro)", lightningInstallText(h, "lightning3"));
     add(L"Lightning 2 (B6.x)", lightningInstallText(h, "lightning2"));
-    if (isRelay(n)) {
-        NodeRecord* target = nodeAtIp(relayTarget(n));
-        add(L"SMB1 relay", widen("to " + relayTarget(n) + (target ? " (" + target->name + ")" : std::string()) +
-                                 (n->relayProbe.empty() ? std::string() : "; its share " + n->relayProbe)));
-    } else if (h.has("relay")) {
-        add(L"SMB1 relay", L"off");
+    if (h.has("relay")) {
+        add(L"Relay Node", isRelay(n) ? L"Yes" : L"No");
+        if (isRelay(n)) {
+            NodeRecord* target = nodeAtIp(relayTarget(n));
+            add(L"Relay IP", widen(relayTarget(n) + (target ? " (" + target->name + ")" : std::string()) +
+                                   (n->relayProbe.empty() ? std::string() : "; its share " + n->relayProbe)));
+        }
     }
     if (NodeRecord* via = relayFor(n)) add(L"Reached through relay", widen(via->name + " (" + via->ip + ")"));
     bool reported = !r.verb.empty();
@@ -3070,10 +3070,11 @@ void openPlaySound()
     DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_SOUND), g_main, playSoundDlgProc, (LPARAM)&d);
 }
 
-// ---------------------------------------------------------------- Sound Schemes
+// ---------------------------------------------------------------- sound scheme (Settings)
 
 // The Default scheme plays each category's own file; the Custom scheme plays
-// the file assigned to a category here, its default where none is assigned.
+// the file assigned to a category in the Settings dialog's scheme section,
+// its default where none is assigned.
 struct SchemeDlg {
     bool custom;
     std::map<std::string, std::string> sounds;   // category -> file name in the sounds folder
@@ -3196,77 +3197,60 @@ void assignBrowsed(HWND dlg, SchemeDlg* d)
     selectCategory(dlg, cat);
 }
 
-INT_PTR CALLBACK schemeDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+// The scheme list's columns and colors; the colors follow the scheme in force.
+void schemeListColors(HWND dlg)
 {
-    if (INT_PTR r = themeDialogMessage(dlg, msg, wp, lp)) return r;
-    SchemeDlg* d = (SchemeDlg*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
-    switch (msg) {
-    case WM_INITDIALOG: {
-        d = (SchemeDlg*)lp;
-        SetWindowLongPtrW(dlg, GWLP_USERDATA, (LONG_PTR)d);
-        HWND list = GetDlgItem(dlg, IDC_SCHEME_LIST);
-        SendMessageW(list, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
-        SendMessageW(list, WM_SETFONT, (WPARAM)g_font, TRUE);
-        const Theme& t = theme();
-        SendMessageW(list, LVM_SETBKCOLOR, 0, (LPARAM)t.editBack);
-        SendMessageW(list, LVM_SETTEXTBKCOLOR, 0, (LPARAM)t.editBack);
-        SendMessageW(list, LVM_SETTEXTCOLOR, 0, (LPARAM)t.editText);
-        const wchar_t* titles[3] = { L"Category", L"Event", L"File in the sounds folder" };
-        const int widths[3] = { 150, 220, 380 };
-        for (int i = 0; i < 3; ++i) {
-            LVCOLUMNW col;
-            memset(&col, 0, sizeof(col));
-            col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-            col.pszText = (LPWSTR)titles[i];
-            col.cx = widths[i];
-            col.iSubItem = i;
-            SendMessageW(list, LVM_INSERTCOLUMNW, (WPARAM)i, (LPARAM)&col);
-        }
-        SetDlgItemTextW(dlg, IDC_SCHEME_INFO, L"Browse assigns a .wav or .mp3 file to the selected category of the Custom scheme.");
-        fillSchemeList(dlg, d);
-        selectCategory(dlg, 0);
-        return TRUE;
-    }
-    case WM_NOTIFY: {
-        NMHDR* h = (NMHDR*)lp;
-        if (d && h->idFrom == IDC_SCHEME_LIST && h->code == NM_DBLCLK) {
-            int cat = selectedCategory(dlg);
-            if (cat >= 0) previewSound(dlg, soundDir() + L"\\" + schemeFileOf(d, cat), L"Sound Schemes");
-            return TRUE;
-        }
-        break;
-    }
-    case WM_COMMAND: {
-        int id = LOWORD(wp);
-        if (!d) break;
-        if (id == IDC_SCHEME_DEFAULT || id == IDC_SCHEME_CUSTOM) { d->custom = id == IDC_SCHEME_CUSTOM; fillSchemeList(dlg, d); return TRUE; }
-        if (id == IDC_SCHEME_BROWSE) { assignBrowsed(dlg, d); return TRUE; }
-        if (id == IDC_SCHEME_RESET) {
-            int cat = selectedCategory(dlg);
-            if (cat >= 0) { d->sounds.erase(narrow(kSoundCategories[cat])); fillSchemeList(dlg, d); selectCategory(dlg, cat); }
-            return TRUE;
-        }
-        if (id == IDC_SCHEME_PLAY) {
-            int cat = selectedCategory(dlg);
-            if (cat >= 0) previewSound(dlg, soundDir() + L"\\" + schemeFileOf(d, cat), L"Sound Schemes");
-            return TRUE;
-        }
-        if (id == IDOK) { EndDialog(dlg, IDOK); return TRUE; }
-        if (id == IDCANCEL) { EndDialog(dlg, IDCANCEL); return TRUE; }
-        break;
-    }
-    }
-    return FALSE;
+    HWND list = GetDlgItem(dlg, IDC_SCHEME_LIST);
+    const Theme& t = theme();
+    SendMessageW(list, LVM_SETBKCOLOR, 0, (LPARAM)t.editBack);
+    SendMessageW(list, LVM_SETTEXTBKCOLOR, 0, (LPARAM)t.editBack);
+    SendMessageW(list, LVM_SETTEXTCOLOR, 0, (LPARAM)t.editText);
 }
 
-// Sound Schemes: the scheme and its assignments are saved in settings.txt; the
-// agents' own events follow it, so every online agent is told the new one.
-void openSoundSchemes()
+void setupSchemeList(HWND dlg, const SchemeDlg* d)
 {
-    SchemeDlg d;
-    d.custom = g_store->settings.customScheme;
-    d.sounds = g_store->settings.sounds;
-    if (DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_SCHEMES), g_main, schemeDlgProc, (LPARAM)&d) != IDOK) return;
+    HWND list = GetDlgItem(dlg, IDC_SCHEME_LIST);
+    SendMessageW(list, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+    SendMessageW(list, WM_SETFONT, (WPARAM)g_font, TRUE);
+    schemeListColors(dlg);
+    const wchar_t* titles[3] = { L"Category", L"Event", L"File in the sounds folder" };
+    const int widths[3] = { 150, 220, 340 };
+    for (int i = 0; i < 3; ++i) {
+        LVCOLUMNW col;
+        memset(&col, 0, sizeof(col));
+        col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+        col.pszText = (LPWSTR)titles[i];
+        col.cx = widths[i];
+        col.iSubItem = i;
+        SendMessageW(list, LVM_INSERTCOLUMNW, (WPARAM)i, (LPARAM)&col);
+    }
+    SetDlgItemTextW(dlg, IDC_SCHEME_INFO, L"Browse assigns a .wav or .mp3 file to the selected category of the Custom scheme.");
+    fillSchemeList(dlg, d);
+    selectCategory(dlg, 0);
+}
+
+// The scheme section's buttons and radios; true when the command was one of them.
+bool schemeCommand(HWND dlg, int id, SchemeDlg* d)
+{
+    if (id == IDC_SCHEME_DEFAULT || id == IDC_SCHEME_CUSTOM) { d->custom = id == IDC_SCHEME_CUSTOM; fillSchemeList(dlg, d); return true; }
+    if (id == IDC_SCHEME_BROWSE) { assignBrowsed(dlg, d); return true; }
+    if (id == IDC_SCHEME_RESET) {
+        int cat = selectedCategory(dlg);
+        if (cat >= 0) { d->sounds.erase(narrow(kSoundCategories[cat])); fillSchemeList(dlg, d); selectCategory(dlg, cat); }
+        return true;
+    }
+    if (id == IDC_SCHEME_PLAY) {
+        int cat = selectedCategory(dlg);
+        if (cat >= 0) previewSound(dlg, soundDir() + L"\\" + schemeFileOf(d, cat), L"Settings");
+        return true;
+    }
+    return false;
+}
+
+// Saves a changed scheme in settings.txt and, since the agents' own events
+// follow it, tells every online agent the new one.
+void applySoundScheme(const SchemeDlg& d)
+{
     if (d.custom == g_store->settings.customScheme && d.sounds == g_store->settings.sounds) return;
     g_store->settings.customScheme = d.custom;
     g_store->settings.sounds = d.sounds;
@@ -3279,7 +3263,7 @@ void openSoundSchemes()
 
 // What the Settings dialog edits. The Dark Mode switch takes effect as it is
 // flipped, so that the scheme can be judged; Cancel puts the old one back.
-struct SettingsDlgData { int sec; bool dark; bool darkAtStart; bool thAudio; bool lrAudio; };
+struct SettingsDlgData { int sec; bool dark; bool darkAtStart; bool thAudio; bool lrAudio; SchemeDlg scheme; };
 
 void applyTheme(bool dark);
 
@@ -3311,14 +3295,26 @@ INT_PTR CALLBACK intervalDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             if (sec == current) selected = i;
         }
         SendMessageW(combo, CB_SETCURSEL, (WPARAM)selected, 0);
+        setupSchemeList(dlg, &d->scheme);
         return TRUE;
     }
+    case WM_NOTIFY: {
+        NMHDR* h = (NMHDR*)lp;
+        if (d && h->idFrom == IDC_SCHEME_LIST && h->code == NM_DBLCLK) {
+            int cat = selectedCategory(dlg);
+            if (cat >= 0) previewSound(dlg, soundDir() + L"\\" + schemeFileOf(&d->scheme, cat), L"Settings");
+            return TRUE;
+        }
+        break;
+    }
     case WM_COMMAND:
+        if (d && schemeCommand(dlg, LOWORD(wp), &d->scheme)) return TRUE;
         if (LOWORD(wp) == IDC_DARK_SWITCH && d) {
             d->dark = !d->dark;
             SetDlgItemTextW(dlg, IDC_DARK_STATE, d->dark ? L"On" : L"Off");
             applyTheme(d->dark);
             themeWindow(dlg);
+            schemeListColors(dlg);
             return TRUE;
         }
         if (LOWORD(wp) == IDC_TH_AUDIO_SWITCH && d) {
@@ -3382,8 +3378,8 @@ void onNet(NetEvent* e)
                              e->msg.get("agent").c_str(), isNew ? " (new client)" : ""));
         logNode(*n, "<- " + e->msg.oneLine());
         logNode(*n, format("-> SET interval=%d", g_store->settings.intervalSec));
+        playEventSound(SoundThHello);                        // every HELLO, the renewed one as well
         if (!again) {
-            playEventSound(SoundThHello);
             sendAudioSwitch(n, g_store->settings.lrAudio);   // All Lightning Rods Audio
             sendSoundScheme(n);                              // the files of the agent's own events
         }
@@ -4057,6 +4053,8 @@ void openSettings()
     d.dark = d.darkAtStart = g_store->settings.darkMode;
     d.thAudio = g_store->settings.thAudio;
     d.lrAudio = g_store->settings.lrAudio;
+    d.scheme.custom = g_store->settings.customScheme;
+    d.scheme.sounds = g_store->settings.sounds;
     if (DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_INTERVAL), g_main, intervalDlgProc, (LPARAM)&d) != IDOK) {
         if (theme().dark != d.darkAtStart) applyTheme(d.darkAtStart);
         return;
@@ -4081,6 +4079,7 @@ void openSettings()
                            : "All Lightning Rods Audio off: AUDIO mute to every online client");
         sendAudioAll(d.lrAudio);
     }
+    applySoundScheme(d.scheme);
 }
 
 LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -4118,7 +4117,6 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CMD_MUTE: sendAudio("mute"); return 0;
         case IDC_CMD_UNMUTE: sendAudio("unmute"); return 0;
         case IDC_CMD_SOUND: openPlaySound(); return 0;
-        case IDC_CMD_SCHEMES: openSoundSchemes(); return 0;
         case IDC_CMD_REMOVE_OFFLINE: removeCheckedOffline(); return 0;
         case IDC_CMD_SHUTDOWN_NODE: shutdownChecked(); return 0;
         case IDC_CMD_ABORT_SHUTDOWN: sendPower("abort"); return 0;

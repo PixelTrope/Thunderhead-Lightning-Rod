@@ -7,7 +7,6 @@
 #define IDD_BATCH               105
 #define IDD_TEXTBOX             106
 #define IDD_SOUND               107
-#define IDD_SCHEMES             108
 
 #define IDM_FILE_EXIT           1001
 #define IDM_HELP_ABOUT          1301
@@ -61,8 +60,7 @@
 #define IDC_CMD_REMOVE_OFFLINE  3029
 #define IDC_CMD_START50         3030
 #define IDC_CMD_SETTINGS        3031
-#define IDC_CMD_SCHEMES         3032
-#define IDC_CMD_LAST            3032
+#define IDC_CMD_LAST            3031
 
 // rename dialog
 #define IDC_RENAME_INFO         2301
@@ -86,7 +84,7 @@
 #define IDC_SOUND_PLAY_HERE     2703
 #define IDC_SOUND_PLAY_CLIENTS  2704
 
-// Sound Schemes dialog
+// Settings dialog, sound scheme section
 #define IDC_SCHEME_DEFAULT      2801
 #define IDC_SCHEME_CUSTOM       2802
 #define IDC_SCHEME_INFO         2803
