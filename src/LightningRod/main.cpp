@@ -22,6 +22,7 @@
 #include <iphlpapi.h>
 #include <objbase.h>
 #include <cstring>
+#include <cwchar>
 #include <vector>
 
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
@@ -32,6 +33,7 @@ namespace {
 
 const UINT WM_AGENT_UPDATE = WM_APP + 1;
 const UINT WM_NETWORK_ERROR = WM_APP + 2;   // no valid address after kIpTries re-reads; the window shows the error box
+const UINT WM_SHOW_MESSAGE = WM_APP + 3;    // lParam: ShownMessage* from the agent thread; the window thread opens the window and owns it
 // A node whose NIC has not finished DHCP when the agent starts at logon reads
 // no address, 127.x or an APIPA 169.254.x.y one. The agent then re-reads the
 // address every kIpWaitMs, up to kIpTries times, before it gives up.
@@ -634,6 +636,34 @@ SOCKET connectWithTimeout(const sockaddr_in& addr, int timeoutMs)
 
 // ---------------------------------------------------------------- agent
 
+// ---- Display Message ------------------------------------------------------
+// MESSAGE from Thunderhead opens a window on this node's screen: the title in
+// its caption, the text in a large font, an OK button beside the usual caption
+// buttons and, when timed, a line counting down to the moment it closes by
+// itself. The agent thread hands the window thread a ShownMessage; when the
+// window closes, the window thread queues the outcome, which pollMessages
+// reports to Thunderhead in a second ACK.
+struct ShownMessage {
+    std::wstring title, text;
+    int timeoutSec;                  // 0: stays until dismissed
+    unsigned long long startMs;
+    HWND window, textCtl, countdown, okButton;
+    HFONT textFont, uiFontHandle;
+    ShownMessage() : timeoutSec(0), startMs(0), window(NULL), textCtl(NULL), countdown(NULL), okButton(NULL), textFont(NULL), uiFontHandle(NULL) {}
+};
+struct MessageOutcome { std::string title; std::string closed; long long seconds; };   // closed: ok, close or timeout
+CRITICAL_SECTION g_messageLock;
+std::vector<MessageOutcome> g_messageOutcomes;   // windows closed and not yet acknowledged
+void openMessageWindow(ShownMessage* sm);        // window thread
+
+void takeMessageOutcomes(std::vector<MessageOutcome>& out)
+{
+    EnterCriticalSection(&g_messageLock);
+    out.swap(g_messageOutcomes);
+    g_messageOutcomes.clear();
+    LeaveCriticalSection(&g_messageLock);
+}
+
 class Agent {
 public:
     Agent() : udp_(INVALID_SOCKET), tcp_(INVALID_SOCKET), intervalSec_(kDefaultReportInterval), nextReport_(0)
@@ -1053,6 +1083,46 @@ private:
             ack.set("action", action);
             ack.set("file", file);
             sendMessage(ack);
+        } else if (m.verb == "MESSAGE") {
+            // Display Message in Thunderhead: title= for the caption, text= the
+            // message as hexadecimal digits of its UTF-8 bytes (as BATCH), sound= a
+            // name in the sounds folder played as the window opens (empty for a
+            // silent message), timeout= seconds after which the window closes by
+            // itself, 0 for until dismissed. This ACK says the window was opened;
+            // pollMessages sends a second one, stage=closed, when it has closed.
+            std::string text, title = trim(m.get("title")), sound = trim(m.get("sound")), err, soundErr;
+            int timeout = m.getInt("timeout", 0);
+            if (timeout < 0) timeout = 0;
+            bool ok = hexDecode(m.get("text"), text);
+            if (!ok) err = "text is not hexadecimal";
+            else if (title.empty()) { ok = false; err = "title missing"; }
+            if (ok) {
+                ShownMessage* sm = new ShownMessage();
+                sm->title = widen(title);
+                sm->text = widen(text);
+                sm->timeoutSec = timeout;
+                if (!g_window || !PostMessageW(g_window, WM_SHOW_MESSAGE, 0, (LPARAM)sm)) { delete sm; ok = false; err = "the window thread could not be reached"; }
+            }
+            if (ok && !sound.empty()) {
+                std::wstring path = soundDir() + L"\\" + widen(sound);
+                if (sound.find_first_of("\\/:") != std::string::npos) soundErr = "sound must be a name in the sounds folder";
+                else if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) soundErr = sound + " is not in " + narrow(soundDir());
+                else soundPlay(path, soundErr);
+            }
+            std::string when = timeout > 0 ? format("closes after %d s", timeout) : std::string("until dismissed");
+            std::string soundNote = sound.empty() ? std::string(", silent") : ", sound " + sound + (soundErr.empty() ? "" : " not played: " + soundErr);
+            logLine(ok ? format("MESSAGE \"%s\" opened, %u character(s), %s%s", title.c_str(), (unsigned)widen(text).size(), when.c_str(), soundNote.c_str())
+                       : "MESSAGE failed: " + err);
+            Message ack("ACK");
+            ack.set("cmd", m.verb);
+            ack.set("stage", "opened");
+            ack.set("ok", boolText(ok));
+            ack.set("error", err);
+            ack.set("title", title);
+            ack.set("sound", sound);
+            ack.set("sound_error", soundErr);
+            ack.set("timeout", (long long)timeout);
+            sendMessage(ack);
         } else if (m.verb == "START" || m.verb == "STOP") {
             // START gen=3|2|1 (3 when absent) starts the installed Lightning of that
             // generation, found as docs/PROTOCOL.md describes under Lightning lookup;
@@ -1343,6 +1413,27 @@ private:
 
     // Reports every batch file that has ended since the last pass with a second
     // ACK: stage=finished, the exit code of cmd.exe and the running time.
+    // Acknowledges every message window closed since the last pass.
+    bool pollMessages()
+    {
+        std::vector<MessageOutcome> done;
+        takeMessageOutcomes(done);
+        for (size_t i = 0; i < done.size(); ++i) {
+            const char* how = done[i].closed == "ok" ? "with OK" : done[i].closed == "timeout" ? "by its timer" : "with the Close button";
+            logLine(format("MESSAGE \"%s\" closed %s after %lld s", done[i].title.c_str(), how, done[i].seconds));
+            Message ack("ACK");
+            ack.set("cmd", "MESSAGE");
+            ack.set("stage", "closed");
+            ack.set("ok", boolText(true));
+            ack.set("error", std::string());
+            ack.set("title", done[i].title);
+            ack.set("closed", done[i].closed);
+            ack.set("seconds", done[i].seconds);
+            if (!sendMessage(ack)) return false;
+        }
+        return true;
+    }
+
     bool pollBatches()
     {
         for (size_t i = 0; i < batches_.size(); ) {
@@ -1403,6 +1494,7 @@ private:
         while (tcp_ != INVALID_SOCKET) {
             tryTeamViewerWindow();
             if (!pollBatches()) { dropSession("batch result send failed"); return; }
+            if (!pollMessages()) { dropSession("message result send failed"); return; }
             if (!pollRelays()) { dropSession("relay result send failed"); return; }
             if (InterlockedExchange(&g_rehello, 0)) {
                 if (!sendHello()) { dropSession("hello send failed"); return; }
@@ -1660,6 +1752,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg) {
     case WM_SIZE: layout(hwnd); return 0;
     case WM_AGENT_UPDATE: refreshAll(); return 0;
+    case WM_SHOW_MESSAGE: openMessageWindow((ShownMessage*)lp); return 0;
     case WM_COMMAND:
         switch (LOWORD(wp)) {
         case IDM_LR_EXIT: PostMessageW(hwnd, WM_CLOSE, 0, 0); return 0;
@@ -1697,6 +1790,132 @@ HFONT uiFont()
     if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0))
         return CreateFontIndirectW(&ncm.lfMessageFont);
     return (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+}
+
+// ---- message windows ------------------------------------------------------
+// One top-level window per MESSAGE, class LightningRodMessage: an ordinary
+// overlapped window (Minimize, Maximize or Restore and Close in its caption)
+// with the text, a countdown line and an OK button. Enter presses OK and
+// Escape closes, through IsDialogMessage in the message loop. The window owns
+// its ShownMessage and frees it when it is destroyed.
+const wchar_t* const kMessageClass = L"LightningRodMessage";
+const UINT_PTR kMessageTimer = 1;
+const int kMessageOk = 1;
+
+void queueMessageOutcome(ShownMessage* sm, const char* closed)
+{
+    MessageOutcome o;
+    o.title = narrow(sm->title);
+    o.closed = closed;
+    o.seconds = (long long)((tickMs() - sm->startMs) / 1000);
+    EnterCriticalSection(&g_messageLock);
+    g_messageOutcomes.push_back(o);
+    LeaveCriticalSection(&g_messageLock);
+}
+
+void closeMessageWindow(ShownMessage* sm, const char* closed)
+{
+    KillTimer(sm->window, kMessageTimer);
+    queueMessageOutcome(sm, closed);
+    DestroyWindow(sm->window);
+}
+
+void layoutMessageWindow(ShownMessage* sm)
+{
+    RECT rc;
+    GetClientRect(sm->window, &rc);
+    int w = rc.right, h = rc.bottom, margin = 14, bh = 28, bw = 96;
+    MoveWindow(sm->textCtl, margin, margin, w - 2 * margin, h - 3 * margin - bh, TRUE);
+    MoveWindow(sm->countdown, margin, h - margin - bh + 6, w - 3 * margin - bw, bh - 6, TRUE);
+    MoveWindow(sm->okButton, w - margin - bw, h - margin - bh, bw, bh, TRUE);
+}
+
+void refreshCountdown(ShownMessage* sm)
+{
+    if (sm->timeoutSec <= 0) { SetWindowTextW(sm->countdown, L"Stays until dismissed"); return; }
+    long long left = sm->timeoutSec - (long long)((tickMs() - sm->startMs) / 1000);
+    if (left < 0) left = 0;
+    SetWindowTextW(sm->countdown, widen(format("Closes by itself in %lld s", left)).c_str());
+}
+
+LRESULT CALLBACK messageWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    ShownMessage* sm = (ShownMessage*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    switch (msg) {
+    case WM_SIZE: if (sm) layoutMessageWindow(sm); return 0;
+    case WM_CTLCOLORSTATIC: SetBkMode((HDC)wp, TRANSPARENT); return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+    case DM_GETDEFID: return MAKELONG(kMessageOk, DC_HASDEFID);   // Enter presses OK, through IsDialogMessage
+    case WM_COMMAND:
+        if (sm && LOWORD(wp) == kMessageOk) { closeMessageWindow(sm, "ok"); return 0; }
+        if (sm && LOWORD(wp) == IDCANCEL) { closeMessageWindow(sm, "close"); return 0; }   // Escape
+        return 0;
+    case WM_TIMER:
+        if (sm && wp == kMessageTimer) {
+            refreshCountdown(sm);
+            if (sm->timeoutSec > 0 && tickMs() - sm->startMs >= (unsigned long long)sm->timeoutSec * 1000) closeMessageWindow(sm, "timeout");
+        }
+        return 0;
+    case WM_CLOSE: if (sm) closeMessageWindow(sm, "close"); else DestroyWindow(hwnd); return 0;
+    case WM_DESTROY:
+        if (sm) {
+            if (sm->textFont) DeleteObject(sm->textFont);
+            if (sm->uiFontHandle) DeleteObject(sm->uiFontHandle);
+            delete sm;
+        }
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+bool isMessageWindow(HWND top)
+{
+    wchar_t cls[64];
+    return top && GetClassNameW(top, cls, 64) && wcscmp(cls, kMessageClass) == 0;
+}
+
+// Opens the window of a MESSAGE on the window thread; sm belongs to the window from here on.
+void openMessageWindow(ShownMessage* sm)
+{
+    static bool registered = false;
+    HINSTANCE inst = GetModuleHandleW(NULL);
+    if (!registered) {
+        WNDCLASSW wc;
+        memset(&wc, 0, sizeof(wc));
+        wc.lpfnWndProc = messageWndProc;
+        wc.hInstance = inst;
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(IDI_LR_APP));
+        wc.lpszClassName = kMessageClass;
+        registered = RegisterClassW(&wc) != 0;
+    }
+    int w = 520, h = 300, x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2, y = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
+    sm->startMs = tickMs();
+    sm->window = CreateWindowExW(WS_EX_APPWINDOW, kMessageClass, sm->title.c_str(), WS_OVERLAPPEDWINDOW, x, y, w, h, NULL, NULL, inst, NULL);
+    if (!sm->window) {
+        logLine("MESSAGE window could not be created: " + lastErrorText((int)GetLastError()));
+        queueMessageOutcome(sm, "close");
+        delete sm;
+        return;
+    }
+    SetWindowLongPtrW(sm->window, GWLP_USERDATA, (LONG_PTR)sm);
+    sm->uiFontHandle = uiFont();
+    LOGFONTW lf;
+    memset(&lf, 0, sizeof(lf));
+    if (GetObjectW(sm->uiFontHandle, sizeof(lf), &lf)) { lf.lfHeight = lf.lfHeight * 8 / 5; sm->textFont = CreateFontIndirectW(&lf); }
+    sm->textCtl = CreateWindowExW(0, L"STATIC", sm->text.c_str(), WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX, 0, 0, 0, 0, sm->window, NULL, inst, NULL);
+    sm->countdown = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX, 0, 0, 0, 0, sm->window, NULL, inst, NULL);
+    sm->okButton = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 0, 0, 0, 0, sm->window, (HMENU)(INT_PTR)kMessageOk, inst, NULL);
+    SendMessageW(sm->textCtl, WM_SETFONT, (WPARAM)(sm->textFont ? sm->textFont : sm->uiFontHandle), TRUE);
+    SendMessageW(sm->countdown, WM_SETFONT, (WPARAM)sm->uiFontHandle, TRUE);
+    SendMessageW(sm->okButton, WM_SETFONT, (WPARAM)sm->uiFontHandle, TRUE);
+    layoutMessageWindow(sm);
+    refreshCountdown(sm);
+    SetTimer(sm->window, kMessageTimer, 1000, NULL);
+    ShowWindow(sm->window, SW_SHOWNORMAL);
+    bringToFront(sm->window);
+    SetFocus(sm->okButton);
 }
 
 bool createWindow(HINSTANCE inst, const std::string& nodeName)
@@ -1799,6 +2018,7 @@ int main(int argc, char** argv)
     g_log.open(exeDirectory(), L"LightningRod");
     InitializeCriticalSection(&g_soundLock);
     InitializeCriticalSection(&g_settingsLock);
+    InitializeCriticalSection(&g_messageLock);
     loadSoundScheme();
     loadSettings();
     removeTree(relayDir() + L"\\");   // staging left by RELAY jobs of a previous run
@@ -1831,6 +2051,8 @@ int main(int argc, char** argv)
 
     MSG m;
     while (GetMessageW(&m, NULL, 0, 0) > 0) {
+        HWND top = m.hwnd ? GetAncestor(m.hwnd, GA_ROOT) : NULL;   // a message window takes Enter, Escape and Tab as a dialog does
+        if (isMessageWindow(top) && IsDialogMessageW(top, &m)) continue;
         TranslateMessage(&m);
         DispatchMessageW(&m);
     }

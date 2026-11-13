@@ -189,15 +189,17 @@ Thunderhead may send at any time:
 | SOUND | action, file, logon, hello, logoff | `action=play`: play `file`, a name in the agent's `sounds` folder, on the node's playback device; `action=scheme`: take the file names of the agent's own three sound events; reply ACK with `action=` and `file=` (see Audio); agents from 0.2.21 |
 | RELAYSET | relay, relay_ip | set the agent's SMB1 relay values as its Settings dialog would (`relay=yes|no`, `relay_ip=`), save them and send HELLO again when they changed; reply ACK with the values in force (see SMB1 relay); agents from 0.3.1 |
 | RELAY | op, job, dest, share, pattern | SMB1 relay work for the client at `dest`, each op on a thread so that an unreachable destination never stalls the agent's reports (probe on a thread from 0.3.2): `op=probe` answers whether `\\dest\share\` opens from the node; `op=push` copies what Thunderhead staged under `relay\<job>` in the node's own share to the root of that share; `op=pull` fetches the newest file matching `pattern` from it into `relay\<job>`; reply ACK with `op=`, `job=`, `dest=`, `files=`, `bytes=` and `file=` (see SMB1 relay); agents from 0.3.0 |
+| MESSAGE | title, text, sound, timeout | open a message window on the node's screen with `title` in its caption and `text` (hexadecimal digits of its UTF-8 bytes), play `sound`, a name in the agent's `sounds` folder (none when empty), and close the window by itself after `timeout` seconds (0: when dismissed); reply ACK when opened and again when closed (see Display Message); agents from 0.3.3 |
 
 The agent replies to START, STOP, PRIORITY, EXIT, RESTART, UPDATE, RENAME, REBOOT,
-SHUTDOWN, POWER, AUDIO, TEAMVIEWER, SOUND, RELAYSET, RELAY and BATCH with (RENAME adds `name=` with the name that was applied;
+SHUTDOWN, POWER, AUDIO, TEAMVIEWER, SOUND, RELAYSET, RELAY, MESSAGE and BATCH with (RENAME adds `name=` with the name that was applied;
 START adds `gen=`, `path=`, `version=` and `found=` as described under Lightning lookup;
 PRIORITY adds `level=` as requested and `applied=` with the class Windows reports
 afterwards, and answers `ok=no` when the two differ, as when RealTime is
 requested without administrator rights and Windows grants High; POWER adds
 `action=` and answers `ok=no` with the exit code of `shutdown.exe` when that
-is not 0; BATCH is answered twice, as described under Remote batch file):
+is not 0; BATCH and MESSAGE are answered twice, as described under Remote batch
+file and Display Message):
 
 ```
 ACK
@@ -718,6 +720,51 @@ NAME: file" or "SOUND play failed on NAME: ...". Agents older than 0.2.21 do
 not know SOUND; Thunderhead skips them with a line in the event log, as for
 the other versioned commands, and a node whose agent came by an older update
 has no `sounds` folder until *Update Checked* copies it.
+
+## Display Message
+
+*Display Message* (LightningRod Control) opens one dialog per checked online
+client, in list order, naming the client. Its radio buttons are the 38 sound
+categories and, last, *Silent message*; the text box takes the message text,
+which may be left empty; the *Display* switch chooses *Until Dismissed* or
+*Timed*, with the seconds beside it (1 to 86400). The choices carry over from
+one dialog to the next. *Send* sends the message to that client, *Skip* leaves
+the client without one, *Cancel All* ends the pass. Clients whose agent is
+older than 0.3.3 are passed over with a line in the event log.
+
+```
+MESSAGE
+title=Message from Thunderhead: Balloon
+text=52656e646572696e672073746f707320617420313a3030
+sound=ThunderheadLightningRod Balloon.wav
+timeout=30
+```
+
+`title=` is "Message from Thunderhead: <Category>" for a sound category and
+"Message from Thunderhead" for a silent message; `text=` holds the UTF-8 bytes
+of the text as hexadecimal digits, as BATCH does, so that line ends survive the
+one-line field format; `sound=` names the category's file in the client's own
+`sounds` folder (the custom scheme's assignment when there is one) or is empty
+for a silent message; `timeout=` is the seconds after which the window closes
+by itself, 0 for until dismissed. The event log and the node log record the
+title, the length of the text and the timing, not the text.
+
+The agent plays the sound, if any, and opens a window of its own on the node's
+screen, brought in front of the other windows: the title in its caption, the
+text in a large font, an *OK* button, the Minimize, Maximize (Restore) and
+Close buttons of an ordinary window, and a line reading "Closes by itself in
+N s", counting down, or "Stays until dismissed". Enter presses OK and Escape
+closes. Several messages may be open at once; the agent's reports and other
+commands go on meanwhile. The agent answers twice: at once with `stage=opened`,
+`title=`, `sound=`, `sound_error=` (empty when the sound played; the window
+opens even when the sound did not) and `ok=yes`, or `ok=no` with `error=` when
+the text is not hexadecimal or the title is missing; and when the window has
+closed, with `stage=closed`, `closed=ok` (the OK button or Enter), `close` (the
+Close button, Escape or Alt+F4) or `timeout`, and `seconds=` the time it was
+open. The event log reads "MESSAGE "Message from Thunderhead: Balloon" shown
+on NAME" and later "MESSAGE "..." closed on NAME with OK after 12 s". A window
+still open when the agent stops, restarts or is updated closes with it, and
+its end is then not reported.
 
 ## TeamViewer
 

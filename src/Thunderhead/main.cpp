@@ -136,7 +136,7 @@ const CommandDef kCommands[] = {
     { IDC_CMD_SHUTDOWN_NODE,   L"Shutdown Node",                  NULL,      true,  GroupNode },
     { IDC_CMD_ABORT_SHUTDOWN,  L"Abort Shutdown",                 NULL,      true,  GroupNode },
     { IDC_CMD_UPDATE,          L"Update Checked",                 NULL,      true,  GroupRod },
-    { IDC_CMD_MESSAGE,         L"Display Message",                NULL,      false, GroupRod },
+    { IDC_CMD_MESSAGE,         L"Display Message",                NULL,      true,  GroupRod },
     { IDC_CMD_VIEW_REMOTE_LOG, L"View Remote Log",                NULL,      true,  GroupRod },
     { IDC_CMD_PING,            L"Lightning Rod Ping",             NULL,      true,  GroupRod },
     { IDC_CMD_REMOVE_OFFLINE,  L"Remove Checked Offline Clients", NULL,      true,  GroupRod },
@@ -2598,6 +2598,152 @@ void setRelayAddress()
                                  cancelled ? ", cancelled" : "")).c_str());
 }
 
+// ---------------------------------------------------------------- Display Message
+
+// A message window on a client's screen: one dialog per checked online
+// client, in list order, naming the client. The radio buttons are the sound
+// categories, each of which titles the message "Message from Thunderhead:
+// <Category>" and plays the category's file from the client's own sounds
+// folder (the custom scheme's assignment when there is one), and Silent
+// message, titled "Message from Thunderhead" with no sound. The text box holds
+// the message text (it may be empty), the switch chooses Until Dismissed or
+// Timed with the seconds beside it; the choices carry over from one dialog to
+// the next. Send sends MESSAGE, Skip leaves the client without one, Cancel All
+// ends the pass. Agents before kMessageAgent are passed over. The agent
+// answers when the window opens and again when it closes (see onNet).
+const char* const kMessageAgent = "0.3.3";
+const int kMessageSilent = kSoundCategoryCount;     // the radio after the categories
+const int kMessageMaxSeconds = 86400;
+
+struct MessageDlgData { std::wstring info; int choice; std::wstring text; bool timed; int seconds; };
+
+std::wstring messageTitle(int choice)
+{
+    if (choice == kMessageSilent) return L"Message from Thunderhead";
+    return std::wstring(L"Message from Thunderhead: ") + kSoundCategories[choice];
+}
+
+RECT dialogRect(HWND dlg, int x, int y, int w, int h)
+{
+    RECT r = { x, y, x + w, y + h };
+    MapDialogRect(dlg, &r);
+    return r;
+}
+
+INT_PTR CALLBACK messageDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    MessageDlgData* d = (MessageDlgData*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
+    if (msg == WM_DRAWITEM && ((const DRAWITEMSTRUCT*)lp)->CtlID == IDC_MSG_TIMED_SWITCH) {
+        themeDrawSwitch((const DRAWITEMSTRUCT*)lp, d && d->timed);
+        return TRUE;
+    }
+    if (INT_PTR r = themeDialogMessage(dlg, msg, wp, lp)) return r;
+    switch (msg) {
+    case WM_INITDIALOG: {
+        d = (MessageDlgData*)lp;
+        SetWindowLongPtrW(dlg, GWLP_USERDATA, (LONG_PTR)d);
+        SetDlgItemTextW(dlg, IDC_MSG_INFO, d->info.c_str());
+        // The radios: three columns of thirteen, the categories in their order,
+        // Silent message last; placed after the first line in the tab order.
+        const int perColumn = (kMessageSilent + 1 + 2) / 3;
+        HWND after = GetDlgItem(dlg, IDC_MSG_INFO);
+        for (int i = 0; i <= kMessageSilent; ++i) {
+            RECT r = dialogRect(dlg, 10 + 150 * (i / perColumn), 36 + 13 * (i % perColumn), 145, 11);
+            const wchar_t* label = i == kMessageSilent ? L"Silent message" : kSoundCategories[i];
+            HWND b = CreateWindowExW(0, L"BUTTON", label, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON | (i == 0 ? WS_GROUP : 0),
+                                     r.left, r.top, r.right - r.left, r.bottom - r.top, dlg, (HMENU)(INT_PTR)(IDC_MSG_RADIO_FIRST + i), g_inst, NULL);
+            SendMessageW(b, WM_SETFONT, (WPARAM)g_font, TRUE);
+            SetWindowPos(b, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            themeControl(b);
+            after = b;
+        }
+        CheckRadioButton(dlg, IDC_MSG_RADIO_FIRST, IDC_MSG_RADIO_FIRST + kMessageSilent, IDC_MSG_RADIO_FIRST + d->choice);
+        SetDlgItemTextW(dlg, IDC_MSG_TEXT, d->text.c_str());
+        SendDlgItemMessageW(dlg, IDC_MSG_TEXT, EM_LIMITTEXT, 4000, 0);
+        SetDlgItemTextW(dlg, IDC_MSG_TIMED_STATE, d->timed ? L"Timed" : L"Until Dismissed");
+        SetDlgItemInt(dlg, IDC_MSG_SECONDS, (UINT)d->seconds, FALSE);
+        SendDlgItemMessageW(dlg, IDC_MSG_SECONDS, EM_LIMITTEXT, 5, 0);
+        EnableWindow(GetDlgItem(dlg, IDC_MSG_SECONDS), d->timed);
+        SetFocus(GetDlgItem(dlg, IDC_MSG_TEXT));
+        return FALSE;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDC_MSG_TIMED_SWITCH && d) {
+            d->timed = !d->timed;
+            SetDlgItemTextW(dlg, IDC_MSG_TIMED_STATE, d->timed ? L"Timed" : L"Until Dismissed");
+            InvalidateRect(GetDlgItem(dlg, IDC_MSG_TIMED_SWITCH), NULL, TRUE);
+            EnableWindow(GetDlgItem(dlg, IDC_MSG_SECONDS), d->timed);
+            if (d->timed) { SetFocus(GetDlgItem(dlg, IDC_MSG_SECONDS)); SendDlgItemMessageW(dlg, IDC_MSG_SECONDS, EM_SETSEL, 0, -1); }
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDOK && d) {
+            for (int i = 0; i <= kMessageSilent; ++i)
+                if (IsDlgButtonChecked(dlg, IDC_MSG_RADIO_FIRST + i) == BST_CHECKED) d->choice = i;
+            d->text = windowText(GetDlgItem(dlg, IDC_MSG_TEXT));
+            if (d->timed) {
+                BOOL okNum = FALSE;
+                UINT sec = GetDlgItemInt(dlg, IDC_MSG_SECONDS, &okNum, FALSE);
+                if (!okNum || sec < 1 || sec > (UINT)kMessageMaxSeconds) {
+                    MessageBoxW(dlg, L"Enter the seconds the message stays on the client's screen, 1 to 86400.", L"Display Message", MB_OK | MB_ICONWARNING);
+                    return TRUE;
+                }
+                d->seconds = (int)sec;
+            }
+            EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDCANCEL || LOWORD(wp) == IDABORT) { EndDialog(dlg, LOWORD(wp)); return TRUE; }
+        break;
+    }
+    return FALSE;
+}
+
+void displayMessage()
+{
+    std::vector<NodeRecord*> targets = checkedNodes();
+    if (targets.empty()) { updateStatusBar(L"|  no clients checked"); return; }
+    static MessageDlgData last;
+    static bool lastSet = false;
+    if (!lastSet) {
+        int def = soundCategoryIndex(L"Default");
+        last.choice = def < 0 ? 0 : def;
+        last.timed = false;
+        last.seconds = 30;
+        lastSet = true;
+    }
+    int sent = 0, shown = 0, skipped = 0, passed = 0;
+    bool cancelled = false;
+    for (size_t i = 0; i < targets.size() && !cancelled; ++i) {
+        NodeRecord* n = targets[i];
+        if (!n->online) { logEvent(format("Display Message: %s is offline, passed over", n->name.c_str())); ++passed; continue; }
+        std::string agent = n->hello.get("agent");
+        if (compareVersions(agent, kMessageAgent) < 0) {
+            logEvent(format("Display Message: %s has agent %s, older than %s, passed over; update it first", n->name.c_str(), agent.c_str(), kMessageAgent));
+            ++passed;
+            continue;
+        }
+        MessageDlgData d = last;
+        d.info = L"Client " + widen(n->name) + L"  (" + widen(n->ip) + L")" + widen(format("   %d of %d checked", (int)i + 1, (int)targets.size()));
+        ++shown;
+        INT_PTR r = DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_MESSAGE), g_main, messageDlgProc, (LPARAM)&d);
+        if (r == IDABORT) { cancelled = true; break; }
+        if (r != IDOK) { ++skipped; continue; }
+        last = d;
+        if (!n->online) { logEvent(format("Display Message: %s went offline before MESSAGE was sent", n->name.c_str())); continue; }
+        std::wstring title = messageTitle(d.choice);
+        Message m("MESSAGE");
+        m.set("title", narrow(title));
+        m.set("sound", d.choice == kMessageSilent ? std::string() : narrow(soundNameForCategory(kSoundCategories[d.choice])));
+        m.set("text", hexEncode(narrow(d.text)));
+        m.set("timeout", (long long)(d.timed ? d.seconds : 0));
+        std::string when = d.timed ? format("closes after %d s", d.seconds) : std::string("until dismissed");
+        std::string label = format("MESSAGE \"%s\", %u character(s), %s", narrow(title).c_str(), (unsigned)d.text.size(), when.c_str());
+        if (sendToNode(n, m, label)) ++sent;
+    }
+    updateStatusBar(widen(format("|  Display Message: %d dialog(s), %d sent, %d skipped, %d passed over%s", shown, sent, skipped, passed,
+                                 cancelled ? ", cancelled" : "")).c_str());
+}
+
 // One dialog per checked online client, in list order; Skip moves on, Stop ends the pass.
 // Opens \NAME\<share_name>\ of every checked client in Windows Explorer. The
 // name is used rather than the address so that the window title shows the node.
@@ -3697,6 +3843,19 @@ void onNet(NetEvent* e)
                                    dest.c_str(), g_store->settings.shareName.c_str(), file.empty() ? "" : ": ", file.c_str())
                           : format("RELAY %s failed on %s: %s", op.c_str(), n->name.c_str(), e->msg.get("error").c_str());
             }
+        } else if (cmd == "MESSAGE") {
+            // Two acknowledgements per message: stage=opened, then stage=closed.
+            std::string title = e->msg.get("title");
+            if (e->msg.get("stage") == "closed") {
+                std::string how = e->msg.get("closed");
+                text = format("MESSAGE \"%s\" closed on %s %s after %s s", title.c_str(), n->name.c_str(),
+                              how == "ok" ? "with OK" : how == "timeout" ? "by its timer" : "with the Close button", e->msg.get("seconds").c_str());
+            } else if (ok) {
+                std::string soundErr = e->msg.get("sound_error");
+                text = format("MESSAGE \"%s\" shown on %s%s%s", title.c_str(), n->name.c_str(), soundErr.empty() ? "" : ", sound not played: ", soundErr.c_str());
+            } else {
+                text = format("MESSAGE failed on %s: %s", n->name.c_str(), e->msg.get("error").c_str());
+            }
         } else if (cmd == "SOUND") {
             std::string action = e->msg.get("action"), file = e->msg.get("file");
             if (ok) text = format("SOUND %s ok on %s%s%s", action.c_str(), n->name.c_str(), file.empty() ? "" : ": ", file.c_str());
@@ -4350,6 +4509,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CMD_SOUND: openPlaySound(); return 0;
         case IDC_CMD_REMOVE_OFFLINE: removeCheckedOffline(); return 0;
         case IDC_CMD_SET_RELAY: setRelayAddress(); return 0;
+        case IDC_CMD_MESSAGE: displayMessage(); return 0;
         case IDC_CMD_SHUTDOWN_NODE: shutdownChecked(); return 0;
         case IDC_CMD_ABORT_SHUTDOWN: sendPower("abort"); return 0;
         case IDC_FLAG_WOL: case IDC_FLAG_BOOT: case IDC_FLAG_AUTOLOGIN: case IDC_FLAG_AUTOROD: case IDC_FLAG_AUTOLIGHTNING:

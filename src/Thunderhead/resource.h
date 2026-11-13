@@ -8,6 +8,7 @@
 #define IDD_TEXTBOX             106
 #define IDD_SOUND               107
 #define IDD_RELAY               108
+#define IDD_MESSAGE             109
 
 #define IDM_FILE_EXIT           1001
 #define IDM_HELP_ABOUT          1301
@@ -91,6 +92,14 @@
 #define IDC_RELAY_SWITCH        2902   // Relay On/Off slider (owner-drawn button)
 #define IDC_RELAY_STATE         2903
 #define IDC_RELAY_DEST          2904
+
+// Display Message dialog
+#define IDC_MSG_INFO            3101
+#define IDC_MSG_TEXT            3102
+#define IDC_MSG_TIMED_SWITCH    3103   // Until Dismissed / Timed slider (owner-drawn button)
+#define IDC_MSG_TIMED_STATE     3104
+#define IDC_MSG_SECONDS         3105
+#define IDC_MSG_RADIO_FIRST     3110   // one radio per sound category, in kSoundCategories order, then Silent message
 
 // Settings dialog, sound scheme section
 #define IDC_SCHEME_DEFAULT      2801

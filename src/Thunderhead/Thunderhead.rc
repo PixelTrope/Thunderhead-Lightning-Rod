@@ -39,7 +39,7 @@ BEGIN
         POPUP "Lightning&Rod Control"
         BEGIN
             MENUITEM "Update Checked", IDC_CMD_UPDATE
-            MENUITEM "Display Message", IDC_CMD_MESSAGE, GRAYED
+            MENUITEM "Display Message", IDC_CMD_MESSAGE
             MENUITEM "View Remote Log", IDC_CMD_VIEW_REMOTE_LOG
             MENUITEM "Lightning Rod Ping", IDC_CMD_PING
             MENUITEM "Remove Checked Offline Clients", IDC_CMD_REMOVE_OFFLINE
@@ -108,6 +108,27 @@ BEGIN
     PUSHBUTTON      "Close", IDCANCEL, 260, 206, 50, 14
 END
 
+
+// The radio buttons of the sound categories are created at run time from kSoundCategories,
+// three columns of thirteen below the second line, Silent message last.
+IDD_MESSAGE DIALOGEX 0, 0, 470, 330
+STYLE DS_MODALFRAME | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Display Message"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT           "", IDC_MSG_INFO, 10, 8, 450, 10
+    LTEXT           "Sound and title of the message (a sound category plays its file on the client and titles the message with its name):", -1, 10, 22, 450, 10
+    LTEXT           "Message text:", -1, 10, 212, 100, 10
+    EDITTEXT        IDC_MSG_TEXT, 10, 224, 450, 52, ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Display:", -1, 10, 288, 40, 10
+    CONTROL         "", IDC_MSG_TIMED_SWITCH, "Button", BS_OWNERDRAW | WS_TABSTOP, 52, 284, 30, 16
+    LTEXT           "Until Dismissed", IDC_MSG_TIMED_STATE, 87, 288, 70, 10
+    LTEXT           "Seconds:", -1, 162, 288, 34, 10
+    EDITTEXT        IDC_MSG_SECONDS, 198, 286, 40, 13, ES_AUTOHSCROLL | ES_NUMBER
+    DEFPUSHBUTTON   "Send", IDOK, 296, 308, 50, 14
+    PUSHBUTTON      "Skip", IDCANCEL, 350, 308, 50, 14
+    PUSHBUTTON      "Cancel All", IDABORT, 404, 308, 56, 14
+END
 
 IDD_RELAY DIALOGEX 0, 0, 270, 122
 STYLE DS_MODALFRAME | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
