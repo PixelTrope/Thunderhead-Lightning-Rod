@@ -43,6 +43,7 @@ BEGIN
             MENUITEM "View Remote Log", IDC_CMD_VIEW_REMOTE_LOG
             MENUITEM "Lightning Rod Ping", IDC_CMD_PING
             MENUITEM "Remove Checked Offline Clients", IDC_CMD_REMOVE_OFFLINE
+            MENUITEM "Set Relay Address", IDC_CMD_SET_RELAY
             MENUITEM "Restart LR", IDC_CMD_RESTART_LR
             MENUITEM "Exit LR", IDC_CMD_EXIT_LR
         END
@@ -107,6 +108,22 @@ BEGIN
     PUSHBUTTON      "Close", IDCANCEL, 260, 206, 50, 14
 END
 
+
+IDD_RELAY DIALOGEX 0, 0, 270, 122
+STYLE DS_MODALFRAME | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Set Relay Address"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT           "", IDC_RELAY_INFO, 10, 10, 250, 22
+    LTEXT           "Act as SMB1 Relay:", -1, 10, 42, 84, 10
+    CONTROL         "", IDC_RELAY_SWITCH, "Button", BS_OWNERDRAW | WS_TABSTOP, 98, 38, 30, 16
+    LTEXT           "Off", IDC_RELAY_STATE, 133, 42, 40, 10
+    LTEXT           "Destination IP:", -1, 10, 68, 84, 10
+    EDITTEXT        IDC_RELAY_DEST, 98, 66, 100, 13, ES_AUTOHSCROLL
+    DEFPUSHBUTTON   "OK", IDOK, 102, 100, 50, 14
+    PUSHBUTTON      "Skip", IDCANCEL, 156, 100, 50, 14
+    PUSHBUTTON      "Cancel All", IDABORT, 210, 100, 50, 14
+END
 
 IDD_RENAME DIALOGEX 0, 0, 260, 96
 STYLE DS_MODALFRAME | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU

@@ -138,6 +138,28 @@ bool validIpText(const std::string& s)
     return true;
 }
 
+// Sets the relay values as the Settings dialog or Thunderhead's RELAYSET asks,
+// saves them, and has HELLO sent again when they changed; off keeps the last
+// address for the dialog. Returns the error text, empty when applied.
+std::string applyRelaySetting(bool on, const std::string& ip, const std::string& ownIp)
+{
+    if (on && !validIpText(ip)) return "relay_ip must be an IPv4 address of four numbers";
+    if (on && ip == ownIp) return "relay_ip " + ip + " is this node's own address";
+    bool was;
+    std::string wasIp;
+    relaySnapshot(was, wasIp);
+    EnterCriticalSection(&g_settingsLock);
+    g_relay = on;
+    if (on) g_relayIp = ip;
+    saveSettings();
+    LeaveCriticalSection(&g_settingsLock);
+    if (was != on || (on && ip != wasIp)) {
+        logLine("SMB1 relay set " + relayText());
+        InterlockedExchange(&g_rehello, 1);
+    }
+    return std::string();
+}
+
 // Copies every file under src (which ends with a backslash) to dst (likewise),
 // folders included, existing files overwritten, and stops at the first failure.
 bool copyTreeTo(const std::wstring& src, const std::wstring& dst, unsigned& files, unsigned long long& bytes, std::string& err)
@@ -927,6 +949,25 @@ private:
             LeaveCriticalSection(&lock_);
             notify();
             if (helloSoundPending_) { helloSoundPending_ = false; playEventSound(SoundLrHello); }
+        } else if (m.verb == "RELAYSET") {
+            // Set Relay Address in Thunderhead: relay=yes|no and relay_ip= as the
+            // Settings dialog would set them; HELLO follows again when they changed.
+            bool on = parseBool(m.get("relay"));
+            std::string ip = trim(m.get("relay_ip"));
+            std::string err = applyRelaySetting(on, ip, info_.ip);
+            logLine(format("RELAYSET relay=%s relay_ip=%s: %s%s%s", boolText(on), ip.c_str(), err.empty() ? "ok, now " : "failed",
+                           err.empty() ? relayText().c_str() : ": ", err.c_str()));
+            bool relayNow;
+            std::string ipNow;
+            relaySnapshot(relayNow, ipNow);
+            Message ack("ACK");
+            ack.set("cmd", m.verb);
+            ack.set("ok", boolText(err.empty()));
+            ack.set("error", err);
+            ack.set("relay", boolText(relayNow));
+            ack.set("relay_ip", relayNow ? ipNow : std::string());
+            sendMessage(ack);
+            notify();
         } else if (m.verb == "RELAY") {
             // SMB1 relay work for the Windows XP client this node is set to relay
             // to (Settings): op=probe answers whether \\dest\share\ can be opened
@@ -1578,9 +1619,9 @@ INT_PTR CALLBACK settingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             wchar_t buf[64];
             GetDlgItemTextW(dlg, IDC_RELAY_IP, buf, 64);
             std::string ip = trim(narrow(buf));
+            AgentStatus s;
+            g_agent->snapshot(s);
             if (on) {
-                AgentStatus s;
-                g_agent->snapshot(s);
                 if (!validIpText(ip)) {
                     MessageBoxW(dlg, L"Enter the IP address of the Windows XP client as four numbers, for example 42.32.22.156.",
                                 L"Lightning Rod Settings", MB_OK | MB_ICONWARNING);
@@ -1592,18 +1633,7 @@ INT_PTR CALLBACK settingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                     return TRUE;
                 }
             }
-            bool was;
-            std::string wasIp;
-            relaySnapshot(was, wasIp);
-            EnterCriticalSection(&g_settingsLock);
-            g_relay = on;
-            g_relayIp = on ? ip : wasIp;
-            saveSettings();
-            LeaveCriticalSection(&g_settingsLock);
-            if (was != on || (on && ip != wasIp)) {
-                logLine("Settings: SMB1 relay " + relayText());
-                InterlockedExchange(&g_rehello, 1);
-            }
+            applyRelaySetting(on, ip, s.info.ip);   // the checks above make it succeed
             EndDialog(dlg, IDOK);
             return TRUE;
         }

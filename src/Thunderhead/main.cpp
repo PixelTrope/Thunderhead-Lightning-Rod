@@ -137,6 +137,7 @@ const CommandDef kCommands[] = {
     { IDC_CMD_VIEW_REMOTE_LOG, L"View Remote Log",                NULL,      true,  GroupRod },
     { IDC_CMD_PING,            L"Lightning Rod Ping",             NULL,      true,  GroupRod },
     { IDC_CMD_REMOVE_OFFLINE,  L"Remove Checked Offline Clients", NULL,      true,  GroupRod },
+    { IDC_CMD_SET_RELAY,       L"Set Relay Address",              NULL,      true,  GroupRod },
     { IDC_CMD_RESTART_LR,      L"Restart LR",                     "RESTART", true,  GroupRod },
     { IDC_CMD_EXIT_LR,         L"Exit LR",                        "EXIT",    true,  GroupRod },
     { IDC_CMD_MUTE,            L"Mute Checked Clients",           NULL,      true,  GroupAudio },
@@ -2478,6 +2479,122 @@ INT_PTR CALLBACK renameDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
     return FALSE;
 }
 
+// ---------------------------------------------------------------- Set Relay Address
+
+// The relay values of a Windows 7 client, set from here instead of at the
+// node's screen: one dialog per checked online Windows 7 client, in list
+// order, with its current values; OK sends RELAYSET when something changed,
+// Skip leaves the client as it is, Cancel All ends the pass. Clients on other
+// Windows versions and agents before kRelaySetAgent are passed over with a
+// line in the event log.
+const char* const kRelaySetAgent = "0.3.1";
+
+struct RelayDlgData { std::wstring info; bool on; std::string ip; std::string ownIp; };
+
+bool isWindows7(const NodeRecord* n)
+{
+    return n->hello.get("os").find("(6.1.") != std::string::npos;   // Windows 7, Windows Embedded Standard 7
+}
+
+bool validIpText(const std::string& s)
+{
+    std::vector<std::string> parts = split(s, '.');
+    if (parts.size() != 4) return false;
+    for (size_t i = 0; i < 4; ++i) {
+        if (parts[i].empty() || parts[i].size() > 3) return false;
+        for (size_t k = 0; k < parts[i].size(); ++k) if (parts[i][k] < '0' || parts[i][k] > '9') return false;
+        if (atoi(parts[i].c_str()) > 255) return false;
+    }
+    return true;
+}
+
+INT_PTR CALLBACK relayDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    RelayDlgData* d = (RelayDlgData*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
+    if (msg == WM_DRAWITEM && ((const DRAWITEMSTRUCT*)lp)->CtlID == IDC_RELAY_SWITCH) {
+        themeDrawSwitch((const DRAWITEMSTRUCT*)lp, d && d->on);
+        return TRUE;
+    }
+    if (INT_PTR r = themeDialogMessage(dlg, msg, wp, lp)) return r;
+    switch (msg) {
+    case WM_INITDIALOG:
+        d = (RelayDlgData*)lp;
+        SetWindowLongPtrW(dlg, GWLP_USERDATA, (LONG_PTR)d);
+        SetDlgItemTextW(dlg, IDC_RELAY_INFO, d->info.c_str());
+        SetDlgItemTextW(dlg, IDC_RELAY_STATE, d->on ? L"On" : L"Off");
+        SetDlgItemTextW(dlg, IDC_RELAY_DEST, widen(d->ip).c_str());
+        SendDlgItemMessageW(dlg, IDC_RELAY_DEST, EM_LIMITTEXT, 15, 0);
+        EnableWindow(GetDlgItem(dlg, IDC_RELAY_DEST), d->on);
+        return TRUE;
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDC_RELAY_SWITCH && d) {
+            d->on = !d->on;
+            SetDlgItemTextW(dlg, IDC_RELAY_STATE, d->on ? L"On" : L"Off");
+            InvalidateRect(GetDlgItem(dlg, IDC_RELAY_SWITCH), NULL, TRUE);
+            EnableWindow(GetDlgItem(dlg, IDC_RELAY_DEST), d->on);
+            if (d->on) { SetFocus(GetDlgItem(dlg, IDC_RELAY_DEST)); SendDlgItemMessageW(dlg, IDC_RELAY_DEST, EM_SETSEL, 0, -1); }
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDOK && d) {
+            wchar_t buf[64];
+            GetDlgItemTextW(dlg, IDC_RELAY_DEST, buf, 64);
+            std::string ip = trim(narrow(buf));
+            if (d->on && !validIpText(ip)) {
+                MessageBoxW(dlg, L"Enter the destination as an IP address of four numbers, for example 42.32.22.156.", L"Set Relay Address", MB_OK | MB_ICONWARNING);
+                return TRUE;
+            }
+            if (d->on && ip == d->ownIp) {
+                MessageBoxW(dlg, L"That is the client's own address. Enter the address of the Windows XP client it relays to.", L"Set Relay Address", MB_OK | MB_ICONWARNING);
+                return TRUE;
+            }
+            if (d->on) d->ip = ip;
+            EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDCANCEL || LOWORD(wp) == IDABORT) { EndDialog(dlg, LOWORD(wp)); return TRUE; }
+        break;
+    }
+    return FALSE;
+}
+
+void setRelayAddress()
+{
+    std::vector<NodeRecord*> targets = checkedNodes();
+    if (targets.empty()) { updateStatusBar(L"|  no clients checked"); return; }
+    int sent = 0, shown = 0, skipped = 0, passed = 0;
+    bool cancelled = false;
+    for (size_t i = 0; i < targets.size() && !cancelled; ++i) {
+        NodeRecord* n = targets[i];
+        if (!n->online) { logEvent(format("Set Relay Address: %s is offline, passed over", n->name.c_str())); ++passed; continue; }
+        if (!isWindows7(n)) { logEvent(format("Set Relay Address: %s runs %s, not Windows 7, passed over", n->name.c_str(), n->hello.get("os").c_str())); ++passed; continue; }
+        std::string agent = n->hello.get("agent");
+        if (compareVersions(agent, kRelaySetAgent) < 0) {
+            logEvent(format("Set Relay Address: %s has agent %s, older than %s, passed over; update it first", n->name.c_str(), agent.c_str(), kRelaySetAgent));
+            ++passed;
+            continue;
+        }
+        RelayDlgData d;
+        d.info = L"Client " + widen(n->name) + L"  (" + widen(n->ip) + L")";
+        d.on = isRelay(n);
+        d.ip = relayTarget(n);
+        d.ownIp = n->ip;
+        bool wasOn = d.on;
+        std::string wasIp = d.ip;
+        ++shown;
+        INT_PTR r = DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_RELAY), g_main, relayDlgProc, (LPARAM)&d);
+        if (r == IDABORT) { cancelled = true; break; }
+        if (r != IDOK) { ++skipped; continue; }
+        if (d.on == wasOn && (!d.on || d.ip == wasIp)) { logEvent(format("Set Relay Address: %s unchanged", n->name.c_str())); continue; }
+        if (!n->online) { logEvent(format("Set Relay Address: %s went offline before RELAYSET was sent", n->name.c_str())); continue; }
+        Message m("RELAYSET");
+        m.set("relay", boolText(d.on));
+        m.set("relay_ip", d.on ? d.ip : std::string());
+        if (sendToNode(n, m, m.oneLine())) ++sent;
+    }
+    updateStatusBar(widen(format("|  Set Relay Address: %d dialog(s), %d sent, %d skipped, %d passed over%s", shown, sent, skipped, passed,
+                                 cancelled ? ", cancelled" : "")).c_str());
+}
+
 // One dialog per checked online client, in list order; Skip moves on, Stop ends the pass.
 // Opens \NAME\<share_name>\ of every checked client in Windows Explorer. The
 // name is used rather than the address so that the window title shows the node.
@@ -3451,6 +3568,10 @@ void onNet(NetEvent* e)
                                   e->msg.get("path").c_str(), e->msg.get("found").c_str(),
                                   parseBool(e->msg.get("running")) ? ", TeamViewer was already running" : "");
             else text = format("TEAMVIEWER failed on %s: %s", n->name.c_str(), e->msg.get("error").c_str());
+        } else if (cmd == "RELAYSET") {
+            if (ok) text = format("RELAYSET ok on %s: relay %s%s%s", n->name.c_str(), parseBool(e->msg.get("relay")) ? "on" : "off",
+                                  parseBool(e->msg.get("relay")) ? " to " : "", e->msg.get("relay_ip").c_str());
+            else text = format("RELAYSET failed on %s: %s", n->name.c_str(), e->msg.get("error").c_str());
         } else if (cmd == "RELAY") {
             std::string op = e->msg.get("op"), dest = e->msg.get("dest");
             if (op == "probe") {
@@ -4118,6 +4239,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CMD_UNMUTE: sendAudio("unmute"); return 0;
         case IDC_CMD_SOUND: openPlaySound(); return 0;
         case IDC_CMD_REMOVE_OFFLINE: removeCheckedOffline(); return 0;
+        case IDC_CMD_SET_RELAY: setRelayAddress(); return 0;
         case IDC_CMD_SHUTDOWN_NODE: shutdownChecked(); return 0;
         case IDC_CMD_ABORT_SHUTDOWN: sendPower("abort"); return 0;
         case IDC_FLAG_WOL: case IDC_FLAG_BOOT: case IDC_FLAG_AUTOLOGIN: case IDC_FLAG_AUTOROD: case IDC_FLAG_AUTOLIGHTNING:

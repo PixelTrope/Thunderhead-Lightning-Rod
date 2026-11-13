@@ -185,10 +185,11 @@ Thunderhead may send at any time:
 | AUDIO | action        | set the master mute of the default playback device: `mute` or `unmute`; reply ACK with the state read back (see Audio); agents from 0.2.16 |
 | TEAMVIEWER |          | start the installed TeamViewer, found through the registry or the Start menu, and bring its window to the front; reply ACK with where it was found (see TeamViewer); agents from 0.2.18 |
 | SOUND | action, file, logon, hello, logoff | `action=play`: play `file`, a name in the agent's `sounds` folder, on the node's playback device; `action=scheme`: take the file names of the agent's own three sound events; reply ACK with `action=` and `file=` (see Audio); agents from 0.2.21 |
+| RELAYSET | relay, relay_ip | set the agent's SMB1 relay values as its Settings dialog would (`relay=yes|no`, `relay_ip=`), save them and send HELLO again when they changed; reply ACK with the values in force (see SMB1 relay); agents from 0.3.1 |
 | RELAY | op, job, dest, share, pattern | SMB1 relay work for the client at `dest`: `op=probe` answers whether `\\dest\share\` opens from the node; `op=push` copies what Thunderhead staged under `relay\<job>` in the node's own share to the root of that share; `op=pull` fetches the newest file matching `pattern` from it into `relay\<job>`; reply ACK with `op=`, `job=`, `dest=`, `files=`, `bytes=` and `file=` (see SMB1 relay); agents from 0.3.0 |
 
 The agent replies to START, STOP, PRIORITY, EXIT, RESTART, UPDATE, RENAME, REBOOT,
-SHUTDOWN, POWER, AUDIO, TEAMVIEWER, SOUND, RELAY and BATCH with (RENAME adds `name=` with the name that was applied;
+SHUTDOWN, POWER, AUDIO, TEAMVIEWER, SOUND, RELAYSET, RELAY and BATCH with (RENAME adds `name=` with the name that was applied;
 START adds `gen=`, `path=`, `version=` and `found=` as described under Lightning lookup;
 PRIORITY adds `level=` as requested and `applied=` with the class Windows reports
 afterwards, and answers `ok=no` when the two differ, as when RealTime is
@@ -363,6 +364,18 @@ sends after each HELLO of a relay (an agent that does not act as a relay shows
 The relay node must be able to open `\\ADDRESS\<share_name>\` with its own
 logon (the same local account name and password on both machines passes
 through); no credentials travel in a message.
+
+*Set Relay Address* (LightningRod Control) sets the same values from
+Thunderhead: one dialog per checked online Windows 7 client, in list order,
+showing its name and address, a Relay On/Off switch with its current state and
+the destination address, which is enabled only while the switch is on. OK
+sends `RELAYSET relay=yes|no relay_ip=` when something changed, Skip leaves the
+client as it is, Cancel All ends the pass. The agent applies the values with
+the checks of its own dialog (a four-number address that is not its own),
+saves them, answers ACK with the values in force and sends HELLO again. Checked
+clients that are offline, not running Windows 7 (its HELLO `os` version 6.1),
+or whose agent is older than 0.3.1 are passed over with a line in the event
+log; the status bar counts dialogs, sent, skipped and passed over.
 
 The operations and their messages:
 

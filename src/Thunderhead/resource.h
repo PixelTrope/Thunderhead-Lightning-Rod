@@ -7,6 +7,7 @@
 #define IDD_BATCH               105
 #define IDD_TEXTBOX             106
 #define IDD_SOUND               107
+#define IDD_RELAY               108
 
 #define IDM_FILE_EXIT           1001
 #define IDM_HELP_ABOUT          1301
@@ -60,7 +61,8 @@
 #define IDC_CMD_REMOVE_OFFLINE  3029
 #define IDC_CMD_START50         3030
 #define IDC_CMD_SETTINGS        3031
-#define IDC_CMD_LAST            3031
+#define IDC_CMD_SET_RELAY       3032
+#define IDC_CMD_LAST            3032
 
 // rename dialog
 #define IDC_RENAME_INFO         2301
@@ -83,6 +85,12 @@
 #define IDC_SOUND_LIST          2702
 #define IDC_SOUND_PLAY_HERE     2703
 #define IDC_SOUND_PLAY_CLIENTS  2704
+
+// Set Relay Address dialog
+#define IDC_RELAY_INFO          2901
+#define IDC_RELAY_SWITCH        2902   // Relay On/Off slider (owner-drawn button)
+#define IDC_RELAY_STATE         2903
+#define IDC_RELAY_DEST          2904
 
 // Settings dialog, sound scheme section
 #define IDC_SCHEME_DEFAULT      2801
