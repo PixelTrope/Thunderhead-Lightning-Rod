@@ -114,11 +114,13 @@ from it and treats the session as unbroken. Both sides play their HELLO sound
 for that HELLO as for any other.
 
 Thunderhead replies with the report interval in seconds (5 to 60 in steps of 5,
-default 15):
+default 15) and the node's phase: the delay in milliseconds before its first
+report (see Report spacing):
 
 ```
 SET
 interval=15
+phase=7200
 ```
 
 Two more messages follow the SET of every HELLO: `AUDIO action=unmute` or
@@ -169,7 +171,7 @@ Thunderhead may send at any time:
 
 | Verb  | Fields        | Agent action                                           |
 |-------|---------------|--------------------------------------------------------|
-| SET   | interval      | change the report interval                             |
+| SET   | interval, phase | change the report interval; `phase=` is the delay in ms before the next report, after which reports follow at the interval (agents from 0.3.2; the full interval when absent) |
 | START | gen           | start the installed Lightning of generation `gen`: 3 = Bryce 7 and 7 Pro, 2 = Bryce 6.x, 1 = Bryce 5.x (3 when absent, as agents before 0.2.19 take it); reply ACK with `gen=`, `path=`, `version=` and `found=` (see Lightning lookup) |
 | STOP  |               | terminate Lightning.exe                                |
 | PING  |               | reply PONG                                             |
@@ -186,7 +188,7 @@ Thunderhead may send at any time:
 | TEAMVIEWER |          | start the installed TeamViewer, found through the registry or the Start menu, and bring its window to the front; reply ACK with where it was found (see TeamViewer); agents from 0.2.18 |
 | SOUND | action, file, logon, hello, logoff | `action=play`: play `file`, a name in the agent's `sounds` folder, on the node's playback device; `action=scheme`: take the file names of the agent's own three sound events; reply ACK with `action=` and `file=` (see Audio); agents from 0.2.21 |
 | RELAYSET | relay, relay_ip | set the agent's SMB1 relay values as its Settings dialog would (`relay=yes|no`, `relay_ip=`), save them and send HELLO again when they changed; reply ACK with the values in force (see SMB1 relay); agents from 0.3.1 |
-| RELAY | op, job, dest, share, pattern | SMB1 relay work for the client at `dest`: `op=probe` answers whether `\\dest\share\` opens from the node; `op=push` copies what Thunderhead staged under `relay\<job>` in the node's own share to the root of that share; `op=pull` fetches the newest file matching `pattern` from it into `relay\<job>`; reply ACK with `op=`, `job=`, `dest=`, `files=`, `bytes=` and `file=` (see SMB1 relay); agents from 0.3.0 |
+| RELAY | op, job, dest, share, pattern | SMB1 relay work for the client at `dest`, each op on a thread so that an unreachable destination never stalls the agent's reports (probe on a thread from 0.3.2): `op=probe` answers whether `\\dest\share\` opens from the node; `op=push` copies what Thunderhead staged under `relay\<job>` in the node's own share to the root of that share; `op=pull` fetches the newest file matching `pattern` from it into `relay\<job>`; reply ACK with `op=`, `job=`, `dest=`, `files=`, `bytes=` and `file=` (see SMB1 relay); agents from 0.3.0 |
 
 The agent replies to START, STOP, PRIORITY, EXIT, RESTART, UPDATE, RENAME, REBOOT,
 SHUTDOWN, POWER, AUDIO, TEAMVIEWER, SOUND, RELAYSET, RELAY and BATCH with (RENAME adds `name=` with the name that was applied;
@@ -205,6 +207,37 @@ error=
 ```
 
 and to PING with `PONG`.
+
+## Report spacing
+
+An agent times each report from the one it has just sent, so the moment of its
+first report fixes its place in the interval for the whole session. Identical
+units started together send HELLO within a second or two of each other and would
+otherwise report in one bunch every interval. Thunderhead therefore deals every
+node a slot: the SET that answers a HELLO carries `phase=`, the delay in
+milliseconds before the agent's first report, chosen as the middle of the widest
+gap between the reports Thunderhead expects from the other online nodes (the
+whole interval when the node is the only one). A renewed HELLO is answered with
+the slot the node already holds. When the interval changes in Settings, the SET
+sent to every online node deals the slots out evenly, `interval / nodes` apart.
+Thunderhead keeps the expected time of each node's next report from the SET it
+sent and from every REPORT that arrives; agents before 0.3.2 ignore `phase=`
+and are expected a full interval after the SET.
+
+Slots dealt at HELLO still leave nodes in the same clock second now and then,
+so every REPORT is also placed on arrival: Thunderhead counts the online nodes
+whose latest REPORT or HELLO arrived in the same clock second (its own clock,
+whole seconds). The first report in a second is left alone; the second, third
+and fourth are nudged by 1, 2 and 3 s respectively; a fifth or later one is left
+for the next interval to sort out. The nudge is given by waiting that many
+seconds and then sending the node `SET interval= phase=<interval>`; the agent
+times its next report from that SET, so the interval then running is longer by
+the nudge and only that one, after which the node keeps the moved slot. One
+nudge is pending per node at most, a node alone in its second is sent nothing,
+and the event log records each nudge with the node's place in the second.
+Because the SET itself re-times the agent, the nudge works with every agent
+version. Nodes can only end up one per second when the interval has at least as
+many seconds as there are nodes online.
 
 ## Offline rule
 

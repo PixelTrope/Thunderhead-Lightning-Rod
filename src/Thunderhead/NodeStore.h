@@ -25,6 +25,9 @@ struct NodeRecord {
     Message hello;                   // static fields
     Message report;                  // latest REPORT
     unsigned long long lastReportMs; // tickMs() of the latest REPORT
+    unsigned long long nextReportMs; // tickMs() when its next REPORT is due: the slot the node holds in the interval (0 unknown)
+    unsigned long long nudgeDueMs;   // tickMs() when the nudge SET is to be sent (0 none): see report spacing
+    unsigned long long arrivalSec;   // clock second (UTC seconds) in which its latest REPORT or HELLO arrived
     unsigned long long onlineSinceMs;
     bool updating;                   // update in progress: staging, then UPDATE sent, until the new agent connects
     bool updateStaged;               // LightningRod.new is on the node and UPDATE has been sent
@@ -41,7 +44,7 @@ struct NodeRecord {
 
     NodeRecord()
         : wol(false), boot(false), autoLogin(false), autoRod(false), autoLightning(false), autoShutdown(false),
-          online(false), conn(-1), lastReportMs(0), onlineSinceMs(0), updating(false), updateStaged(false), updatePrompted(false), updateStartMs(0),
+          online(false), conn(-1), lastReportMs(0), nextReportMs(0), nudgeDueMs(0), arrivalSec(0), onlineSinceMs(0), updating(false), updateStaged(false), updatePrompted(false), updateStartMs(0),
           rebootAfterRename(false), pingPending(false), haveClockOffset(false), clockOffsetMs(0), pingSentMs(0), updateViaRelay(false) {}
 };
 

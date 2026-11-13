@@ -28,6 +28,8 @@
 #include <iphlpapi.h>
 #include <icmpapi.h>
 #include <objbase.h>
+#include <algorithm>
+#include <cstdlib>
 #include <map>
 #include <string>
 #include <vector>
@@ -42,6 +44,7 @@ const UINT WM_NET = WM_APP + 1;
 const UINT WM_UPDATE_DONE = WM_APP + 2;   // lParam: UpdateResult*
 const UINT WM_THEME_CHANGED = WM_APP + 5; // to every other top-level window of this thread: dress for the current scheme
 const UINT_PTR kTimerId = 1;
+const UINT_PTR kNudgeTimerId = 2;   // 100 ms while a nudge SET is pending
 
 HINSTANCE g_inst = NULL;
 HWND g_main = NULL, g_status = NULL;
@@ -3079,19 +3082,110 @@ void setOffline(NodeRecord* n, const std::string& reason)
     if (g_staticNode == n) showStaticPane(n);
 }
 
+// ---------------------------------------------------------------- report spacing
+// Identical units booted together send HELLO within a second or two of each other
+// and, left alone, keep reporting in that bunch for the whole session, because an
+// agent times its next report from the one it has just sent. Thunderhead therefore
+// answers every HELLO with the interval and a phase: the delay in milliseconds
+// before the agent's first report, chosen as the middle of the widest gap between
+// the reports expected from the other online nodes. The agent's own re-arming
+// then keeps the node in that slot. Agents before 0.3.2 ignore the phase.
+const char* const kPhaseAgent = "0.3.2";
+
+// Where a node's next report falls within the interval, counted from now; -1 unknown.
+int reportPhaseOf(const NodeRecord* n, unsigned long long now, long long intervalMs)
+{
+    if (n->nextReportMs == 0) return -1;
+    long long d = (long long)(n->nextReportMs - now) % intervalMs;
+    if (d < 0) d += intervalMs;
+    return (int)d;
+}
+
+// The middle of the widest gap between the other online nodes' slots; the whole
+// interval when this node is the only one.
+int freeReportPhase(const NodeRecord* self, unsigned long long now)
+{
+    long long intervalMs = (long long)g_store->settings.intervalSec * 1000;
+    std::vector<long long> slots;
+    std::vector<NodeRecord*>& nodes = g_store->nodes();
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        if (nodes[i] == self || !nodes[i]->online) continue;
+        int p = reportPhaseOf(nodes[i], now, intervalMs);
+        if (p >= 0) slots.push_back(p);
+    }
+    if (slots.empty()) return (int)intervalMs;
+    std::sort(slots.begin(), slots.end());
+    long long bestStart = slots.back(), bestGap = slots.front() + intervalMs - slots.back();   // the gap across the wrap
+    for (size_t i = 1; i < slots.size(); ++i) {
+        long long gap = slots[i] - slots[i - 1];
+        if (gap > bestGap) { bestGap = gap; bestStart = slots[i - 1]; }
+    }
+    return (int)((bestStart + bestGap / 2) % intervalMs);
+}
+
+// SET interval= phase= to one node, and the slot it is then expected to keep.
+void sendSchedule(NodeRecord* n, int phaseMs, unsigned long long now)
+{
+    Message m("SET");
+    m.set("interval", (long long)g_store->settings.intervalSec);
+    m.set("phase", (long long)phaseMs);
+    if (!g_server->send(n->conn, m)) return;
+    logNode(*n, "-> " + m.oneLine());
+    bool knowsPhase = compareVersions(n->hello.get("agent"), kPhaseAgent) >= 0;
+    n->nextReportMs = now + (unsigned long long)(knowsPhase ? phaseMs : g_store->settings.intervalSec * 1000);
+}
+
+// Reports that arrive in the same clock second are nudged apart: the first one
+// in a second is left alone, the second, third and fourth get 1, 2 and 3 s
+// respectively, any further ones are left for the next interval. The nudge is
+// given by sending the node SET interval= phase=interval that many seconds after
+// its report; the agent times its next report from the SET, so the one interval
+// then running is longer by the nudge and only that one, and the node's slot
+// has moved by the nudge and stays there. Works with every agent, since the SET
+// itself re-times the agent.
+void scheduleNudge(NodeRecord* n, int place, unsigned long long now)
+{
+    if (n->nudgeDueMs) return;
+    int nudgeSec = place - 1;
+    n->nudgeDueMs = now + (unsigned long long)nudgeSec * 1000;
+    static const char* const ordinal[] = { "", "first", "second", "third", "fourth" };
+    logEvent(format("%s: %s report in the same clock second, its next interval is nudged +%d s", n->name.c_str(), ordinal[place], nudgeSec));
+    SetTimer(g_main, kNudgeTimerId, 100, NULL);
+}
+
+void onNudgeTimer()
+{
+    unsigned long long now = tickMs();
+    bool pending = false;
+    std::vector<NodeRecord*>& nodes = g_store->nodes();
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        NodeRecord* n = nodes[i];
+        if (!n->nudgeDueMs) continue;
+        if (!n->online) { n->nudgeDueMs = 0; continue; }
+        if (now < n->nudgeDueMs) { pending = true; continue; }
+        n->nudgeDueMs = 0;
+        sendSchedule(n, g_store->settings.intervalSec * 1000, now);
+    }
+    if (!pending) KillTimer(g_main, kNudgeTimerId);
+}
+
 void setIntervalAll(int sec)
 {
     g_store->settings.intervalSec = sec;
     g_store->saveSettings();
-    g_server->setInterval(sec);
-    Message m("SET");
-    m.set("interval", (long long)sec);
+    // Every online node is re-anchored by this SET, so the slots are dealt out
+    // evenly in one pass instead of one gap at a time.
     std::vector<NodeRecord*>& nodes = g_store->nodes();
-    for (size_t i = 0; i < nodes.size(); ++i) {
-        if (!nodes[i]->online) continue;
-        if (g_server->send(nodes[i]->conn, m)) logNode(*nodes[i], "-> " + m.oneLine());
+    std::vector<NodeRecord*> online;
+    for (size_t i = 0; i < nodes.size(); ++i) if (nodes[i]->online) online.push_back(nodes[i]);
+    unsigned long long now = tickMs();
+    for (size_t i = 0; i < online.size(); ++i) {
+        online[i]->nudgeDueMs = 0;
+        sendSchedule(online[i], (int)((unsigned long long)sec * 1000 * (i + 1) / online.size()), now);
     }
-    logEvent(format("report interval set to %d s", sec));
+    logEvent(online.empty() ? format("report interval set to %d s", sec)
+                            : format("report interval set to %d s, %u node(s) spaced %d ms apart",
+                                     sec, (unsigned)online.size(), (int)(sec * 1000 / (int)online.size())));
     updateStatusBar();
 }
 
@@ -3485,6 +3579,8 @@ void onNet(NetEvent* e)
         n->hello = e->msg;
         if (!again) n->report = Message();
         n->lastReportMs = now;
+        if (!again) { n->nextReportMs = 0; n->nudgeDueMs = 0; }
+        n->arrivalSec = utcNowMs() / 1000;   // a HELLO occupies its clock second like a report
         if (!again) n->onlineSinceMs = now;
         if (n->updating) {
             n->updating = false;
@@ -3494,7 +3590,11 @@ void onNet(NetEvent* e)
         else logEvent(format("%s online from %s, agent %s%s", n->name.c_str(), n->ip.c_str(),
                              e->msg.get("agent").c_str(), isNew ? " (new client)" : ""));
         logNode(*n, "<- " + e->msg.oneLine());
-        logNode(*n, format("-> SET interval=%d", g_store->settings.intervalSec));
+        // The SET that answers HELLO: the interval and the node's report slot. A
+        // renewed HELLO keeps the slot the node already holds.
+        int phase = again ? reportPhaseOf(n, now, (long long)g_store->settings.intervalSec * 1000) : -1;
+        if (phase < 0) phase = freeReportPhase(n, now);
+        sendSchedule(n, phase, now);
         playEventSound(SoundThHello);                        // every HELLO, the renewed one as well
         if (!again) {
             sendAudioSwitch(n, g_store->settings.lrAudio);   // All Lightning Rods Audio
@@ -3525,6 +3625,16 @@ void onNet(NetEvent* e)
         for (std::map<std::string, std::string>::const_iterator it = e->msg.fields.begin(); it != e->msg.fields.end(); ++it)
             n->report.fields[it->first] = it->second;
         n->lastReportMs = now;
+        n->nextReportMs = now + (unsigned long long)g_store->settings.intervalSec * 1000;
+        // Report spacing: the place of this report among those that arrived in
+        // the same clock second; the second to fourth are nudged.
+        unsigned long long sec = utcNowMs() / 1000;
+        int place = 1;
+        std::vector<NodeRecord*>& all = g_store->nodes();
+        for (size_t i = 0; i < all.size(); ++i)
+            if (all[i] != n && all[i]->online && all[i]->arrivalSec == sec) ++place;
+        n->arrivalSec = sec;
+        if (place >= 2 && place <= 4) scheduleNudge(n, place, now);
         logNode(*n, "<- " + e->msg.oneLine());
         if (e->msg.has("utc_ms")) {
             n->clockOffsetMs = (long long)(_strtoui64(e->msg.get("utc_ms").c_str(), NULL, 10) - utcNowMs());
@@ -4253,7 +4363,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     }
-    case WM_TIMER: if (wp == kTimerId) onTimer(); return 0;
+    case WM_TIMER: if (wp == kTimerId) onTimer(); else if (wp == kNudgeTimerId) onNudgeTimer(); return 0;
     case WM_NET: { NetEvent* e = (NetEvent*)lp; onNet(e); delete e; return 0; }
     case WM_UPDATE_DONE: { UpdateResult* r = (UpdateResult*)lp; onUpdateDone(r); delete r; return 0; }
     case WM_NOTIFY: {
@@ -4416,6 +4526,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show)
     g_inst = inst;
     g_dir = exeDirectory();
     InitializeCriticalSection(&g_relayLock);
+    srand((unsigned)GetTickCount());
     g_events.open(g_dir + L"\\logs", L"thunderhead");
     CreateDirectoryW((g_dir + L"\\logs\\nodes").c_str(), NULL);
     logEvent("Thunderhead " TLR_VERSION_STRING " starting");
@@ -4454,7 +4565,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show)
     std::vector<NodeRecord*>& nodes = store.nodes();
     for (size_t i = 0; i < nodes.size(); ++i) refreshRow(nodes[i]);
 
-    if (!server.start(g_main, WM_NET, (unsigned short)store.settings.tcpPort, hostName(), store.settings.intervalSec)) {
+    if (!server.start(g_main, WM_NET, (unsigned short)store.settings.tcpPort, hostName())) {
         MessageBoxW(g_main, L"The listening ports could not be opened. Another Thunderhead may be running; see the log.",
                     L"Thunderhead", MB_OK | MB_ICONERROR);
     }

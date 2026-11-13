@@ -223,7 +223,13 @@ DWORD WINAPI relayTaskThread(LPVOID p)
     RelayTask* t = (RelayTask*)p;
     std::wstring destRoot = L"\\\\" + widen(t->dest) + L"\\" + widen(t->share) + L"\\";
     std::wstring stage = relayDir() + L"\\" + widen(t->job) + L"\\";
-    if (t->op == "push") {
+    if (t->op == "probe") {
+        // Whether the destination share opens from here. On a thread like the
+        // copies, because Windows takes minutes to give up on an address that
+        // has no host, and the agent must keep reporting meanwhile.
+        if (GetFileAttributesW(destRoot.c_str()) == INVALID_FILE_ATTRIBUTES) t->error = narrow(destRoot) + ": " + lastErrorText((int)GetLastError());
+        else t->ok = true;
+    } else if (t->op == "push") {
         // Everything Thunderhead placed under relay\<job> goes to the root of the
         // destination share, folders and all; the staging folder goes afterwards.
         if (GetFileAttributesW(stage.c_str()) == INVALID_FILE_ATTRIBUTES) {
@@ -941,9 +947,15 @@ private:
             int iv = m.getInt("interval", intervalSec_);
             if (iv < 1) iv = 1;
             if (iv > 3600) iv = 3600;
-            if (iv != intervalSec_) logLine(format("report interval %d s", iv));
             intervalSec_ = iv;
-            nextReport_ = tickMs() + (unsigned long long)intervalSec_ * 1000;
+            // phase: the slot Thunderhead dealt this node, as the delay before the
+            // first report of the new schedule; later reports follow at the
+            // interval from that one, which keeps the slot. The full interval
+            // when Thunderhead sends none.
+            int phase = m.getInt("phase", -1);
+            if (phase < 0 || phase > intervalSec_ * 1000) phase = intervalSec_ * 1000;
+            nextReport_ = tickMs() + (unsigned long long)phase;
+            logLine(format("report interval %d s, next report in %d ms", intervalSec_, phase));
             EnterCriticalSection(&lock_);
             status_.intervalSec = intervalSec_;
             LeaveCriticalSection(&lock_);
@@ -974,8 +986,8 @@ private:
             // from here; op=push copies everything Thunderhead staged under
             // relay\<job> in this node's shared folder to the root of that share;
             // op=pull fetches the newest file matching pattern= from it into
-            // relay\<job>. push and pull run on a thread and are acknowledged
-            // when they end; dest= must be the address set in Settings.
+            // relay\<job>. All three run on a thread and are acknowledged when
+            // they end; dest= must be the address set in Settings.
             std::string op = trim(m.get("op")), job = trim(m.get("job")), dest = trim(m.get("dest")), share = trim(m.get("share")), err;
             bool relay;
             std::string relayIp;
@@ -985,11 +997,7 @@ private:
             else if (share.empty() || share.find_first_of("\\/") != std::string::npos) err = "share name missing";
             else if (op != "probe" && op != "push" && op != "pull") err = "unknown op \"" + op + "\"";
             else if (op != "probe" && (job.empty() || job.find_first_of("\\/:.") != std::string::npos)) err = "job must be a plain name";
-            if (err.empty() && op == "probe") {
-                std::wstring root = L"\\\\" + widen(dest) + L"\\" + widen(share) + L"\\";
-                if (GetFileAttributesW(root.c_str()) == INVALID_FILE_ATTRIBUTES) err = narrow(root) + ": " + lastErrorText((int)GetLastError());
-            }
-            if (err.empty() && op != "probe") {
+            if (err.empty()) {
                 RelayTask* t = new RelayTask();
                 t->op = op;
                 t->job = job;
@@ -1000,10 +1008,10 @@ private:
                 t->thread = CreateThread(NULL, 0, relayTaskThread, t, 0, NULL);
                 if (t->thread) {
                     relays_.push_back(t);
-                    logLine(format("RELAY %s job %s to \\\\%s\\%s\\ started", op.c_str(), job.c_str(), dest.c_str(), share.c_str()));
-                    return;   // the ACK follows from pollRelays when the copy has ended
+                    logLine(format("RELAY %s%s%s to \\\\%s\\%s\\ started", op.c_str(), job.empty() ? "" : " job ", job.c_str(), dest.c_str(), share.c_str()));
+                    return;   // the ACK follows from pollRelays when the work has ended
                 }
-                err = "could not start the copy thread";
+                err = "could not start the relay thread";
                 delete t;
             }
             logLine(format("RELAY %s%s%s: %s%s%s", op.c_str(), job.empty() ? "" : " job ", job.c_str(), err.empty() ? "ok" : "failed",
@@ -1367,8 +1375,12 @@ private:
             RelayTask* t = relays_[i];
             relays_.erase(relays_.begin() + i);
             CloseHandle(t->thread);
-            logLine(format("RELAY %s job %s: %s, %u file(s), %llu bytes%s%s%s", t->op.c_str(), t->job.c_str(), t->ok ? "ok" : "failed",
-                           t->files, t->bytes, t->file.empty() ? "" : ", ", t->file.c_str(), t->error.empty() ? "" : (": " + t->error).c_str()));
+            if (t->op == "probe")
+                logLine(format("RELAY probe \\\\%s\\%s\\: %s%s%s", t->dest.c_str(), t->share.c_str(), t->ok ? "opens" : "failed",
+                               t->error.empty() ? "" : ": ", t->error.c_str()));
+            else
+                logLine(format("RELAY %s job %s: %s, %u file(s), %llu bytes%s%s%s", t->op.c_str(), t->job.c_str(), t->ok ? "ok" : "failed",
+                               t->files, t->bytes, t->file.empty() ? "" : ", ", t->file.c_str(), t->error.empty() ? "" : (": " + t->error).c_str()));
             Message ack("ACK");
             ack.set("cmd", "RELAY");
             ack.set("ok", boolText(t->ok));

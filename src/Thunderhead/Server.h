@@ -23,11 +23,10 @@ class Server {
 public:
     Server();
     ~Server();
-    bool start(HWND window, UINT message, unsigned short tcpPort, const std::string& hostName, int intervalSec);
+    bool start(HWND window, UINT message, unsigned short tcpPort, const std::string& hostName);
     void stop();
     bool send(int conn, const Message& m);     // from any thread
     void close(int conn);                      // from any thread
-    void setInterval(int sec);                 // value sent in SET after HELLO
     unsigned short tcpPort() const { return tcpPort_; }
 
 private:
@@ -48,7 +47,6 @@ private:
     UINT message_;
     unsigned short tcpPort_;
     std::string hostName_;
-    volatile long interval_;
     volatile long stopFlag_;
     SOCKET udp_, listen_;
     HANDLE thread_;

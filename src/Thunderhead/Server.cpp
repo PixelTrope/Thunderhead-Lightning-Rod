@@ -6,7 +6,7 @@
 namespace tlr {
 
 Server::Server()
-    : window_(NULL), message_(0), tcpPort_(0), interval_(kDefaultReportInterval), stopFlag_(0),
+    : window_(NULL), message_(0), tcpPort_(0), stopFlag_(0),
       udp_(INVALID_SOCKET), listen_(INVALID_SOCKET), thread_(NULL), nextId_(1)
 {
     InitializeCriticalSection(&lock_);
@@ -18,13 +18,12 @@ Server::~Server()
     DeleteCriticalSection(&lock_);
 }
 
-bool Server::start(HWND window, UINT message, unsigned short tcpPort, const std::string& hostName, int intervalSec)
+bool Server::start(HWND window, UINT message, unsigned short tcpPort, const std::string& hostName)
 {
     window_ = window;
     message_ = message;
     tcpPort_ = tcpPort;
     hostName_ = hostName;
-    interval_ = intervalSec;
 
     udp_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     listen_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -64,11 +63,6 @@ void Server::stop()
     LeaveCriticalSection(&lock_);
     if (udp_ != INVALID_SOCKET) { closesocket(udp_); udp_ = INVALID_SOCKET; }
     if (listen_ != INVALID_SOCKET) { closesocket(listen_); listen_ = INVALID_SOCKET; }
-}
-
-void Server::setInterval(int sec)
-{
-    InterlockedExchange(&interval_, sec);
 }
 
 Server::Conn* Server::findConn(int id)
@@ -193,9 +187,8 @@ void Server::loop()
             bool dropped = false;
             while (c->parser.next(m)) {
                 if (m.verb == "HELLO") {
-                    Message set("SET");
-                    set.set("interval", (long long)interval_);
-                    if (!sendAll(c->s, set.encode())) { dropConn(i, "send failed"); dropped = true; break; }
+                    // The SET that answers HELLO is sent by the window thread, which
+                    // knows the report slots of the other nodes (see sendSchedule).
                     post(NetEvent::Hello, c->id, c->ip, m, "");
                 } else if (m.verb == "REPORT") {
                     post(NetEvent::Report, c->id, c->ip, m, "");
