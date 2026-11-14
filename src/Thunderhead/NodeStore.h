@@ -15,7 +15,8 @@ struct NodeRecord {
     std::string mac;
     std::string name;
     std::string group;
-    bool wol, boot, autoLogin, autoRod, autoLightning;
+    bool wol, boot, autoLogin, autoRod, autoLightning;   // the Info Flags of Client details: stored only, they change no setting or function
+    std::string bootAlarm;           // Boot on Alarm time of day, "HH:MM" in 24-hour form; empty when never set
     bool autoShutdown;               // Auto Shutdown column; stored only, the shutdown daemon is not designed yet
     std::string comment;
     // live

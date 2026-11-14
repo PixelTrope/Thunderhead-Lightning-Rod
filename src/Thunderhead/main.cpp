@@ -30,6 +30,7 @@
 #include <objbase.h>
 #include <algorithm>
 #include <cstdlib>
+#include <cwchar>
 #include <map>
 #include <string>
 #include <vector>
@@ -51,6 +52,7 @@ HWND g_main = NULL, g_status = NULL;
 HWND g_inventoryPane = NULL, g_staticPane = NULL, g_commandPane = NULL;
 HWND g_list = NULL;                       // Client Inventory
 HWND g_staticTitle = NULL, g_staticList = NULL, g_flags[5] = { NULL, NULL, NULL, NULL, NULL };
+HWND g_flagHeader = NULL, g_bootAlarm = NULL;   // the Info Flags header and the Boot on Alarm time picker
 HWND g_edit = NULL;                       // in-place editor over a Group or Comment cell
 int g_editRow = -1, g_editCol = -1;
 bool g_editClosing = false;
@@ -127,7 +129,7 @@ const CommandDef kCommands[] = {
     { IDC_CMD_CHECK_OUTDATED,  L"Check Outdated",                 NULL,      true,  GroupList },
     { IDC_CMD_OPEN_SHARE,      L"Open Client's Shared Folder",    NULL,      true,  GroupNode },
     { IDC_CMD_COPY,            L"Copy Files or Folder to Client", NULL,      true,  GroupNode },
-    { IDC_CMD_BATCH,           L"Run Remote Batch File",          NULL,      true,  GroupNode },
+    { IDC_CMD_BATCH,           L"Run Remote File",                NULL,      true,  GroupNode },
     { IDC_CMD_NETPING,         L"Network Ping",                   NULL,      true,  GroupNode },
     { IDC_CMD_WOL,             L"Send Wake On LAN Magic Packet",  NULL,      true,  GroupNode },
     { IDC_CMD_SET_TIME,        L"Set Client Date and Time",       NULL,      true,  GroupNode },
@@ -549,6 +551,54 @@ void drawStatusText(const DRAWITEMSTRUCT* di)
 
 // ---------------------------------------------------------------- static pane
 
+void showStaticPane(NodeRecord* n);
+
+// Boot on Alarm: the time of day beside the flag, kept in nodes.txt as
+// boot_alarm=HH:MM (24-hour); the picker shows it with AM and PM. A node that
+// has never had one shows 06:00 AM, which is saved only when the picker is
+// changed. Like the flags, the value is stored and nothing acts on it yet.
+bool parseBootAlarm(const std::string& text, int& hour, int& minute)
+{
+    if (text.size() != 5 || text[2] != ':') return false;
+    hour = atoi(text.substr(0, 2).c_str());
+    minute = atoi(text.substr(3, 2).c_str());
+    return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59;
+}
+
+std::wstring bootAlarmText(const std::string& stored)
+{
+    int hour, minute;
+    if (!parseBootAlarm(stored, hour, minute)) return widen(stored);
+    int h12 = hour % 12 == 0 ? 12 : hour % 12;
+    return widen(format("%02d:%02d %s", h12, minute, hour < 12 ? "AM" : "PM"));
+}
+
+void showBootAlarm(const NodeRecord* n)
+{
+    int hour = 6, minute = 0;
+    if (!n->bootAlarm.empty() && !parseBootAlarm(n->bootAlarm, hour, minute)) { hour = 6; minute = 0; }
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    st.wHour = (WORD)hour;
+    st.wMinute = (WORD)minute;
+    st.wSecond = 0;
+    st.wMilliseconds = 0;
+    SendMessageW(g_bootAlarm, DTM_SETSYSTEMTIME, GDT_VALID, (LPARAM)&st);
+}
+
+// The picker changed: save the time for the node shown.
+void bootAlarmChanged(const NMDATETIMECHANGE* c)
+{
+    NodeRecord* n = g_staticNode;
+    if (!n || c->dwFlags != GDT_VALID) return;
+    std::string value = format("%02d:%02d", c->st.wHour, c->st.wMinute);
+    if (value == n->bootAlarm) return;
+    n->bootAlarm = value;
+    g_store->save();
+    logEvent(format("%s boot_alarm=%s", n->name.c_str(), value.c_str()));
+    if (g_staticNode == n) showStaticPane(n);
+}
+
 void showStaticPane(NodeRecord* n)
 {
     g_staticNode = n;
@@ -563,6 +613,7 @@ void showStaticPane(NodeRecord* n)
     CheckDlgButton(g_staticPane, IDC_FLAG_AUTOLOGIN, n->autoLogin ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(g_staticPane, IDC_FLAG_AUTOROD, n->autoRod ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(g_staticPane, IDC_FLAG_AUTOLIGHTNING, n->autoLightning ? BST_CHECKED : BST_UNCHECKED);
+    showBootAlarm(n);
 
     // Every field there is: the stored record, the connection, the HELLO, the
     // latest report (kept for an offline node), then any field of HELLO or
@@ -579,6 +630,7 @@ void showStaticPane(NodeRecord* n)
     add(L"Group", widen(n->group));
     add(L"Comment", widen(n->comment));
     add(L"Auto Shutdown", n->autoShutdown ? L"Yes" : L"No");
+    add(L"Boot on Alarm time", n->bootAlarm.empty() ? std::wstring(L"not set") : bootAlarmText(n->bootAlarm));
     add(L"Agent", widen(h.get("agent")));
     add(L"OS", widen(h.get("os")));
     add(L"CPU", widen(h.get("cpu")));
@@ -1903,16 +1955,148 @@ void sendWakeOnLan()
     updateStatusBar(widen(format("|  WOL magic packet sent for %d of %d checked", done, (int)targets.size())).c_str());
 }
 
-// ---------------------------------------------------------------- remote batch file
+// ---------------------------------------------------------------- notice windows
 
-// First agent version that knows BATCH.
+// A notice of Thunderhead's own, shown the way the agents show a Display
+// Message: an ordinary top-level window (Minimize, Maximize or Restore and
+// Close in its caption) with the text, an OK button and a line counting down
+// to the moment it closes by itself. Enter and Escape close it through
+// IsDialogMessage in the message loop. Several may be open at once.
+const wchar_t* const kNoticeClass = L"ThunderheadNotice";
+const UINT_PTR kNoticeTimer = 1;
+struct NoticeWindow { std::wstring text; int seconds; unsigned long long startMs; HWND textCtl, countdown, ok; };
+HFONT g_noticeFont = NULL;
+
+void layoutNotice(HWND hwnd, NoticeWindow* n)
+{
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    int w = rc.right, h = rc.bottom, margin = 14, bh = 28, bw = 96;
+    MoveWindow(n->textCtl, margin, margin, w - 2 * margin, h - 3 * margin - bh, TRUE);
+    MoveWindow(n->countdown, margin, h - margin - bh + 6, w - 3 * margin - bw, bh - 6, TRUE);
+    MoveWindow(n->ok, w - margin - bw, h - margin - bh, bw, bh, TRUE);
+}
+
+void refreshNoticeCountdown(NoticeWindow* n)
+{
+    long long left = n->seconds - (long long)((tickMs() - n->startMs) / 1000);
+    if (left < 0) left = 0;
+    SetWindowTextW(n->countdown, widen(format("Closes by itself in %lld s", left)).c_str());
+}
+
+LRESULT CALLBACK noticeProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    NoticeWindow* n = (NoticeWindow*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (msg == WM_CREATE) {
+        n = (NoticeWindow*)((CREATESTRUCTW*)lp)->lpCreateParams;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)n);
+        if (!g_noticeFont) {
+            LOGFONTW lf;
+            memset(&lf, 0, sizeof(lf));
+            if (GetObjectW(g_font, sizeof(lf), &lf)) { lf.lfHeight = lf.lfHeight * 7 / 5; g_noticeFont = CreateFontIndirectW(&lf); }
+        }
+        n->textCtl = CreateWindowExW(0, L"STATIC", n->text.c_str(), WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX, 0, 0, 10, 10, hwnd, NULL, g_inst, NULL);
+        n->countdown = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX, 0, 0, 10, 10, hwnd, NULL, g_inst, NULL);
+        n->ok = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)IDOK, g_inst, NULL);
+        SendMessageW(n->textCtl, WM_SETFONT, (WPARAM)(g_noticeFont ? g_noticeFont : g_font), TRUE);
+        SendMessageW(n->countdown, WM_SETFONT, (WPARAM)g_font, TRUE);
+        SendMessageW(n->ok, WM_SETFONT, (WPARAM)g_font, TRUE);
+        n->startMs = tickMs();
+        refreshNoticeCountdown(n);
+        themeWindow(hwnd);
+        SetTimer(hwnd, kNoticeTimer, 1000, NULL);
+        return 0;
+    }
+    if (!n) return DefWindowProcW(hwnd, msg, wp, lp);
+    switch (msg) {
+    case WM_THEME_CHANGED: themeWindow(hwnd); return 0;
+    case WM_ERASEBKGND: {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillRect((HDC)wp, &rc, themeBrush(theme().paneBack));
+        return 1;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN:
+        if (HBRUSH b = themeCtlColor(msg, (HDC)wp, (HWND)lp)) return (LRESULT)b;
+        break;
+    case WM_DRAWITEM: return themeDrawPushButton((const DRAWITEMSTRUCT*)lp) ? TRUE : FALSE;
+    case WM_SIZE: layoutNotice(hwnd, n); return 0;
+    case WM_SETFOCUS: SetFocus(n->ok); return 0;
+    case DM_GETDEFID: return MAKELONG(IDOK, DC_HASDEFID);   // Enter presses OK, through IsDialogMessage
+    case WM_COMMAND: if (LOWORD(wp) == IDOK || LOWORD(wp) == IDCANCEL) DestroyWindow(hwnd); return 0;
+    case WM_TIMER:
+        if (wp == kNoticeTimer) {
+            refreshNoticeCountdown(n);
+            if (tickMs() - n->startMs >= (unsigned long long)n->seconds * 1000) DestroyWindow(hwnd);
+        }
+        return 0;
+    case WM_CLOSE: DestroyWindow(hwnd); return 0;
+    case WM_DESTROY:
+        KillTimer(hwnd, kNoticeTimer);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        delete n;
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+bool isNoticeWindow(HWND top)
+{
+    wchar_t cls[64];
+    return top && GetClassNameW(top, cls, 64) && wcscmp(cls, kNoticeClass) == 0;
+}
+
+// Opens a notice over the main window; later notices step down and to the right.
+void showNotice(const std::wstring& title, const std::wstring& text, int seconds)
+{
+    static bool registered = false;
+    static int shown = 0;
+    if (!registered) {
+        WNDCLASSW wc;
+        memset(&wc, 0, sizeof(wc));
+        wc.lpfnWndProc = noticeProc;
+        wc.hInstance = g_inst;
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.hIcon = LoadIconW(g_inst, MAKEINTRESOURCEW(IDI_APP));
+        wc.lpszClassName = kNoticeClass;
+        registered = RegisterClassW(&wc) != 0;
+    }
+    NoticeWindow* n = new NoticeWindow();
+    n->text = text;
+    n->seconds = seconds;
+    n->startMs = 0;
+    n->textCtl = n->countdown = n->ok = NULL;
+    RECT mr;
+    GetWindowRect(g_main, &mr);
+    int w = 560, h = 260, step = 30 * (shown++ % 6);
+    int x = mr.left + ((mr.right - mr.left) - w) / 2 + step, y = mr.top + ((mr.bottom - mr.top) - h) / 2 + step;
+    HWND hw = CreateWindowExW(0, kNoticeClass, title.c_str(), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, x, y, w, h, NULL, NULL, g_inst, n);
+    if (!hw) { logEvent("notice window could not be created: " + lastErrorText((int)GetLastError())); delete n; return; }
+    ShowWindow(hw, SW_SHOW);
+    SetFocus(n->ok);
+}
+
+// ---------------------------------------------------------------- remote file
+
+// Run Remote File sends BATCH: a batch file or a PowerShell script as text,
+// which the agent writes to its batch folder and runs in a console window, or
+// the name of an executable already in the client's shared folder, which the
+// agent runs from there. Agents from kBatchAgent run batch files; scripts and
+// executables need kRemoteFileAgent.
 const char* const kBatchAgent = "0.2.7";
+const char* const kRemoteFileAgent = "0.3.4";
 // The text travels as two hexadecimal digits per byte inside one message, which
 // may be 65536 bytes long.
 const size_t kMaxBatchBytes = 30000;
-const wchar_t* const kBatchTitle = L"Run Remote Batch File";
+const wchar_t* const kBatchTitle = L"Run Remote File";
+enum { KindBat, KindPs1, KindExe };
+const char* const kKindNames[3] = { "bat", "ps1", "exe" };
 
 std::wstring g_batchText;       // text of the dialog, kept while Thunderhead runs
+int g_batchKind = KindBat;      // the File type radio
+std::wstring g_batchExe;        // Executable: name or relative path inside the client's shared folder
 bool g_batchMaximized = true;   // Start maximized: the console window on the client opens maximized
 bool g_batchFront = true;       // Bring to front: it is put above the client's other windows
 int g_batchOnline = 0;          // checked online clients when the dialog opened
@@ -1976,12 +2160,13 @@ bool browseBatchFile(HWND owner, std::wstring& path)
         MessageBoxW(owner, L"The file dialog could not be created.", kBatchTitle, MB_OK | MB_ICONERROR);
         return false;
     }
-    const COMDLG_FILTERSPEC types[2] = { { L"Batch files (*.bat;*.cmd)", L"*.bat;*.cmd" }, { L"All files (*.*)", L"*.*" } };
-    dlg->SetFileTypes(2, types);
+    const COMDLG_FILTERSPEC batTypes[2] = { { L"Batch files (*.bat;*.cmd)", L"*.bat;*.cmd" }, { L"All files (*.*)", L"*.*" } };
+    const COMDLG_FILTERSPEC ps1Types[2] = { { L"PowerShell scripts (*.ps1)", L"*.ps1" }, { L"All files (*.*)", L"*.*" } };
+    dlg->SetFileTypes(2, g_batchKind == KindPs1 ? ps1Types : batTypes);
     DWORD opts = 0;
     dlg->GetOptions(&opts);
     dlg->SetOptions(opts | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_FILEMUSTEXIST);
-    dlg->SetTitle(L"Select the batch file to load");
+    dlg->SetTitle(L"Select the file to load");
     dlg->SetOkButtonLabel(L"Load");
     bool ok = false;
     if (SUCCEEDED(dlg->Show(owner))) {
@@ -1999,19 +2184,19 @@ bool browseBatchFile(HWND owner, std::wstring& path)
 // The reminder shown before anything is sent. Returns true for "Yes, Execute".
 bool confirmBatch(HWND owner)
 {
-    std::wstring content = widen(format("No error checking and no check for harmful code is done on this batch file. It is sent to "
-                                        "%d checked online client(s) and run there exactly as written, with the rights Lightning Rod "
+    std::wstring content = widen(format("No error checking and no check for harmful code is done on this file. It is run on "
+                                        "%d checked online client(s) exactly as written, with the rights Lightning Rod "
                                         "has on each client.\n\n", g_batchOnline)) +
-                           L"Are you ABSOLUTELY sure you want this batch file to run on the remote client(s) ?";
+                           L"Are you ABSOLUTELY sure you want this file to run on the remote client(s) ?";
     TASKDIALOG_BUTTON buttons[2] = { { 300, L"Yes, Execute" }, { 301, L"No, Cancel" } };
     TASKDIALOGCONFIG cc;
     memset(&cc, 0, sizeof(cc));
     cc.cbSize = sizeof(cc);
     cc.hwndParent = owner;
     cc.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
-    cc.pszWindowTitle = L"Execute Remote Batch File";
+    cc.pszWindowTitle = L"Execute Remote File";
     cc.pszMainIcon = TD_WARNING_ICON;
-    cc.pszMainInstruction = L"This batch file is not checked in any way";
+    cc.pszMainInstruction = L"This file is not checked in any way";
     cc.pszContent = content.c_str();
     cc.pButtons = buttons;
     cc.cButtons = 2;
@@ -2024,8 +2209,29 @@ bool confirmBatch(HWND owner)
 void keepBatchDialog(HWND dlg)
 {
     g_batchText = windowText(GetDlgItem(dlg, IDC_BATCH_TEXT));
+    g_batchExe = trim(windowText(GetDlgItem(dlg, IDC_BATCH_EXE)));
+    if (IsDlgButtonChecked(dlg, IDC_BATCH_KIND_EXE) == BST_CHECKED) g_batchKind = KindExe;
+    else if (IsDlgButtonChecked(dlg, IDC_BATCH_KIND_PS1) == BST_CHECKED) g_batchKind = KindPs1;
+    else g_batchKind = KindBat;
     g_batchMaximized = IsDlgButtonChecked(dlg, IDC_BATCH_MAXIMIZED) == BST_CHECKED;
     g_batchFront = IsDlgButtonChecked(dlg, IDC_BATCH_FRONT) == BST_CHECKED;
+}
+
+// The File type radios: a batch file or a script is typed or loaded into the
+// text box; an executable is named in its own box and the text box is grayed.
+void batchKindChanged(HWND dlg, int kind)
+{
+    bool exe = kind == KindExe;
+    EnableWindow(GetDlgItem(dlg, IDC_BATCH_TEXT), !exe);
+    EnableWindow(GetDlgItem(dlg, IDC_BATCH_BROWSE), !exe);
+    EnableWindow(GetDlgItem(dlg, IDC_BATCH_EXE_LABEL), exe);
+    EnableWindow(GetDlgItem(dlg, IDC_BATCH_EXE), exe);
+    std::string info = exe
+        ? format("Executable to run on %d checked online client(s): a file already in each client's shared folder "
+                 "(Copy Files or Folder to Client puts it there).", g_batchOnline)
+        : format("Text of the %s to run on %d checked online client(s). Type it, paste it, or load a file with Browse for file.",
+                 kind == KindPs1 ? "PowerShell script" : "batch file", g_batchOnline);
+    SetDlgItemTextW(dlg, IDC_BATCH_INFO, widen(info).c_str());
 }
 
 INT_PTR CALLBACK batchDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
@@ -2034,8 +2240,6 @@ INT_PTR CALLBACK batchDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
     HWND edit = GetDlgItem(dlg, IDC_BATCH_TEXT);
     switch (msg) {
     case WM_INITDIALOG: {
-        SetDlgItemTextW(dlg, IDC_BATCH_INFO, widen(format("Text of the batch file to run on %d checked online client(s). Type it, "
-                                                           "paste it, or load a file with Browse for file.", g_batchOnline)).c_str());
         if (!g_batchFont) {
             HDC dc = GetDC(dlg);
             g_batchFont = CreateFontW(-MulDiv(10, GetDeviceCaps(dc, LOGPIXELSY), 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
@@ -2046,14 +2250,24 @@ INT_PTR CALLBACK batchDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         if (g_batchFont) SendMessageW(edit, WM_SETFONT, (WPARAM)g_batchFont, TRUE);
         SendMessageW(edit, EM_SETLIMITTEXT, kMaxBatchBytes, 0);
         SetWindowTextW(edit, g_batchText.c_str());
+        SetDlgItemTextW(dlg, IDC_BATCH_EXE, g_batchExe.c_str());
+        SendDlgItemMessageW(dlg, IDC_BATCH_EXE, EM_LIMITTEXT, 200, 0);
+        CheckRadioButton(dlg, IDC_BATCH_KIND_BAT, IDC_BATCH_KIND_EXE, IDC_BATCH_KIND_BAT + g_batchKind);
         CheckDlgButton(dlg, IDC_BATCH_MAXIMIZED, g_batchMaximized ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(dlg, IDC_BATCH_FRONT, g_batchFront ? BST_CHECKED : BST_UNCHECKED);
-        SetFocus(edit);
+        batchKindChanged(dlg, g_batchKind);
+        SetFocus(g_batchKind == KindExe ? GetDlgItem(dlg, IDC_BATCH_EXE) : edit);
         return FALSE;
     }
     case WM_COMMAND:
         switch (LOWORD(wp)) {
+        case IDC_BATCH_KIND_BAT:
+        case IDC_BATCH_KIND_PS1:
+        case IDC_BATCH_KIND_EXE:
+            batchKindChanged(dlg, LOWORD(wp) - IDC_BATCH_KIND_BAT);
+            return TRUE;
         case IDC_BATCH_BROWSE: {
+            keepBatchDialog(dlg);
             std::wstring path, text, error;
             if (!browseBatchFile(dlg, path)) return TRUE;
             if (!readBatchFile(path, text, error)) {
@@ -2066,15 +2280,28 @@ INT_PTR CALLBACK batchDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         }
         case IDC_BATCH_EXECUTE: {
             keepBatchDialog(dlg);
-            if (trim(g_batchText).empty()) {
-                MessageBoxW(dlg, L"The batch file text is empty.", kBatchTitle, MB_OK | MB_ICONINFORMATION);
-                return TRUE;
-            }
-            size_t bytes = narrow(g_batchText).size();
-            if (bytes > kMaxBatchBytes) {
-                MessageBoxW(dlg, widen(format("The text is %u bytes; a remote batch file may have %u at most.",
-                                              (unsigned)bytes, (unsigned)kMaxBatchBytes)).c_str(), kBatchTitle, MB_OK | MB_ICONWARNING);
-                return TRUE;
+            if (g_batchKind == KindExe) {
+                if (g_batchExe.empty()) {
+                    MessageBoxW(dlg, L"Enter the name of the executable in the client's shared folder.", kBatchTitle, MB_OK | MB_ICONINFORMATION);
+                    return TRUE;
+                }
+                if (g_batchExe.find(L':') != std::wstring::npos || g_batchExe[0] == L'\\' || g_batchExe[0] == L'/' ||
+                    g_batchExe.find(L"..") != std::wstring::npos) {
+                    MessageBoxW(dlg, L"Give the executable as a name or a path relative to the shared folder, for example tools\\setup.exe.",
+                                kBatchTitle, MB_OK | MB_ICONWARNING);
+                    return TRUE;
+                }
+            } else {
+                if (trim(g_batchText).empty()) {
+                    MessageBoxW(dlg, g_batchKind == KindPs1 ? L"The script text is empty." : L"The batch file text is empty.", kBatchTitle, MB_OK | MB_ICONINFORMATION);
+                    return TRUE;
+                }
+                size_t bytes = narrow(g_batchText).size();
+                if (bytes > kMaxBatchBytes) {
+                    MessageBoxW(dlg, widen(format("The text is %u bytes; a remote file may have %u at most.",
+                                                  (unsigned)bytes, (unsigned)kMaxBatchBytes)).c_str(), kBatchTitle, MB_OK | MB_ICONWARNING);
+                    return TRUE;
+                }
             }
             if (confirmBatch(dlg)) EndDialog(dlg, IDOK);
             return TRUE;
@@ -2089,25 +2316,62 @@ INT_PTR CALLBACK batchDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
     return FALSE;
 }
 
-// Run Remote Batch File: asks for the text, confirms, and sends it to every
-// checked online client, whose agent writes it to a file and runs it.
-void runRemoteBatch()
+// Run Remote File: asks for the file, confirms, and sends it to every checked
+// online client. A batch file or script goes as text to every client at once;
+// an executable is checked first in each client's shared folder, which is
+// reachable from here unless the client sits behind an SMB1 relay, and a
+// client without the file gets a notice instead of the command.
+void runRemoteFile()
 {
     std::vector<NodeRecord*> targets = checkedNodes();
     g_batchOnline = 0;
     for (size_t i = 0; i < targets.size(); ++i) if (targets[i]->online) ++g_batchOnline;
     if (g_batchOnline == 0) {
-        MessageBoxW(g_main, L"Check the online clients to run the batch file on first.", kBatchTitle, MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(g_main, L"Check the online clients to run the file on first.", kBatchTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
     if (DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_BATCH), g_main, batchDlgProc, 0) != IDOK) return;
-    std::string utf8 = narrow(g_batchText);
     Message m("BATCH");
-    m.set("text", hexEncode(utf8));
+    m.set("kind", std::string(kKindNames[g_batchKind]));
     m.set("maximized", std::string(boolText(g_batchMaximized)));
     m.set("front", std::string(boolText(g_batchFront)));
-    sendVersioned(m, format("BATCH (%u bytes of text%s%s)", (unsigned)utf8.size(), g_batchMaximized ? ", maximized" : "",
-                            g_batchFront ? ", to the front" : ""), kBatchAgent);
+    if (g_batchKind != KindExe) {
+        std::string utf8 = narrow(g_batchText);
+        m.set("text", hexEncode(utf8));
+        sendVersioned(m, format("BATCH %s (%u bytes of text%s%s)", kKindNames[g_batchKind], (unsigned)utf8.size(),
+                                g_batchMaximized ? ", maximized" : "", g_batchFront ? ", to the front" : ""),
+                      g_batchKind == KindBat ? kBatchAgent : kRemoteFileAgent);
+        return;
+    }
+    std::string file = narrow(g_batchExe);
+    m.set("file", file);
+    std::string label = "BATCH exe " + file + (g_batchMaximized ? ", maximized" : "") + (g_batchFront ? ", to the front" : "");
+    int sent = 0, missing = 0, old = 0;
+    for (size_t i = 0; i < targets.size(); ++i) {
+        NodeRecord* n = targets[i];
+        if (!n->online) continue;
+        std::string agent = n->hello.get("agent");
+        if (compareVersions(agent, kRemoteFileAgent) < 0) {
+            ++old;
+            logEvent(format("%s not sent to %s: agent %s is older than %s, update it first", label.c_str(), n->name.c_str(), agent.c_str(), kRemoteFileAgent));
+            continue;
+        }
+        if (!relayFor(n) && !n->ip.empty()) {
+            std::wstring path = L"\\\\" + widen(n->ip) + L"\\" + widen(g_store->settings.shareName) + L"\\" + g_batchExe;
+            if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                ++missing;
+                logEvent(format("%s not sent to %s: %s does not exist", label.c_str(), n->name.c_str(), narrow(path).c_str()));
+                showNotice(kBatchTitle, L"File does not exist on " + widen(n->name) + L":\n" + path +
+                           L"\n\nUse the 'Copy Files or Folder to Client' button to place it, and then try again.", 10);
+                continue;
+            }
+        }
+        if (sendToNode(n, m, label)) ++sent;
+    }
+    std::string status = format("|  %s sent to %d of %d checked", label.c_str(), sent, (int)targets.size());
+    if (missing) status += format(", %d without the file", missing);
+    if (old) status += format(", %d skipped: agent older than %s", old, kRemoteFileAgent);
+    updateStatusBar(widen(status).c_str());
 }
 
 // ---------------------------------------------------------------- log viewer
@@ -3803,7 +4067,7 @@ void onNet(NetEvent* e)
             if (e->msg.get("stage") == "finished")
                 text = format("BATCH %s finished on %s with exit code %s after %s s", file.c_str(),
                               n->name.c_str(), e->msg.get("exit").c_str(), e->msg.get("seconds").c_str());
-            else if (ok) text = format("BATCH started on %s as batch\\%s", n->name.c_str(), file.c_str());
+            else if (ok) text = format("BATCH%s%s started on %s: %s", e->msg.has("kind") ? " " : "", e->msg.get("kind").c_str(), n->name.c_str(), file.c_str());
             else text = format("BATCH failed on %s: %s", n->name.c_str(), e->msg.get("error").c_str());
         } else if (cmd == "TIME") {
             long long delta = atoll(e->msg.get("delta_s").c_str());
@@ -3973,14 +4237,18 @@ void layoutStaticPane()
     int y = margin;
     MoveWindow(g_staticTitle, margin, y, rc.right - 2 * margin, line, TRUE);
     y += line + 4;
+    MoveWindow(g_flagHeader, margin, y, rc.right - 2 * margin, line, TRUE);
+    y += line + 2;
     int flagWidth = (rc.right - 2 * margin) / 3;
     if (flagWidth < 120) flagWidth = 120;
-    int x = margin;
-    for (int i = 0; i < 5; ++i) {
-        if (x + flagWidth > rc.right - margin && x > margin) { x = margin; y += line + 2; }
-        MoveWindow(g_flags[i], x, y, flagWidth, line, TRUE);
-        x += flagWidth;
-    }
+    const int pickerWidth = 96, pickerHeight = line + 4;
+    // Row one: Wake On LAN, Boot on Alarm and its time; row two: the other three.
+    MoveWindow(g_flags[0], margin, y, flagWidth, line, TRUE);
+    const int alarmFlagWidth = 104;   // "Boot on Alarm" and its box; the picker follows it directly
+    MoveWindow(g_flags[1], margin + flagWidth, y, alarmFlagWidth, line, TRUE);
+    MoveWindow(g_bootAlarm, margin + flagWidth + alarmFlagWidth + 4, y - 2, pickerWidth, pickerHeight, TRUE);
+    y += line + 4;
+    for (int i = 2; i < 5; ++i) MoveWindow(g_flags[i], margin + flagWidth * (i - 2), y, flagWidth, line, TRUE);
     y += line + 6;
     MoveWindow(g_staticList, margin, y, rc.right - 2 * margin, rc.bottom - y - margin, TRUE);
     int valueWidth = rc.right - 2 * margin - 112 - GetSystemMetrics(SM_CXVSCROLL) - 4;
@@ -4493,7 +4761,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CMD_OPEN_SHARE: openSharedFolders(); return 0;
         case IDC_CMD_COPY: copyToClients(); return 0;
         case IDC_CMD_PRIORITY: changeRenderPriority(); return 0;
-        case IDC_CMD_BATCH: runRemoteBatch(); return 0;
+        case IDC_CMD_BATCH: runRemoteFile(); return 0;
         case IDC_CMD_WOL: sendWakeOnLan(); return 0;
         case IDC_CMD_PING: pingChecked(); return 0;
         case IDC_CMD_NETPING: networkPing(); return 0;
@@ -4529,6 +4797,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_NOTIFY: {
         NMHDR* hdr = (NMHDR*)lp;
         if (hdr->hwndFrom == g_list) return onListNotify(hdr);
+        if (hdr->hwndFrom == g_bootAlarm && hdr->code == DTN_DATETIMECHANGE) { bootAlarmChanged((const NMDATETIMECHANGE*)hdr); return 0; }
         if (hdr->code == NM_CUSTOMDRAW && (hdr->hwndFrom == listHeader() || hdr->hwndFrom == headerOf(g_staticList)))
             return onHeaderCustomDraw((NMCUSTOMDRAW*)hdr);
         return 0;
@@ -4659,8 +4928,13 @@ void createChildren(HINSTANCE inst)
 
     // static pane
     g_staticTitle = createStatic(g_staticPane, IDC_STATIC_TITLE, L"");
+    g_flagHeader = createStatic(g_staticPane, IDC_FLAG_HEADER, L"Info Flags (does not change any setting or function)");
     g_flags[0] = createCheck(g_staticPane, IDC_FLAG_WOL, L"Wake On LAN");
-    g_flags[1] = createCheck(g_staticPane, IDC_FLAG_BOOT, L"Boot");
+    g_flags[1] = createCheck(g_staticPane, IDC_FLAG_BOOT, L"Boot on Alarm");
+    g_bootAlarm = CreateWindowExW(0, DATETIMEPICK_CLASSW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | DTS_TIMEFORMAT | DTS_UPDOWN,
+                                 0, 0, 10, 10, g_staticPane, (HMENU)(INT_PTR)IDC_BOOT_ALARM, inst, NULL);
+    SendMessageW(g_bootAlarm, WM_SETFONT, (WPARAM)g_font, TRUE);
+    SendMessageW(g_bootAlarm, DTM_SETFORMATW, 0, (LPARAM)L"hh:mm tt");
     g_flags[2] = createCheck(g_staticPane, IDC_FLAG_AUTOLOGIN, L"Auto Login");
     g_flags[3] = createCheck(g_staticPane, IDC_FLAG_AUTOROD, L"Auto start Lightning Rod");
     g_flags[4] = createCheck(g_staticPane, IDC_FLAG_AUTOLIGHTNING, L"Auto start Lightning");
@@ -4693,7 +4967,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show)
 
     INITCOMMONCONTROLSEX icc;
     icc.dwSize = sizeof(icc);
-    icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES | ICC_STANDARD_CLASSES;
+    icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES | ICC_STANDARD_CLASSES | ICC_DATE_CLASSES;
     InitCommonControlsEx(&icc);
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);   // file dialogs
     if (!netInit()) { MessageBoxW(NULL, L"Winsock failed to start.", L"Thunderhead", MB_OK | MB_ICONERROR); return 1; }
@@ -4747,6 +5021,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show)
 
     MSG m;
     while (GetMessageW(&m, NULL, 0, 0) > 0) {
+        HWND top = m.hwnd ? GetAncestor(m.hwnd, GA_ROOT) : NULL;   // a notice window takes Enter, Escape and Tab as a dialog does
+        if (isNoticeWindow(top) && IsDialogMessageW(top, &m)) continue;
         if (!g_edit && hotKeys && TranslateAcceleratorW(g_main, hotKeys, &m)) continue;
         TranslateMessage(&m);
         DispatchMessageW(&m);

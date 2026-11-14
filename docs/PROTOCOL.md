@@ -182,11 +182,11 @@ Thunderhead may send at any time:
 | PRIORITY | level       | set the priority class of Lightning.exe: RealTime, High, AboveNormal, Normal, BelowNormal or Low; reply ACK |
 | REBOOT |               | reply ACK, then restart the node after 5 s, closing programs by force |
 | SHUTDOWN |             | reply ACK, then shut the node down after 5 s, closing programs by force (no longer sent by Thunderhead, which uses POWER) |
-| BATCH | text, maximized, front | write the text (hexadecimal digits of its UTF-8 bytes) to a batch file and run it; reply ACK when started and again when ended (see Remote batch file); agents from 0.2.7 |
+| BATCH | kind, text, file, maximized, front | `kind=bat` or `kind=ps1`: write the text (hexadecimal digits of its UTF-8 bytes) to a batch file or PowerShell script and run it; `kind=exe`: run `file`, an executable already in the agent's shared folder; reply ACK when started and again when ended (see Remote file); agents from 0.2.7 (bat) and 0.3.4 (ps1, exe) |
 | POWER | action        | run Windows' `shutdown.exe` and reply ACK with the action: `shutdown` (`-s`), `restart` (`-r`) or `coldrestart` (`-g`), each with `-f -t 66`, or `abort` (`-a`); agents from 0.2.6 |
 | AUDIO | action        | set the master mute of the default playback device: `mute` or `unmute`; reply ACK with the state read back (see Audio); agents from 0.2.16 |
 | TEAMVIEWER |          | start the installed TeamViewer, found through the registry or the Start menu, and bring its window to the front; reply ACK with where it was found (see TeamViewer); agents from 0.2.18 |
-| SOUND | action, file, logon, hello, logoff | `action=play`: play `file`, a name in the agent's `sounds` folder, on the node's playback device; `action=scheme`: take the file names of the agent's own three sound events; reply ACK with `action=` and `file=` (see Audio); agents from 0.2.21 |
+| SOUND | action, file, logon, hello, logoff, report, badip | `action=play`: play `file`, a name in the agent's `sounds` folder, on the node's playback device; `action=scheme`: take the file names of the agent's own three sound events; reply ACK with `action=` and `file=` (see Audio); agents from 0.2.21 |
 | RELAYSET | relay, relay_ip | set the agent's SMB1 relay values as its Settings dialog would (`relay=yes|no`, `relay_ip=`), save them and send HELLO again when they changed; reply ACK with the values in force (see SMB1 relay); agents from 0.3.1 |
 | RELAY | op, job, dest, share, pattern | SMB1 relay work for the client at `dest`, each op on a thread so that an unreachable destination never stalls the agent's reports (probe on a thread from 0.3.2): `op=probe` answers whether `\\dest\share\` opens from the node; `op=push` copies what Thunderhead staged under `relay\<job>` in the node's own share to the root of that share; `op=pull` fetches the newest file matching `pattern` from it into `relay\<job>`; reply ACK with `op=`, `job=`, `dest=`, `files=`, `bytes=` and `file=` (see SMB1 relay); agents from 0.3.0 |
 | MESSAGE | title, text, sound, timeout | open a message window on the node's screen with `title` in its caption and `text` (hexadecimal digits of its UTF-8 bytes), play `sound`, a name in the agent's `sounds` folder (none when empty), and close the window by itself after `timeout` seconds (0: when dismissed); reply ACK when opened and again when closed (see Display Message); agents from 0.3.3 |
@@ -198,8 +198,8 @@ PRIORITY adds `level=` as requested and `applied=` with the class Windows report
 afterwards, and answers `ok=no` when the two differ, as when RealTime is
 requested without administrator rights and Windows grants High; POWER adds
 `action=` and answers `ok=no` with the exit code of `shutdown.exe` when that
-is not 0; BATCH and MESSAGE are answered twice, as described under Remote batch
-file and Display Message):
+is not 0; BATCH and MESSAGE are answered twice, as described under Remote file
+and Display Message):
 
 ```
 ACK
@@ -290,6 +290,7 @@ name=WIN7E0007
 group=Rack 1
 wol=yes
 boot=yes
+boot_alarm=06:30
 autologin=yes
 autostart_rod=yes
 autostart_lightning=no
@@ -297,8 +298,16 @@ auto_shutdown=no
 comment=fan noisy
 ```
 
-`auto_shutdown` is the *Auto Shutdown* check box column of the Client Inventory. It
-is only stored for now; the shutdown daemon that will act on it is not designed yet.
+`wol`, `boot`, `autologin`, `autostart_rod` and `autostart_lightning` are the
+five check boxes under the heading *Info Flags (does not change any setting or
+function)* at the top of Client details: *Wake On LAN*, *Boot on Alarm*, *Auto
+Login*, *Auto start Lightning Rod* and *Auto start Lightning*. They record what
+the operator knows about the node and change nothing on it. `boot_alarm` is
+the time of day in the picker beside *Boot on Alarm*, kept in 24-hour form and
+shown with AM or PM; it is empty until the picker is first changed, when the
+picker shows 06:00 AM, and is likewise only stored. `auto_shutdown` is the
+*Auto Shutdown* check box column of the Client Inventory. It is only stored for
+now; the shutdown daemon that will act on it is not designed yet.
 
 `logs\thunderhead-YYYY-MM-DD.log` holds every event with a timestamp.
 `logs\nodes\NAME-YYYY-MM-DD.log` holds every message to and from that node.
@@ -491,23 +500,53 @@ Windows XP, where `coldrestart` is answered with `ok=no`. Agents older than
 0.2.6 do not know POWER; Thunderhead does not send it to them and writes a
 line to the event log instead.
 
-## Remote batch file
+## Remote file
 
-*Run Remote Batch File* opens a dialog with a text box for the batch file, which
-can be typed, pasted, or loaded from a file with *Browse for file* (UTF-16 or
-UTF-8 by byte order mark, otherwise UTF-8 when the bytes are valid UTF-8,
-otherwise the ANSI code page of the host). The text box keeps its content
-while Thunderhead runs, as do the two check boxes *Start maximized* and *Bring
-to front*, which are set when Thunderhead starts. *Execute Remote Batch File* first shows a warning that
-nothing checks the text for errors or harmful code, with *Yes, Execute* and
-*No, Cancel*; only *Yes, Execute* sends it.
+*Run Remote File* (Node Control) opens a dialog whose *File type* radio buttons
+choose *Batch (.bat)*, *PowerShell (.ps1)* or *Executable (.exe)*. For the
+two script kinds the text box holds the file, typed, pasted, or loaded with
+*Browse for file* (UTF-16 or UTF-8 by byte order mark, otherwise UTF-8 when
+the bytes are valid UTF-8, otherwise the ANSI code page of the host). For an
+executable the text box and *Browse for file* are grayed and the *Executable
+in the client's shared folder* box names the file, as a name or a path
+relative to that folder; the file must already be there, put there with *Copy
+Files or Folder to Client*. The boxes, the radio and the two check boxes
+*Start maximized* and *Bring to front* keep their content while Thunderhead
+runs. *Execute Remote File* first shows a warning that nothing checks the
+file for errors or harmful code, with *Yes, Execute* and *No, Cancel*; only
+*Yes, Execute* sends it.
 
-Thunderhead sends BATCH to every checked online client with `text=` holding the
+For a batch file or a script Thunderhead sends BATCH to every checked online
+client with `kind=bat` or `kind=ps1` and `text=` holding the
 UTF-8 bytes of the text as hexadecimal digits, two per byte, so that the line
 ends survive the one-line field format, and with `maximized=` and `front=`
 (`yes` or `no`) from the two check boxes. The text may be 30000 bytes long, which
 keeps the message below the 65536 byte limit. The event log and the node log
 record the size of the text, not the text.
+
+For an executable Thunderhead first looks for `\\<ip>\<share_name>\<file>`
+from the host, client by client (a client behind an SMB1 relay is not checked,
+since its share is not reachable from the host). A client whose share lacks
+the file is passed over with a line in the event log and a notice window of
+Thunderhead's own, built like the agents' Display Message window: the text
+"File does not exist on NAME: path. Use the 'Copy Files or Folder to Client'
+button to place it, and then try again.", an OK button, the ordinary caption
+buttons, and a line counting down the 10 seconds after which it closes by
+itself. The other clients receive BATCH with `kind=exe`, `file=` the name as
+entered, and the two check box fields. `kind=ps1` and `kind=exe` go only to
+agents from 0.3.4; older agents are passed over with a line in the event log.
+
+The agent runs a PowerShell script as `batch\batch-YYYYMMDD-HHMMSS.ps1`,
+written in UTF-8 with a byte order mark, through
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File <path>` in a console
+window titled *Thunderhead script NAME.ps1*, otherwise exactly as a batch
+file below. An executable is checked again on the node (it must be inside the
+shared folder, with no drive letter, leading separator or `..`) and started
+from its own folder as it is; *Start maximized* applies when the program
+honours the request, *Bring to front* does not, since the agent does not know
+the program's window title. The ACKs carry `kind=` from 0.3.4 and `file=` as
+the path the agent ran, `batch\NAME.bat`, `batch\NAME.ps1` or the name of
+the executable.
 
 The agent writes the text to `batch\batch-YYYYMMDD-HHMMSS.bat` in its own
 folder, with CR LF line ends and in the OEM code page, which is what `cmd.exe`
@@ -671,12 +710,16 @@ below.
 | LR | App Sends HELLO to Host | Proximity Connection |
 | LR | App Closed or Closes | Logoff Sound |
 | LR | App Sends Report to Host | Navigation Start |
+| LR | App Finds No Workable IP Address | Battery Low |
 
 Thunderhead plays its four itself, the closing one to its end (5 s at most)
 before the window goes. The agent plays Logon as its window appears, Proximity
 Connection when Thunderhead's SET answers its HELLO, which is the same
 exchange, Navigation Start after every REPORT it sends (the regular ones and
-the one a PING asks for), and the Logoff Sound to its end (4 s at most) before
+the one a PING asks for), Battery Low each time its start-up address check
+reads an unworkable address (the first reading and each of the three re-reads
+30 s apart, so four times before the network error box when no address ever
+comes), and the Logoff Sound to its end (4 s at most) before
 it stops for EXIT, RESTART, UPDATE or a closed window; its log has one line per
 sound, with the file, or the reason it did not play, except that the report
 sound is logged only when it fails.
@@ -693,6 +736,7 @@ logon=
 hello=fanfare.mp3
 logoff=
 report=
+badip=
 ```
 
 with the file name assigned to the category of each of the agent's events,

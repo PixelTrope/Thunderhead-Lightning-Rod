@@ -29,6 +29,8 @@
 #define IDC_FLAG_AUTOROD        2205
 #define IDC_FLAG_AUTOLIGHTNING  2206
 #define IDC_STATIC_LIST         2207
+#define IDC_FLAG_HEADER         2208   // "Info Flags (does not change any setting or function)"
+#define IDC_BOOT_ALARM          2209   // time-of-day picker beside Boot on Alarm
 
 // command pane buttons
 #define IDC_CMD_FIRST           3000
@@ -77,6 +79,11 @@
 #define IDC_BATCH_EXECUTE       2404
 #define IDC_BATCH_MAXIMIZED     2405
 #define IDC_BATCH_FRONT         2406
+#define IDC_BATCH_KIND_BAT      2407   // File type radios, contiguous: bat, ps1, exe
+#define IDC_BATCH_KIND_PS1      2408
+#define IDC_BATCH_KIND_EXE      2409
+#define IDC_BATCH_EXE_LABEL     2410
+#define IDC_BATCH_EXE           2411   // the executable's name or relative path in the client's shared folder
 
 // text display box
 #define IDC_TEXTBOX_TEXT        2601

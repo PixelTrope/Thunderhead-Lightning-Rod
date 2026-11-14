@@ -78,6 +78,7 @@ void NodeStore::load()
         else if (key == "group") cur->group = value;
         else if (key == "wol") cur->wol = parseBool(value);
         else if (key == "boot") cur->boot = parseBool(value);
+        else if (key == "boot_alarm") cur->bootAlarm = value;
         else if (key == "autologin") cur->autoLogin = parseBool(value);
         else if (key == "autostart_rod") cur->autoRod = parseBool(value);
         else if (key == "autostart_lightning") cur->autoLightning = parseBool(value);
@@ -96,6 +97,7 @@ void NodeStore::save()
         out += "group=" + n.group + "\r\n";
         out += std::string("wol=") + boolText(n.wol) + "\r\n";
         out += std::string("boot=") + boolText(n.boot) + "\r\n";
+        out += "boot_alarm=" + n.bootAlarm + "\r\n";
         out += std::string("autologin=") + boolText(n.autoLogin) + "\r\n";
         out += std::string("autostart_rod=") + boolText(n.autoRod) + "\r\n";
         out += std::string("autostart_lightning=") + boolText(n.autoLightning) + "\r\n";

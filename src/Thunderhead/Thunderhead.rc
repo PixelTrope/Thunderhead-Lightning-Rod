@@ -27,7 +27,7 @@ BEGIN
         BEGIN
             MENUITEM "Open Client's Shared Folder", IDC_CMD_OPEN_SHARE
             MENUITEM "Copy Files or Folder to Client", IDC_CMD_COPY
-            MENUITEM "Run Remote Batch File", IDC_CMD_BATCH
+            MENUITEM "Run Remote File", IDC_CMD_BATCH
             MENUITEM "Network Ping", IDC_CMD_NETPING
             MENUITEM "Send Wake On LAN Magic Packet", IDC_CMD_WOL
             MENUITEM "Set Client Date and Time", IDC_CMD_SET_TIME
@@ -171,15 +171,21 @@ END
 
 IDD_BATCH DIALOGEX 0, 0, 440, 280
 STYLE DS_MODALFRAME | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "Run Remote Batch File"
+CAPTION "Run Remote File"
 FONT 9, "Segoe UI"
 BEGIN
     LTEXT           "", IDC_BATCH_INFO, 10, 8, 420, 10
-    EDITTEXT        IDC_BATCH_TEXT, 10, 22, 420, 226, ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_HSCROLL | WS_TABSTOP
+    LTEXT           "File type:", -1, 10, 24, 40, 10
+    AUTORADIOBUTTON "Batch (.bat)", IDC_BATCH_KIND_BAT, 52, 23, 60, 10, WS_GROUP | WS_TABSTOP
+    AUTORADIOBUTTON "PowerShell (.ps1)", IDC_BATCH_KIND_PS1, 118, 23, 80, 10
+    AUTORADIOBUTTON "Executable (.exe)", IDC_BATCH_KIND_EXE, 204, 23, 80, 10
+    LTEXT           "Executable in the client's shared folder (name or relative path):", IDC_BATCH_EXE_LABEL, 10, 40, 220, 10
+    EDITTEXT        IDC_BATCH_EXE, 232, 38, 198, 13, ES_AUTOHSCROLL | WS_GROUP
+    EDITTEXT        IDC_BATCH_TEXT, 10, 56, 420, 192, ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_HSCROLL | WS_TABSTOP
     PUSHBUTTON      "Browse for file...", IDC_BATCH_BROWSE, 10, 256, 80, 14
     AUTOCHECKBOX    "Start maximized", IDC_BATCH_MAXIMIZED, 102, 258, 72, 10
     AUTOCHECKBOX    "Bring to front", IDC_BATCH_FRONT, 178, 258, 72, 10
-    PUSHBUTTON      "Execute Remote Batch File", IDC_BATCH_EXECUTE, 264, 256, 110, 14
+    PUSHBUTTON      "Execute Remote File", IDC_BATCH_EXECUTE, 264, 256, 110, 14
     PUSHBUTTON      "Cancel", IDCANCEL, 380, 256, 50, 14
 END
 

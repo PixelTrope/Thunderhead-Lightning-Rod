@@ -27,6 +27,7 @@ const SoundEventDef kSoundEvents[kSoundEventCount] = {
     { SoundLrHello,         L"LR", L"App Sends HELLO to Host",             L"Proximity Connection",   "hello" },
     { SoundLrClose,         L"LR", L"App Closed or Closes",                L"Logoff Sound",           "logoff" },
     { SoundLrReport,        L"LR", L"App Sends Report to Host",            L"Navigation Start",       "report" },
+    { SoundLrBadIp,         L"LR", L"App Finds No Workable IP Address",   L"Battery Low",            "badip" },
 };
 
 std::wstring soundDefaultFile(const wchar_t* category)

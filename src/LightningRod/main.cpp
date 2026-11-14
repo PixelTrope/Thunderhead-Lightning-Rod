@@ -275,7 +275,7 @@ DWORD WINAPI relayTaskThread(LPVOID p)
 
 // ---- sounds ---------------------------------------------------------------
 // The agent's sounds live in sounds\ beside it, put there by Thunderhead with
-// the agent update. Each of the agent's three events plays the default file of
+// the agent update. Each of the agent's events plays the default file of
 // its category unless Thunderhead's SOUND scheme message named another file;
 // the names are kept in sounds\scheme.txt so that the Logon sound at the next
 // start honours them as well. The agent thread sets them, the window thread
@@ -523,11 +523,11 @@ void tryWindow(RunningBatch& b)
         if (b.maximized && !IsZoomed(w)) ShowWindow(w, SW_SHOWMAXIMIZED);
         if (b.front) bringToFront(w);
         b.wantWindow = false;
-        logLine(format("BATCH batch\\%s: window found%s%s", b.file.c_str(), b.maximized ? ", maximized" : "",
+        logLine(format("BATCH %s: window found%s%s", b.file.c_str(), b.maximized ? ", maximized" : "",
                        b.front ? ", brought to the front" : ""));
     } else if (tickMs() - b.startMs > 30000) {
         b.wantWindow = false;
-        logLine("BATCH batch\\" + b.file + ": window not found within 30 s, left as Windows opened it");
+        logLine("BATCH " + b.file + ": window not found within 30 s, left as Windows opened it");
     }
 }
 
@@ -538,74 +538,113 @@ void tryWindow(RunningBatch& b)
 // window closes when the batch file ends. maximized opens the window maximized;
 // front brings it above the other windows, which would otherwise keep a window
 // opened by a background program behind them with only its taskbar button showing.
-bool startBatch(const std::string& utf8, bool maximized, bool front, RunningBatch& out, std::string& err)
+bool startBatch(const std::string& utf8, const std::string& kind, const std::string& exeName, bool maximized, bool front,
+                RunningBatch& out, std::string& err)
 {
-    std::wstring dir = exeDirectory(), folder = dir + L"\\batch";
-    if (!CreateDirectoryW(folder.c_str(), NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
-        err = "batch folder: " + lastErrorText((int)GetLastError());
-        return false;
-    }
-    // cmd.exe wants CR LF line ends and reads a batch file in the OEM code page.
-    std::wstring wide = widen(utf8), text;
-    for (size_t i = 0; i < wide.size(); ++i) {
-        if (wide[i] == L'\r') continue;
-        if (wide[i] == L'\n') text += L"\r\n"; else text += wide[i];
-    }
-    if (text.size() < 2 || text.compare(text.size() - 2, 2, L"\r\n") != 0) text += L"\r\n";
-    int n = WideCharToMultiByte(CP_OEMCP, 0, text.data(), (int)text.size(), NULL, 0, NULL, NULL);
-    std::string bytes((size_t)n, '\0');
-    if (n) WideCharToMultiByte(CP_OEMCP, 0, text.data(), (int)text.size(), &bytes[0], n, NULL, NULL);
-
-    SYSTEMTIME t;
-    GetLocalTime(&t);
-    std::string base = format("batch-%04d%02d%02d-%02d%02d%02d", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond), name;
-    HANDLE f = INVALID_HANDLE_VALUE;
-    for (int i = 0; i < 100 && f == INVALID_HANDLE_VALUE; ++i) {
-        name = i == 0 ? base : format("%s-%d", base.c_str(), i + 1);
-        f = CreateFileW((folder + L"\\" + widen(name) + L".bat").c_str(), GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (f == INVALID_HANDLE_VALUE && GetLastError() != ERROR_FILE_EXISTS) break;
-    }
-    if (f == INVALID_HANDLE_VALUE) { err = "batch file: " + lastErrorText((int)GetLastError()); return false; }
-    DWORD wrote = 0;
-    bool ok = WriteFile(f, bytes.data(), (DWORD)bytes.size(), &wrote, NULL) && wrote == bytes.size();
-    DWORD writeErr = GetLastError();
-    CloseHandle(f);
-    if (!ok) { err = "batch file: " + lastErrorText((int)writeErr); return false; }
-
-    wchar_t sys[MAX_PATH];
-    UINT sn = GetSystemDirectoryW(sys, MAX_PATH);
-    if (sn == 0 || sn >= MAX_PATH) { err = "system directory: " + lastErrorText((int)GetLastError()); return false; }
-    std::wstring exe = std::wstring(sys, sn) + L"\\cmd.exe";
-    std::wstring bat = folder + L"\\" + widen(name) + L".bat";
-    // cmd.exe removes the outer pair of quotes and runs what is between them.
-    std::wstring cmd = L"\"" + exe + L"\" /d /c \"\"" + bat + L"\"\"";
-    std::wstring title = L"Thunderhead batch file " + widen(name) + L".bat";
-    std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
-    cmdBuf.push_back(L'\0');
+    // kind=bat and kind=ps1 arrive as text and are written to batch\ and run in a
+    // console window of their own (cmd.exe, or powershell.exe with the execution
+    // policy bypassed for that run); kind=exe names a file already in this folder
+    // (the shared one), run from its own folder with no window of the agent's
+    // making, so maximized applies and front cannot (its title is not known).
+    std::wstring dir = exeDirectory(), exe, cmd, title, workDir = dir;
+    std::string display;
+    DWORD flags = 0;
+    std::vector<wchar_t> titleBuf;
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     memset(&si, 0, sizeof(si));
     si.cb = sizeof(si);
     memset(&pi, 0, sizeof(pi));
-    std::vector<wchar_t> titleBuf(title.begin(), title.end());
-    titleBuf.push_back(L'\0');
-    si.lpTitle = &titleBuf[0];
+    if (kind == "exe") {
+        if (exeName.empty() || exeName.find(':') != std::string::npos || exeName[0] == '\\' || exeName[0] == '/' ||
+            exeName.find("..") != std::string::npos) {
+            err = "the executable must be a name or a relative path inside the shared folder";
+            return false;
+        }
+        std::wstring rel = widen(exeName);
+        for (size_t i = 0; i < rel.size(); ++i) if (rel[i] == L'/') rel[i] = L'\\';
+        exe = dir + L"\\" + rel;
+        if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) { err = narrow(rel) + " does not exist in " + narrow(dir); return false; }
+        cmd = L"\"" + exe + L"\"";
+        workDir = exe.substr(0, exe.rfind(L'\\'));
+        display = narrow(rel);
+    } else {
+        bool ps = kind == "ps1";
+        std::wstring folder = dir + L"\\batch", ext = ps ? L".ps1" : L".bat";
+        if (!CreateDirectoryW(folder.c_str(), NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
+            err = "batch folder: " + lastErrorText((int)GetLastError());
+            return false;
+        }
+        // Both readers want CR LF line ends; cmd.exe reads the OEM code page and
+        // PowerShell 2.0 reads UTF-8 when the byte order mark says so.
+        std::wstring wide = widen(utf8), text;
+        for (size_t i = 0; i < wide.size(); ++i) {
+            if (wide[i] == L'\r') continue;
+            if (wide[i] == L'\n') text += L"\r\n"; else text += wide[i];
+        }
+        if (text.size() < 2 || text.compare(text.size() - 2, 2, L"\r\n") != 0) text += L"\r\n";
+        std::string bytes;
+        if (ps) {
+            bytes = "\xEF\xBB\xBF" + narrow(text);
+        } else {
+            int n = WideCharToMultiByte(CP_OEMCP, 0, text.data(), (int)text.size(), NULL, 0, NULL, NULL);
+            bytes.assign((size_t)n, '\0');
+            if (n) WideCharToMultiByte(CP_OEMCP, 0, text.data(), (int)text.size(), &bytes[0], n, NULL, NULL);
+        }
+
+        SYSTEMTIME t;
+        GetLocalTime(&t);
+        std::string base = format("batch-%04d%02d%02d-%02d%02d%02d", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond), name;
+        HANDLE f = INVALID_HANDLE_VALUE;
+        for (int i = 0; i < 100 && f == INVALID_HANDLE_VALUE; ++i) {
+            name = i == 0 ? base : format("%s-%d", base.c_str(), i + 1);
+            f = CreateFileW((folder + L"\\" + widen(name) + ext).c_str(), GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (f == INVALID_HANDLE_VALUE && GetLastError() != ERROR_FILE_EXISTS) break;
+        }
+        if (f == INVALID_HANDLE_VALUE) { err = "script file: " + lastErrorText((int)GetLastError()); return false; }
+        DWORD wrote = 0;
+        bool ok = WriteFile(f, bytes.data(), (DWORD)bytes.size(), &wrote, NULL) && wrote == bytes.size();
+        DWORD writeErr = GetLastError();
+        CloseHandle(f);
+        if (!ok) { err = "script file: " + lastErrorText((int)writeErr); return false; }
+
+        wchar_t sys[MAX_PATH];
+        UINT sn = GetSystemDirectoryW(sys, MAX_PATH);
+        if (sn == 0 || sn >= MAX_PATH) { err = "system directory: " + lastErrorText((int)GetLastError()); return false; }
+        std::wstring script = folder + L"\\" + widen(name) + ext;
+        if (ps) {
+            exe = std::wstring(sys, sn) + L"\\WindowsPowerShell\\v1.0\\powershell.exe";
+            cmd = L"\"" + exe + L"\" -NoProfile -ExecutionPolicy Bypass -File \"" + script + L"\"";
+        } else {
+            exe = std::wstring(sys, sn) + L"\\cmd.exe";
+            // cmd.exe removes the outer pair of quotes and runs what is between them.
+            cmd = L"\"" + exe + L"\" /d /c \"\"" + script + L"\"\"";
+        }
+        display = "batch\\" + name + narrow(ext);
+        title = std::wstring(L"Thunderhead ") + (ps ? L"script " : L"batch file ") + widen(name) + ext;
+        titleBuf.assign(title.begin(), title.end());
+        titleBuf.push_back(L'\0');
+        si.lpTitle = &titleBuf[0];
+        flags = CREATE_NEW_CONSOLE;
+    }
     if (maximized) {
         si.dwFlags |= STARTF_USESHOWWINDOW;
         si.wShowWindow = SW_SHOWMAXIMIZED;
     }
-    if (!CreateProcessW(exe.c_str(), &cmdBuf[0], NULL, NULL, FALSE, CREATE_NEW_CONSOLE, NULL, dir.c_str(), &si, &pi)) {
-        err = "cmd.exe could not be started: " + lastErrorText((int)GetLastError());
+    std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
+    cmdBuf.push_back(L'\0');
+    if (!CreateProcessW(exe.c_str(), &cmdBuf[0], NULL, NULL, FALSE, flags, NULL, workDir.c_str(), &si, &pi)) {
+        err = narrow(exe.substr(exe.rfind(L'\\') + 1)) + " could not be started: " + lastErrorText((int)GetLastError());
         return false;
     }
     CloseHandle(pi.hThread);
     out.process = pi.hProcess;
-    out.file = name + ".bat";
+    out.file = display;
     out.startMs = tickMs();
     out.title = title;
     out.maximized = maximized;
     out.front = front;
-    out.wantWindow = maximized || front;
+    out.wantWindow = !title.empty() && (maximized || front);
     // The window exists a moment after the process; a slow node gets more tries
     // from pollBatches.
     for (int i = 0; i < 20 && out.wantWindow; ++i) {
@@ -753,6 +792,7 @@ private:
     {
         int tries = 0;
         while (!validAddress(info_.ip)) {
+            playEventSound(SoundLrBadIp);   // once per unworkable reading: the start-up one and each re-read
             if (tries == kIpTries) {
                 logLine(format("no valid IP address after %d re-reads (last read \"%s\"); network error shown", kIpTries, info_.ip.c_str()));
                 if (g_window) PostMessageW(g_window, WM_NETWORK_ERROR, 0, 0);
@@ -1287,21 +1327,27 @@ private:
             ack.set("error", err);
             sendMessage(ack);
         } else if (m.verb == "BATCH") {
-            // The text arrives as hexadecimal digits of its UTF-8 bytes. This ACK
-            // says whether it was started; pollBatches sends a second one when
-            // it has ended.
-            std::string text, err;
+            // kind=bat|ps1 with text= as hexadecimal digits of its UTF-8 bytes, or
+            // kind=exe with file= inside the shared folder; bat when kind is absent.
+            // This ACK says whether it was started; pollBatches sends a second one
+            // when it has ended.
+            std::string kind = trim(m.get("kind")), file = trim(m.get("file")), text, err;
+            if (kind.empty()) kind = "bat";
             RunningBatch b;
-            bool ok = hexDecode(m.get("text"), text) && !text.empty();
-            if (!ok) err = "no batch text, or not hexadecimal";
+            bool ok = true;
+            if (kind == "exe") { if (file.empty()) { ok = false; err = "no file name"; } }
+            else if (kind == "bat" || kind == "ps1") { ok = hexDecode(m.get("text"), text) && !text.empty(); if (!ok) err = "no text, or not hexadecimal"; }
+            else { ok = false; err = "unknown kind \"" + kind + "\""; }
             bool maximized = parseBool(m.get("maximized")), front = parseBool(m.get("front"));
-            if (ok) ok = startBatch(text, maximized, front, b, err);
+            if (ok) ok = startBatch(text, kind, file, maximized, front, b, err);
             if (ok) batches_.push_back(b);
-            logLine(ok ? format("BATCH started in a console window as batch\\%s, %u bytes of text%s%s", b.file.c_str(),
-                                (unsigned)text.size(), maximized ? ", maximized" : "", front ? ", to the front" : "")
-                       : "BATCH failed: " + err);
+            std::string size = kind == "exe" ? std::string() : format(", %u bytes of text", (unsigned)text.size());
+            logLine(ok ? format("BATCH %s started as %s%s%s%s", kind.c_str(), b.file.c_str(), size.c_str(),
+                                maximized ? ", maximized" : "", front ? ", to the front" : "")
+                       : "BATCH " + kind + " failed: " + err);
             Message ack("ACK");
             ack.set("cmd", m.verb);
+            ack.set("kind", kind);
             ack.set("stage", "started");
             ack.set("ok", boolText(ok));
             ack.set("error", err);
@@ -1444,7 +1490,7 @@ private:
             GetExitCodeProcess(b.process, &code);
             CloseHandle(b.process);
             long long seconds = (long long)((tickMs() - b.startMs) / 1000);
-            logLine(format("BATCH batch\\%s finished with exit code %u after %lld s", b.file.c_str(), (unsigned)code, seconds));
+            logLine(format("BATCH %s finished with exit code %u after %lld s", b.file.c_str(), (unsigned)code, seconds));
             Message ack("ACK");
             ack.set("cmd", "BATCH");
             ack.set("stage", "finished");
