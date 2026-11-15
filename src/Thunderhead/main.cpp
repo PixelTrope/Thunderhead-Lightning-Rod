@@ -54,7 +54,7 @@ HINSTANCE g_inst = NULL;
 HWND g_main = NULL, g_status = NULL;
 HWND g_inventoryPane = NULL, g_staticPane = NULL, g_commandPane = NULL;
 HWND g_list = NULL;                       // Client Inventory
-HWND g_staticTitle = NULL, g_staticList = NULL, g_flags[5] = { NULL, NULL, NULL, NULL, NULL };
+HWND g_staticTitle = NULL, g_staticList = NULL, g_flags[6] = { NULL, NULL, NULL, NULL, NULL, NULL };
 HWND g_flagHeader = NULL, g_bootAlarm = NULL;   // the Info Flags header and the Boot on Alarm time picker
 HWND g_edit = NULL;                       // in-place editor over a Group or Comment cell
 int g_editRow = -1, g_editCol = -1;
@@ -79,8 +79,11 @@ std::string shareStateText(const NodeRecord* n);
 std::string authText(const NodeRecord* n);
 bool nodeOutdated(const NodeRecord* n);
 bool commandAllowed(NodeRecord* n, const std::string& label);
+bool sendToNode(NodeRecord* n, const Message& m, const std::string& label);
 int shadeKey(const NodeRecord* n);
 COLORREF rowShade(const NodeRecord* n, int row, COLORREF* textColor);
+bool isRenderHost(const NodeRecord* n);
+std::wstring renderHostText(const NodeRecord* n);
 NodeRecord* nodeAt(int row);
 void fillRect(HDC dc, const RECT& rc, COLORREF color);
 
@@ -157,6 +160,7 @@ const CommandDef kCommands[] = {
     { IDC_CMD_PING,            L"Lightning Rod Ping",             NULL,      true,  GroupRod },
     { IDC_CMD_REMOVE_OFFLINE,  L"Remove Checked Offline Clients", NULL,      true,  GroupRod },
     { IDC_CMD_SET_RELAY,       L"Set Relay Address",              NULL,      true,  GroupRod },
+    { IDC_CMD_TOGGLE_RENDERHOST, L"Toggle B3D Net Render Host",   NULL,      true,  GroupRod },
     { IDC_CMD_RESTART_LR,      L"Restart LR",                     "RESTART", true,  GroupRod },
     { IDC_CMD_EXIT_LR,         L"Exit LR",                        "EXIT",    true,  GroupRod },
     { IDC_CMD_MUTE,            L"Mute Checked Clients",           NULL,      true,  GroupAudio },
@@ -647,6 +651,7 @@ void showStaticPane(NodeRecord* n)
     CheckDlgButton(g_staticPane, IDC_FLAG_AUTOLOGIN, n->autoLogin ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(g_staticPane, IDC_FLAG_AUTOROD, n->autoRod ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(g_staticPane, IDC_FLAG_AUTOLIGHTNING, n->autoLightning ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(g_staticPane, IDC_FLAG_RENDERHOST, n->renderHost ? BST_CHECKED : BST_UNCHECKED);
     showBootAlarm(n);
 
     // Every field there is: the stored record, the connection, the HELLO, the
@@ -668,6 +673,7 @@ void showStaticPane(NodeRecord* n)
     add(L"Agent", widen(h.get("agent")));
     add(L"Shared folder", widen(shareStateText(n)));
     add(L"Authentication", widen(authText(n)));
+    add(L"Net Render Host", renderHostText(n));
     add(L"OS", widen(h.get("os")));
     add(L"CPU", widen(h.get("cpu")));
     add(L"MHz", widen(h.get("cpu_mhz")));
@@ -709,9 +715,9 @@ void showStaticPane(NodeRecord* n)
     }
     static const char* const knownHello[] = { "agent", "os", "cpu", "cpu_mhz", "cores", "mem_mb", "mem_installed_mb", "mem_type", "disk_total_mb", "board",
                                               "chipset", "gpu", "vram_mb", "ip", "mac", "name", "lightning3_path", "lightning3_version",
-                                              "lightning2_path", "lightning2_version", "relay", "relay_ip" };
+                                              "lightning2_path", "lightning2_version", "relay", "relay_ip", "render_host" };
     static const char* const knownReport[] = { "cpu_pct", "cpu_temp_c", "disk_free_mb", "lightning", "lightning_cpu_pct",
-                                               "mem_free_mb", "rendering", "uptime_s", "clock", "utc_ms" };
+                                               "mem_free_mb", "rendering", "uptime_s", "clock", "utc_ms", "render_host" };
     for (std::map<std::string, std::string>::const_iterator it = h.fields.begin(); it != h.fields.end(); ++it) {
         bool known = false;
         for (size_t k = 0; k < sizeof(knownHello) / sizeof(knownHello[0]); ++k) if (it->first == knownHello[k]) known = true;
@@ -753,10 +759,72 @@ void flagClicked(int id)
     case IDC_FLAG_AUTOLOGIN:     n->autoLogin = on;     name = "autologin"; break;
     case IDC_FLAG_AUTOROD:       n->autoRod = on;       name = "autostart_rod"; break;
     case IDC_FLAG_AUTOLIGHTNING: n->autoLightning = on; name = "autostart_lightning"; break;
+    case IDC_FLAG_RENDERHOST:    n->renderHost = on;    name = "render_host"; break;
     default: return;
     }
     g_store->save();
     logEvent(format("%s %s=%s", n->name.c_str(), name, boolText(on)));
+    if (id == IDC_FLAG_RENDERHOST) refreshRow(n);   // the row's tint follows the flag
+}
+
+// ---------------------------------------------------------------- Bryce 3D Network Render Host (B3NDHR)
+// One client of the farm is the Bryce 3D Network Render Host, the machine that
+// runs the full Bryce and hands the frames out. Three things say so: the Info
+// Flag here (Thunderhead's record, kept in nodes.txt), the agent's own at-start
+// setting (its Settings dialog, kept in its settings.txt), and the agent's
+// report of that setting in HELLO and REPORT (render_host=). Toggle B3D Net
+// Render Host flips the flag of every checked client and tells each online
+// agent from 0.4.2 to set itself the same way; the row is tinted while either
+// the flag or the report says so.
+const char* const kRenderHostAgent = "0.4.2";
+
+bool isRenderHost(const NodeRecord* n)
+{
+    if (!n) return false;
+    if (n->renderHost) return true;
+    const std::string& v = n->report.has("render_host") ? n->report.get("render_host") : n->hello.get("render_host");
+    return parseBool(v);
+}
+
+std::wstring renderHostText(const NodeRecord* n)
+{
+    if (n->hello.get("agent").empty()) return std::wstring();
+    bool reported = n->report.has("render_host") || n->hello.has("render_host");
+    if (!reported) return L"not reported (agent before 0.4.2)";
+    bool on = parseBool(n->report.has("render_host") ? n->report.get("render_host") : n->hello.get("render_host"));
+    std::wstring text = on ? L"Yes" : L"No";
+    if (on != n->renderHost) text += n->renderHost ? L" (the Info Flag here says Yes)" : L" (the Info Flag here says No)";
+    return text;
+}
+
+void toggleRenderHost()
+{
+    std::vector<NodeRecord*> targets = checkedNodes();
+    if (targets.empty()) { updateStatusBar(L"|  no clients checked"); return; }
+    int flagged = 0, told = 0, old = 0;
+    for (size_t i = 0; i < targets.size(); ++i) {
+        NodeRecord* n = targets[i];
+        n->renderHost = !n->renderHost;
+        logEvent(format("%s render_host=%s (Info Flag)", n->name.c_str(), boolText(n->renderHost)));
+        if (n->renderHost) ++flagged;
+        if (n->online) {
+            if (compareVersions(n->hello.get("agent"), kRenderHostAgent) < 0) {
+                ++old;
+                logEvent(format("RENDERHOST not sent to %s: agent %s is older than %s, update it first", n->name.c_str(),
+                                n->hello.get("agent").c_str(), kRenderHostAgent));
+            } else {
+                Message m("RENDERHOST");
+                m.set("set", std::string(boolText(n->renderHost)));
+                if (sendToNode(n, m, m.oneLine())) ++told;
+            }
+        }
+        refreshRow(n);
+        if (g_staticNode == n) showStaticPane(n);
+    }
+    g_store->save();
+    std::string status = format("|  Net Render Host toggled on %d checked: %d now flagged, %d agent(s) told", (int)targets.size(), flagged, told);
+    if (old) status += format(", %d skipped: agent older than %s", old, kRenderHostAgent);
+    updateStatusBar(widen(status).c_str());
 }
 
 // The Auto Shutdown cell of a row was clicked: flip the flag, save it and repaint the row.
@@ -4445,6 +4513,9 @@ void onNet(NetEvent* e)
                                   e->msg.get("path").c_str(), e->msg.get("found").c_str(),
                                   parseBool(e->msg.get("running")) ? ", TeamViewer was already running" : "");
             else text = format("TEAMVIEWER failed on %s: %s", n->name.c_str(), e->msg.get("error").c_str());
+        } else if (cmd == "RENDERHOST") {
+            if (ok) text = format("RENDERHOST ok on %s: Net Render Host %s", n->name.c_str(), parseBool(e->msg.get("render_host")) ? "on" : "off");
+            else text = format("RENDERHOST failed on %s: %s", n->name.c_str(), e->msg.get("error").c_str());
         } else if (cmd == "RELAYSET") {
             if (ok) text = format("RELAYSET ok on %s: relay %s%s%s", n->name.c_str(), parseBool(e->msg.get("relay")) ? "on" : "off",
                                   parseBool(e->msg.get("relay")) ? " to " : "", e->msg.get("relay_ip").c_str());
@@ -4618,6 +4689,8 @@ void layoutStaticPane()
     MoveWindow(g_bootAlarm, margin + flagWidth + alarmFlagWidth + 4, y - 2, pickerWidth, pickerHeight, TRUE);
     y += line + 4;
     for (int i = 2; i < 5; ++i) MoveWindow(g_flags[i], margin + flagWidth * (i - 2), y, flagWidth, line, TRUE);
+    y += line + 4;
+    MoveWindow(g_flags[5], margin, y, rc.right - 2 * margin, line, TRUE);   // row three: the render host flag
     y += line + 6;
     MoveWindow(g_staticList, margin, y, rc.right - 2 * margin, rc.bottom - y - margin, TRUE);
     int valueWidth = rc.right - 2 * margin - 112 - GetSystemMetrics(SM_CXVSCROLL) - 4;
@@ -4896,13 +4969,14 @@ void drawCheckBoxCell(HDC dc, int row, COLORREF shade)
 // to state the node's condition. Strongest first: the ping flash, solid for a
 // second after the node answered Lightning Rod Ping; offline, red; shared
 // folder not readable from this host, orange; agent older than the one to
-// push, yellow; a Windows 7 client acting as SMB1 relay, turquoise.
+// push, yellow; the Bryce 3D Network Render Host, metallic blue; a Windows 7
+// client acting as SMB1 relay, turquoise.
 // The conditions rowShade paints, as one number, so that a change is seen.
 int shadeKey(const NodeRecord* n)
 {
     if (!n) return 0;
     return (n->online ? 1 : 0) | (n->shareState == 1 ? 2 : 0) | (nodeOutdated(n) ? 4 : 0) | (isRelay(n) ? 8 : 0) |
-           ((n->pingFlashUntilMs && tickMs() < n->pingFlashUntilMs) ? 16 : 0);
+           ((n->pingFlashUntilMs && tickMs() < n->pingFlashUntilMs) ? 16 : 0) | (isRenderHost(n) ? 32 : 0);
 }
 
 COLORREF rowShade(const NodeRecord* n, int row, COLORREF* textColor)
@@ -4919,6 +4993,7 @@ COLORREF rowShade(const NodeRecord* n, int row, COLORREF* textColor)
     if (!n->online) return mixColor(RGB(255, 0, 0), base, pct);
     if (n->shareState != 1) return mixColor(RGB(255, 140, 0), base, pct);
     if (nodeOutdated(n)) return mixColor(RGB(255, 220, 0), base, pct);
+    if (isRenderHost(n)) return mixColor(RGB(50, 82, 123), base, pct + 10);   // metallic blue: the Bryce 3D Network Render Host
     if (isRelay(n)) return mixColor(RGB(64, 224, 208), base, pct);
     return base;
 }
@@ -5185,10 +5260,11 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CMD_SOUND: openPlaySound(); return 0;
         case IDC_CMD_REMOVE_OFFLINE: removeCheckedOffline(); return 0;
         case IDC_CMD_SET_RELAY: setRelayAddress(); return 0;
+        case IDC_CMD_TOGGLE_RENDERHOST: toggleRenderHost(); return 0;
         case IDC_CMD_MESSAGE: displayMessage(); return 0;
         case IDC_CMD_SHUTDOWN_NODE: shutdownChecked(); return 0;
         case IDC_CMD_ABORT_SHUTDOWN: sendPower("abort"); return 0;
-        case IDC_FLAG_WOL: case IDC_FLAG_BOOT: case IDC_FLAG_AUTOLOGIN: case IDC_FLAG_AUTOROD: case IDC_FLAG_AUTOLIGHTNING:
+        case IDC_FLAG_WOL: case IDC_FLAG_BOOT: case IDC_FLAG_AUTOLOGIN: case IDC_FLAG_AUTOROD: case IDC_FLAG_AUTOLIGHTNING: case IDC_FLAG_RENDERHOST:
             if (HIWORD(wp) == BN_CLICKED) flagClicked(id);
             return 0;
         }
@@ -5372,6 +5448,7 @@ void createChildren(HINSTANCE inst)
     g_flags[2] = createCheck(g_staticPane, IDC_FLAG_AUTOLOGIN, L"Auto Login");
     g_flags[3] = createCheck(g_staticPane, IDC_FLAG_AUTOROD, L"Auto start Lightning Rod");
     g_flags[4] = createCheck(g_staticPane, IDC_FLAG_AUTOLIGHTNING, L"Auto start Lightning");
+    g_flags[5] = createCheck(g_staticPane, IDC_FLAG_RENDERHOST, L"Bryce 3D Network Render Host (B3NDHR)");
     g_staticList = createKeyValueList(g_staticPane, IDC_STATIC_LIST);
     ShowWindow(g_staticPane, SW_HIDE);
 

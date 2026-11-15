@@ -31,6 +31,7 @@
 #define IDC_STATIC_LIST         2207
 #define IDC_FLAG_HEADER         2208   // "Info Flags (does not change any setting or function)"
 #define IDC_BOOT_ALARM          2209   // time-of-day picker beside Boot on Alarm
+#define IDC_FLAG_RENDERHOST     2210   // "Bryce 3D Network Render Host (B3NDHR)"
 
 // command pane buttons
 #define IDC_CMD_FIRST           3000
@@ -65,7 +66,8 @@
 #define IDC_CMD_START50         3030
 #define IDC_CMD_SETTINGS        3031
 #define IDC_CMD_SET_RELAY       3032
-#define IDC_CMD_LAST            3032
+#define IDC_CMD_TOGGLE_RENDERHOST 3033
+#define IDC_CMD_LAST            3033
 
 // rename dialog
 #define IDC_RENAME_INFO         2301

@@ -91,6 +91,7 @@ lightning2_path=
 lightning2_version=
 relay=no
 relay_ip=
+render_host=no
 keyed=yes
 challenge=3a7e...the challenge token of the OFFER
 auth=7c02...64 hexadecimal digits
@@ -127,6 +128,10 @@ relays for (see SMB1 relay). Such an agent sends HELLO again, on the same
 connection, when its Settings change; Thunderhead takes the new static fields
 from it and treats the session as unbroken. Both sides play their HELLO sound
 for that HELLO as for any other.
+
+Agents from 0.4.2 send `render_host=yes|no`, the node's Bryce 3D Network
+Render Host setting (see Bryce 3D Network Render Host), in HELLO and in every
+full REPORT, and in a later REPORT whenever it changes.
 
 Agents from 0.4.0 send `keyed=yes|no`, whether farm.key lies beside the
 agent, and, when it does, `challenge=`, the challenge token of the OFFER the
@@ -210,12 +215,13 @@ Thunderhead may send at any time:
 | AUDIO | action        | set the master mute of the default playback device: `mute` or `unmute`; reply ACK with the state read back (see Audio); agents from 0.2.16 |
 | TEAMVIEWER |          | start the installed TeamViewer, found through the registry or the Start menu, and bring its window to the front; reply ACK with where it was found (see TeamViewer); agents from 0.2.18 |
 | SOUND | action, file, logon, hello, logoff, report, badip | `action=play`: play `file`, a name in the agent's `sounds` folder, on the node's playback device; `action=scheme`: take the file names of the agent's own three sound events; reply ACK with `action=` and `file=` (see Audio); agents from 0.2.21 |
+| RENDERHOST | set     | `set=yes|no` becomes the node's Bryce 3D Network Render Host setting, saved for the next start; reply ACK with `render_host=` as now in force, then a full REPORT (see Bryce 3D Network Render Host); agents from 0.4.2 |
 | RELAYSET | relay, relay_ip | set the agent's SMB1 relay values as its Settings dialog would (`relay=yes|no`, `relay_ip=`), save them and send HELLO again when they changed; reply ACK with the values in force (see SMB1 relay); agents from 0.3.1 |
 | RELAY | op, job, dest, share, pattern | SMB1 relay work for the client at `dest`, each op on a thread so that an unreachable destination never stalls the agent's reports (probe on a thread from 0.3.2): `op=probe` answers whether `\\dest\share\` opens from the node; `op=push` copies what Thunderhead staged under `relay\<job>` in the node's own share to the root of that share; `op=pull` fetches the newest file matching `pattern` from it into `relay\<job>`; reply ACK with `op=`, `job=`, `dest=`, `files=`, `bytes=` and `file=` (see SMB1 relay); agents from 0.3.0 |
 | MESSAGE | title, text, sound, timeout | open a message window on the node's screen with `title` in its caption and `text` (hexadecimal digits of its UTF-8 bytes), play `sound`, a name in the agent's `sounds` folder (none when empty), and close the window by itself after `timeout` seconds (0: when dismissed); reply ACK when opened and again when closed (see Display Message); agents from 0.3.3 |
 
 The agent replies to START, STOP, PRIORITY, EXIT, RESTART, UPDATE, RENAME, REBOOT,
-SHUTDOWN, POWER, AUDIO, TEAMVIEWER, SOUND, RELAYSET, RELAY, MESSAGE and BATCH with (RENAME adds `name=` with the name that was applied;
+SHUTDOWN, POWER, AUDIO, TEAMVIEWER, SOUND, RELAYSET, RENDERHOST, RELAY, MESSAGE and BATCH with (RENAME adds `name=` with the name that was applied;
 START adds `gen=`, `path=`, `version=` and `found=` as described under Lightning lookup;
 PRIORITY adds `level=` as requested and `applied=` with the class Windows reports
 afterwards, and answers `ok=no` when the two differ, as when RealTime is
@@ -318,8 +324,9 @@ The Client Inventory's alternating gray rows are tinted to state a node's
 condition, in both schemes, the strongest condition winning: red for a node
 that is offline; orange for an online node whose shared folder the host has
 not read (gate closed); yellow for an online node whose agent is older than
-the agent file Thunderhead would push; turquoise for a Windows 7 client set
-to act as SMB1 relay. For one second after a node answers *Lightning Rod
+the agent file Thunderhead would push; metallic blue for the Bryce 3D Network
+Render Host (flag or report); turquoise for a Windows 7 client set to act as
+SMB1 relay. For one second after a node answers *Lightning Rod
 Ping* its row is painted solid blue-biased purple (R 50 %, G 0 %, B 66 %)
 with white text, so that the answer is seen beyond the Last report column
 going to 0 s. The Last report column itself is rewritten only when its text
@@ -327,6 +334,36 @@ changes, and the list erases each visible row in its own shade rather than in
 the background color, so the per-second update no longer flashes the cell
 white; the column rules are drawn from the list's own column layout, not the
 header window, so they stay on the column edges through a horizontal scroll.
+
+## Bryce 3D Network Render Host
+
+One client of the farm is the Bryce 3D Network Render Host, B3NDHR for short:
+the machine that runs the full Bryce 3D and hands the frames out to the
+Lightning clients. From 0.4.2 the role is held in three places that are kept
+in step. Thunderhead's record is the sixth Info Flag of Client details,
+*Bryce 3D Network Render Host (B3NDHR)*, saved as `render_host` in nodes.txt.
+The agent's own setting is the two-position slider *Bryce 3D Network Render
+Host (B3NDHR) mode* in its Settings dialog, saved as `render_host` in its
+settings.txt and read at every start, so that the person at the node can set
+it. The agent reports that setting as `render_host=yes|no` in HELLO and in
+every full REPORT, and in a later REPORT when it changes, and Thunderhead
+shows it in Client details as *Net Render Host: Yes* or *No*, adding "(the
+Info Flag here says ...)" when the flag and the report disagree.
+
+*Toggle B3D Net Render Host* (LightningRod Control) flips the flag of every
+checked client, saves it, and sends `RENDERHOST set=yes|no` with the new value
+to each checked online client whose agent is 0.4.2 or later (older agents are
+passed over with a line in the event log; the shared-folder gate applies as to
+every command). The agent sets its mode, saves it, answers ACK with
+`render_host=`, and sends a full REPORT at once; the event log reads
+"RENDERHOST ok on NAME: Net Render Host on". A client that is offline has only
+its flag flipped; its agent learns the role when the toggle is sent again
+while it is online, or from its own Settings dialog.
+
+In the Client Inventory a row is tinted metallic blue while either the flag or
+the latest report says the node is the render host; the tint ranks below
+offline, gate-closed and outdated and above the relay tint (see Inventory
+tints).
 
 ## Report spacing
 
@@ -418,15 +455,20 @@ boot_alarm=06:30
 autologin=yes
 autostart_rod=yes
 autostart_lightning=no
+render_host=no
 auto_shutdown=no
 comment=fan noisy
 ```
 
 `wol`, `boot`, `autologin`, `autostart_rod` and `autostart_lightning` are the
-five check boxes under the heading *Info Flags (does not change any setting or
+first five check boxes under the heading *Info Flags (does not change any setting or
 function)* at the top of Client details: *Wake On LAN*, *Boot on Alarm*, *Auto
 Login*, *Auto start Lightning Rod* and *Auto start Lightning*. They record what
-the operator knows about the node and change nothing on it. `boot_alarm` is
+the operator knows about the node and change nothing on it. `render_host` is
+the sixth, *Bryce 3D Network Render Host (B3NDHR)*, on a row of its own; it is
+likewise only a record when ticked by hand, but *Toggle B3D Net Render Host*
+sets it and the agent's own setting together (see Bryce 3D Network Render
+Host). `boot_alarm` is
 the time of day in the picker beside *Boot on Alarm*, kept in 24-hour form and
 shown with AM or PM; it is empty until the picker is first changed, when the
 picker shows 06:00 AM, and is likewise only stored. `auto_shutdown` is the
@@ -443,7 +485,8 @@ and writes `C:\LightningRod\LightningRod-YYYY-MM-DD.log`. Its sounds are in
 `C:\LightningRod\sounds`, put there by the agent update, with `scheme.txt`,
 the file names of its own sound events as the last SOUND scheme message set
 them (see Audio). `settings.txt` beside it holds its Settings dialog
-(`relay=yes|no`, `relay_ip=`), `farm.key` is the host's key as Thunderhead
+(`relay=yes|no`, `relay_ip=`, and `render_host=yes|no`, the Bryce 3D Network
+Render Host switch), `farm.key` is the host's key as Thunderhead
 wrote it through the share (see Authentication), and `relay\` holds the
 staging folders of RELAY jobs while they run; it keeps no other state. The
 intended place for the folder is `X:\LightningRod` on any drive with room,

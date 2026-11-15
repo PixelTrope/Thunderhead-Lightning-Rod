@@ -88,6 +88,7 @@ bool writeTextFile(const std::wstring& path, const std::string& text)
 CRITICAL_SECTION g_settingsLock;
 bool g_relay = false;
 std::string g_relayIp;
+bool g_renderHost = false;       // Bryce 3D Network Render Host (B3NDHR) mode: render_host= in settings.txt, reported in HELLO and REPORT
 volatile long g_rehello = 0;     // set by the window thread: send HELLO again with the new values
 
 std::wstring settingsFile() { return exeDirectory() + L"\\settings.txt"; }
@@ -102,13 +103,15 @@ void loadSettings()
         std::string key = trim(lines[i].substr(0, eq)), value = trim(lines[i].substr(eq + 1));
         if (key == "relay") g_relay = parseBool(value);
         else if (key == "relay_ip") g_relayIp = value;
+        else if (key == "render_host") g_renderHost = parseBool(value);
     }
     if (g_relayIp.empty()) g_relay = false;
 }
 
 void saveSettings()
 {
-    std::string text = std::string("relay=") + boolText(g_relay) + "\r\nrelay_ip=" + g_relayIp + "\r\n";
+    std::string text = std::string("relay=") + boolText(g_relay) + "\r\nrelay_ip=" + g_relayIp + "\r\n" +
+                       "render_host=" + boolText(g_renderHost) + "\r\n";
     if (!writeTextFile(settingsFile(), text)) logLine("settings.txt could not be written: " + lastErrorText((int)GetLastError()));
 }
 
@@ -126,6 +129,27 @@ std::string relayText()
     std::string ip;
     relaySnapshot(relay, ip);
     return relay ? "to " + ip : std::string("off");
+}
+
+bool renderHostSetting()
+{
+    EnterCriticalSection(&g_settingsLock);
+    bool on = g_renderHost;
+    LeaveCriticalSection(&g_settingsLock);
+    return on;
+}
+
+// Sets the B3NDHR mode (Settings dialog on the window thread, RENDERHOST from
+// Thunderhead on the agent thread), saves it, and says whether it changed.
+bool applyRenderHostSetting(bool on)
+{
+    EnterCriticalSection(&g_settingsLock);
+    bool changed = g_renderHost != on;
+    g_renderHost = on;
+    saveSettings();
+    LeaveCriticalSection(&g_settingsLock);
+    if (changed) logLine(std::string("Bryce 3D Network Render Host mode ") + (on ? "on" : "off"));
+    return changed;
 }
 
 // A dotted IPv4 address with four parts, as the Settings dialog accepts it.
@@ -774,9 +798,10 @@ public:
         }
         status_.info = info_;
         loadKey();
-        logLine(format("Lightning Rod %s starting: %s mac=%s ip=%s, SMB1 relay %s, farm.key %s", TLR_VERSION_STRING,
+        logLine(format("Lightning Rod %s starting: %s mac=%s ip=%s, SMB1 relay %s, farm.key %s, render host %s", TLR_VERSION_STRING,
                        info_.name.c_str(), info_.mac.c_str(), info_.ip.c_str(), relayText().c_str(),
-                       key_.empty() ? "absent (Thunderhead writes it into this folder through the share)" : "present"));
+                       key_.empty() ? "absent (Thunderhead writes it into this folder through the share)" : "present",
+                       renderHostSetting() ? "on" : "off"));
         logLine(format("os=%s cpu=%s %d MHz cores=%d mem=%d MB usable, %d MB installed, type %s disk=%d MB board=%s chipset=%s gpu=%s vram=%d MB",
                        info_.os.c_str(), info_.cpu.c_str(), info_.cpuMhz, info_.cores, info_.memMb, info_.memInstalledMb,
                        info_.memType.empty() ? "n/a" : info_.memType.c_str(), info_.diskTotalMb,
@@ -1040,6 +1065,7 @@ private:
         m.set("lightning2_version", info_.lightning2Version);
         m.set("relay", boolText(relay));
         m.set("relay_ip", relay ? relayIp : std::string());
+        m.set("render_host", boolText(renderHostSetting()));
         m.set("keyed", boolText(!key_.empty()));
         if (!key_.empty() && !offerChallenge_.empty()) {
             m.set("challenge", offerChallenge_);
@@ -1066,6 +1092,7 @@ private:
         full.set("lightning", l.running ? "running" : "stopped");
         full.set("lightning_cpu_pct", (long long)l.cpuPct);
         full.set("rendering", boolText(l.rendering));
+        full.set("render_host", boolText(renderHostSetting()));   // the B3NDHR mode, so that a change made here reaches Thunderhead within a report
         // The node's clock: its local date and time as it shows them, and the
         // same instant in UTC milliseconds, from which Thunderhead works out how
         // far the clock is from its own.
@@ -1147,6 +1174,23 @@ private:
             LeaveCriticalSection(&lock_);
             notify();
             if (helloSoundPending_) { helloSoundPending_ = false; playEventSound(SoundLrHello); }
+        } else if (m.verb == "RENDERHOST") {
+            // Toggle B3D Net Render Host in Thunderhead: set=yes|no becomes this
+            // node's B3NDHR mode, saved for the next start; a report follows at once.
+            std::string set = trim(m.get("set")), err;
+            bool ok = set == "yes" || set == "no";
+            if (!ok) err = "set must be yes or no";
+            else applyRenderHostSetting(set == "yes");
+            logLine(format("RENDERHOST set=%s: %s%s%s", set.c_str(), ok ? "ok" : "failed", err.empty() ? "" : ": ", err.c_str()));
+            Message ack("ACK");
+            ack.set("cmd", m.verb);
+            ack.set("ok", boolText(ok));
+            ack.set("error", err);
+            ack.set("render_host", boolText(renderHostSetting()));
+            sendMessage(ack);
+            notify();
+            sendReport();
+            nextReport_ = tickMs() + (unsigned long long)intervalSec_ * 1000;
         } else if (m.verb == "RELAYSET") {
             // Set Relay Address in Thunderhead: relay=yes|no and relay_ip= as the
             // Settings dialog would set them; HELLO follows again when they changed.
@@ -1851,6 +1895,7 @@ void refreshAll()
                                         : widen(i.lightning2Version.empty() ? i.lightning2Path : i.lightning2Version + " at " + i.lightning2Path));
     setRow(row++, L"Sounds",              widen(format("%u file(s) in ", (unsigned)soundFilesIn(soundDir()).size())) + soundDir());
     setRow(row++, L"SMB1 relay",          widen(relayText()));
+    setRow(row++, L"Net Render Host",     renderHostSetting() ? L"On: this node is the Bryce 3D Network Render Host (B3NDHR)" : L"Off");
     setRow(row++, L"Authentication",      s.keyed ? L"farm.key present: only a host that proves it is obeyed"
                                                   : L"no farm.key in " + exeDirectory() + L": Thunderhead writes it through the shared folder; commands are refused until then");
     refreshClock();
@@ -1874,13 +1919,62 @@ void layout(HWND hwnd)
 // Settings: Act as SMB1 Relay and the address of the Windows XP client relayed
 // to. OK with a change saves settings.txt and has the agent send HELLO again,
 // so that Thunderhead learns the new values at once.
+// The B3NDHR switch of the Settings dialog: a two-position slider drawn as an
+// owner-drawn button, the knob at the left for off and at the right for on,
+// the track metallic blue when on. The value edited sits in g_dlgRenderHost
+// until OK applies it.
+bool g_dlgRenderHost = false;
+
+void drawRenderHostSwitch(const DRAWITEMSTRUCT* di)
+{
+    RECT rc = di->rcItem;
+    HDC dc = di->hDC;
+    FillRect(dc, &rc, GetSysColorBrush(COLOR_BTNFACE));
+    int h = rc.bottom - rc.top, w = rc.right - rc.left;
+    int trackH = h - 4, trackW = w - 4;
+    RECT track = { rc.left + 2, rc.top + 2, rc.left + 2 + trackW, rc.top + 2 + trackH };
+    COLORREF fill = g_dlgRenderHost ? RGB(50, 82, 123) : RGB(170, 170, 170);
+    HBRUSH b = CreateSolidBrush(fill);
+    HPEN pen = CreatePen(PS_SOLID, 1, fill);
+    HGDIOBJ oldB = SelectObject(dc, b), oldP = SelectObject(dc, pen);
+    RoundRect(dc, track.left, track.top, track.right, track.bottom, trackH, trackH);
+    SelectObject(dc, oldB);
+    SelectObject(dc, oldP);
+    DeleteObject(b);
+    DeleteObject(pen);
+    int knob = trackH - 4;
+    int kx = g_dlgRenderHost ? track.right - 2 - knob : track.left + 2;
+    HBRUSH white = (HBRUSH)GetStockObject(WHITE_BRUSH);
+    HPEN gray = CreatePen(PS_SOLID, 1, RGB(96, 96, 96));
+    oldB = SelectObject(dc, white);
+    oldP = SelectObject(dc, gray);
+    Ellipse(dc, kx, track.top + 2, kx + knob, track.top + 2 + knob);
+    SelectObject(dc, oldB);
+    SelectObject(dc, oldP);
+    DeleteObject(gray);
+    if (di->itemState & ODS_FOCUS) DrawFocusRect(dc, &rc);
+}
+
+void setRenderHostSwitch(HWND dlg, bool on)
+{
+    g_dlgRenderHost = on;
+    SetDlgItemTextW(dlg, IDC_RENDERHOST_STATE, on ? L"On" : L"Off");
+    InvalidateRect(GetDlgItem(dlg, IDC_RENDERHOST_SWITCH), NULL, TRUE);
+}
+
 INT_PTR CALLBACK settingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
+    case WM_DRAWITEM: {
+        const DRAWITEMSTRUCT* di = (const DRAWITEMSTRUCT*)lp;
+        if (di->CtlID == IDC_RENDERHOST_SWITCH) { drawRenderHostSwitch(di); return TRUE; }
+        break;
+    }
     case WM_INITDIALOG: {
         bool relay;
         std::string ip;
         relaySnapshot(relay, ip);
+        setRenderHostSwitch(dlg, renderHostSetting());
         CheckDlgButton(dlg, IDC_RELAY_CHECK, relay ? BST_CHECKED : BST_UNCHECKED);
         SetDlgItemTextW(dlg, IDC_RELAY_IP, widen(ip).c_str());
         SendDlgItemMessageW(dlg, IDC_RELAY_IP, EM_LIMITTEXT, 15, 0);
@@ -1892,6 +1986,7 @@ INT_PTR CALLBACK settingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         return TRUE;
     }
     case WM_COMMAND:
+        if (LOWORD(wp) == IDC_RENDERHOST_SWITCH) { setRenderHostSwitch(dlg, !g_dlgRenderHost); return TRUE; }
         if (LOWORD(wp) == IDC_RELAY_CHECK) {
             bool on = IsDlgButtonChecked(dlg, IDC_RELAY_CHECK) == BST_CHECKED;
             EnableWindow(GetDlgItem(dlg, IDC_RELAY_IP), on);
@@ -1918,6 +2013,7 @@ INT_PTR CALLBACK settingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 }
             }
             applyRelaySetting(on, ip, s.info.ip);   // the checks above make it succeed
+            applyRenderHostSetting(g_dlgRenderHost);   // reaches Thunderhead with the next report
             EndDialog(dlg, IDOK);
             return TRUE;
         }

@@ -16,6 +16,7 @@ struct NodeRecord {
     std::string name;
     std::string group;
     bool wol, boot, autoLogin, autoRod, autoLightning;   // the Info Flags of Client details: stored only, they change no setting or function
+    bool renderHost;                 // the sixth flag, Bryce 3D Network Render Host (B3NDHR): Thunderhead's record of the role; the agent's own setting travels in HELLO and REPORT
     std::string bootAlarm;           // Boot on Alarm time of day, "HH:MM" in 24-hour form; empty when never set
     bool autoShutdown;               // Auto Shutdown column; stored only, the shutdown daemon is not designed yet
     std::string comment;
@@ -58,7 +59,7 @@ struct NodeRecord {
     int shadeKey;                    // the shade conditions as last painted (see shadeKey in main.cpp); -1 never
 
     NodeRecord()
-        : wol(false), boot(false), autoLogin(false), autoRod(false), autoLightning(false), autoShutdown(false),
+        : wol(false), boot(false), autoLogin(false), autoRod(false), autoLightning(false), renderHost(false), autoShutdown(false),
           online(false), conn(-1), lastReportMs(0), nextReportMs(0), nudgeDueMs(0), arrivalSec(0), onlineSinceMs(0), updating(false), updateStaged(false), updatePrompted(false), updateStartMs(0),
           rebootAfterRename(false), pingPending(false), haveClockOffset(false), clockOffsetMs(0), pingSentMs(0), updateViaRelay(false),
           authenticated(false), keyed(false), shareState(0), shareChecking(false), shareNextMs(0), shareRetryUntilMs(0), helloFollowupPending(false),

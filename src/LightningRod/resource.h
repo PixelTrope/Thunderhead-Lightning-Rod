@@ -12,3 +12,6 @@
 #define IDC_RELAY_CHECK         2001  // Act as SMB1 Relay
 #define IDC_RELAY_IP            2002  // the Windows XP client relayed to
 #define IDC_RELAY_INFO          2003
+#define IDC_RENDERHOST_LABEL    2004  // "Bryce 3D Network Render Host (B3NDHR) mode"
+#define IDC_RENDERHOST_SWITCH   2005  // the two-position slider (owner-drawn button)
+#define IDC_RENDERHOST_STATE    2006  // "Off" / "On" beside it

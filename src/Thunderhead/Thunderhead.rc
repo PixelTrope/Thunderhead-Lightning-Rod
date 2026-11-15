@@ -44,6 +44,7 @@ BEGIN
             MENUITEM "Lightning Rod Ping", IDC_CMD_PING
             MENUITEM "Remove Checked Offline Clients", IDC_CMD_REMOVE_OFFLINE
             MENUITEM "Set Relay Address", IDC_CMD_SET_RELAY
+            MENUITEM "Toggle B3D Net Render Host", IDC_CMD_TOGGLE_RENDERHOST
             MENUITEM "Restart LR", IDC_CMD_RESTART_LR
             MENUITEM "Exit LR", IDC_CMD_EXIT_LR
         END
