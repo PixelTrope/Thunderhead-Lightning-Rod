@@ -16,6 +16,7 @@
 #include "Audio.h"
 #include "TeamViewer.h"
 #include "Sound.h"
+#include "Auth.h"
 #include "resource.h"
 
 #include <commctrl.h>
@@ -362,12 +363,14 @@ struct AgentStatus {
     int ipTry;                       // re-reads done so far
     std::string badIp;               // what was read, empty when the NIC had no address
     std::string hostName, hostIp, hostMac;
+    bool keyed;                      // farm.key is present beside the agent
+    bool hostAuthenticated;          // the OFFER of the current session proved the key
     int intervalSec;
     SYSTEMTIME lastReportTime;
     bool haveReport;
     StaticInfo info;
     Message report;
-    AgentStatus() : connected(false), waitingIp(false), ipTry(0), intervalSec(kDefaultReportInterval), haveReport(false) { memset(&lastReportTime, 0, sizeof(lastReportTime)); }
+    AgentStatus() : connected(false), waitingIp(false), ipTry(0), keyed(false), hostAuthenticated(false), intervalSec(kDefaultReportInterval), haveReport(false) { memset(&lastReportTime, 0, sizeof(lastReportTime)); }
 };
 
 // An address the agent can work from: not empty, not the 0.0.0.0 of a NIC
@@ -538,6 +541,27 @@ void tryWindow(RunningBatch& b)
 // window closes when the batch file ends. maximized opens the window maximized;
 // front brings it above the other windows, which would otherwise keep a window
 // opened by a background program behind them with only its taskbar button showing.
+// The real System32: through the Sysnative alias when this 32-bit process runs
+// on a 64-bit Windows, otherwise GetSystemDirectory. Empty on failure.
+std::wstring nativeSystemDirectory()
+{
+    BOOL wow64 = FALSE;
+    typedef BOOL (WINAPI* IsWow64ProcessFn)(HANDLE, PBOOL);
+    IsWow64ProcessFn fn = (IsWow64ProcessFn)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "IsWow64Process");
+    if (fn && fn(GetCurrentProcess(), &wow64) && wow64) {
+        wchar_t win[MAX_PATH];
+        UINT n = GetWindowsDirectoryW(win, MAX_PATH);
+        if (n > 0 && n < MAX_PATH) {
+            std::wstring sysnative = std::wstring(win, n) + L"\\Sysnative";
+            if (GetFileAttributesW((sysnative + L"\\cmd.exe").c_str()) != INVALID_FILE_ATTRIBUTES) return sysnative;
+        }
+    }
+    wchar_t sys[MAX_PATH];
+    UINT sn = GetSystemDirectoryW(sys, MAX_PATH);
+    if (sn == 0 || sn >= MAX_PATH) return std::wstring();
+    return std::wstring(sys, sn);
+}
+
 bool startBatch(const std::string& utf8, const std::string& kind, const std::string& exeName, bool maximized, bool front,
                 RunningBatch& out, std::string& err)
 {
@@ -608,15 +632,20 @@ bool startBatch(const std::string& utf8, const std::string& kind, const std::str
         CloseHandle(f);
         if (!ok) { err = "script file: " + lastErrorText((int)writeErr); return false; }
 
-        wchar_t sys[MAX_PATH];
-        UINT sn = GetSystemDirectoryW(sys, MAX_PATH);
-        if (sn == 0 || sn >= MAX_PATH) { err = "system directory: " + lastErrorText((int)GetLastError()); return false; }
+        // The 64-bit shells on a 64-bit Windows: this agent is a 32-bit program,
+        // and the System32 it sees is the redirected SysWOW64, whose cmd.exe and
+        // powershell.exe would run the script 32-bit, with the 32-bit System32
+        // and the WOW6432Node registry in place of the real ones. Sysnative is
+        // the alias through which a 32-bit process reaches the real System32
+        // (Vista and later); on a 32-bit Windows it does not exist and System32 is used.
+        std::wstring sysDir = nativeSystemDirectory();
+        if (sysDir.empty()) { err = "system directory: " + lastErrorText((int)GetLastError()); return false; }
         std::wstring script = folder + L"\\" + widen(name) + ext;
         if (ps) {
-            exe = std::wstring(sys, sn) + L"\\WindowsPowerShell\\v1.0\\powershell.exe";
+            exe = sysDir + L"\\WindowsPowerShell\\v1.0\\powershell.exe";
             cmd = L"\"" + exe + L"\" -NoProfile -ExecutionPolicy Bypass -File \"" + script + L"\"";
         } else {
-            exe = std::wstring(sys, sn) + L"\\cmd.exe";
+            exe = sysDir + L"\\cmd.exe";
             // cmd.exe removes the outer pair of quotes and runs what is between them.
             cmd = L"\"" + exe + L"\" /d /c \"\"" + script + L"\"\"";
         }
@@ -638,6 +667,7 @@ bool startBatch(const std::string& utf8, const std::string& kind, const std::str
         return false;
     }
     CloseHandle(pi.hThread);
+    if (kind != "exe") logLine(format("BATCH %s runs through %s", display.c_str(), narrow(exe).c_str()));
     out.process = pi.hProcess;
     out.file = display;
     out.startMs = tickMs();
@@ -710,6 +740,9 @@ public:
         tvWindowWanted_ = false;
         tvStartMs_ = 0;
         helloSoundPending_ = false;
+        hostAuthenticated_ = false;
+        lastKeyPollMs_ = 0;
+        lastRejectLogMs_ = 0;
         InitializeCriticalSection(&lock_);
     }
     ~Agent() { DeleteCriticalSection(&lock_); }
@@ -740,8 +773,10 @@ public:
             if (SUCCEEDED(co)) CoUninitialize();
         }
         status_.info = info_;
-        logLine(format("Lightning Rod %s starting: %s mac=%s ip=%s, SMB1 relay %s", TLR_VERSION_STRING,
-                       info_.name.c_str(), info_.mac.c_str(), info_.ip.c_str(), relayText().c_str()));
+        loadKey();
+        logLine(format("Lightning Rod %s starting: %s mac=%s ip=%s, SMB1 relay %s, farm.key %s", TLR_VERSION_STRING,
+                       info_.name.c_str(), info_.mac.c_str(), info_.ip.c_str(), relayText().c_str(),
+                       key_.empty() ? "absent (Thunderhead writes it into this folder through the share)" : "present"));
         logLine(format("os=%s cpu=%s %d MHz cores=%d mem=%d MB usable, %d MB installed, type %s disk=%d MB board=%s chipset=%s gpu=%s vram=%d MB",
                        info_.os.c_str(), info_.cpu.c_str(), info_.cpuMhz, info_.cores, info_.memMb, info_.memInstalledMb,
                        info_.memType.empty() ? "n/a" : info_.memType.c_str(), info_.diskTotalMb,
@@ -792,6 +827,17 @@ private:
     {
         int tries = 0;
         while (!validAddress(info_.ip)) {
+            if (tries == 0) {
+                // The alarm must be heard: the node has no network, so no AUDIO unmute
+                // from Thunderhead can reach it, and a mute left from an earlier session
+                // would silence it. The Logon sound, started by the window thread a
+                // moment ago, is given its 4.4 s first; a new sound replaces a playing one.
+                bool muted = false;
+                std::string method, err;
+                if (setAudioMute(false, muted, method, err)) logLine("playback device unmuted for the network alarm via " + method);
+                else logLine("playback device could not be unmuted for the network alarm: " + err);
+                Sleep(4500);
+            }
             playEventSound(SoundLrBadIp);   // once per unworkable reading: the start-up one and each re-read
             if (tries == kIpTries) {
                 logLine(format("no valid IP address after %d re-reads (last read \"%s\"); network error shown", kIpTries, info_.ip.c_str()));
@@ -833,12 +879,45 @@ private:
     }
 
     // ---- announcing ------------------------------------------------------
+    // ---- farm.key -------------------------------------------------------
+    // The shared secret of docs/PROTOCOL.md, Authentication: farm.key beside the
+    // agent, put there by Thunderhead through the shared folder (or by hand).
+    // With it the agent connects only to a host whose OFFER proves it; without
+    // it the agent connects to any host but refuses every command except SET
+    // and PING until the file appears, and then reconnects so that the host is
+    // proved as well.
+    void loadKey()
+    {
+        std::string key = readKeyFile(exeDirectory() + L"\\" + kFarmKeyFile);
+        bool changed = key != key_;
+        key_ = key;
+        EnterCriticalSection(&lock_);
+        status_.keyed = !key_.empty();
+        LeaveCriticalSection(&lock_);
+        if (changed) notify();
+    }
+
+    // Re-reads farm.key every few seconds while none is held; true when it appeared.
+    bool pollKey()
+    {
+        if (!key_.empty()) return false;
+        unsigned long long now = tickMs();
+        if (now - lastKeyPollMs_ < 5000) return false;
+        lastKeyPollMs_ = now;
+        loadKey();
+        if (key_.empty()) return false;
+        logLine("farm.key appeared in " + narrow(exeDirectory()));
+        return true;
+    }
+
     void sendAnnounce()
     {
         Message m("ANNOUNCE");
         m.set("mac", info_.mac);
         m.set("name", info_.name);
         m.set("agent", TLR_VERSION_STRING);
+        announceChallenge_ = randomHex(kChallengeBytes);
+        m.set("challenge", announceChallenge_);
         std::string wire = m.encode();
         std::vector<unsigned long> targets = broadcastAddresses();
         targets.push_back(INADDR_BROADCAST);
@@ -858,6 +937,7 @@ private:
         bool logged = false;
         while (tcp_ == INVALID_SOCKET) {
             unsigned long long now = tickMs();
+            pollKey();
             if (now >= nextAnnounce) {
                 sendAnnounce();
                 nextAnnounce = now + (unsigned long long)kAnnounceIntervalSec * 1000;
@@ -880,7 +960,27 @@ private:
                 int port = m.getInt("port", kDefaultTcpPort);
                 sockaddr_in host = from;
                 host.sin_port = htons((unsigned short)port);
-                logLine(format("OFFER from %s (%s) port %d", ipText(from).c_str(), m.get("host").c_str(), port));
+                // A held key must be proved by the OFFER: auth= over the challenge token of this
+                // agent's ANNOUNCE. An OFFER that fails is ignored; the file is re-read
+                // in case the key was replaced on disk.
+                bool proved = false;
+                if (!key_.empty()) {
+                    proved = m.has("auth") && !announceChallenge_.empty() &&
+                             equalsConstantTime(m.get("auth"), offerAuth(key_, announceChallenge_, m.get("host"), format("%d", port)));
+                    if (!proved) {
+                        if (now - lastRejectLogMs_ > 60000) {
+                            lastRejectLogMs_ = now;
+                            logLine(format("OFFER from %s (%s) port %d rejected: %s", ipText(from).c_str(), m.get("host").c_str(), port,
+                                           m.has("auth") ? "its farm.key is not this node's" : "it carries no proof of the farm key (Thunderhead before 0.4.0?)"));
+                        }
+                        loadKey();
+                        continue;
+                    }
+                }
+                hostAuthenticated_ = proved;
+                offerChallenge_ = m.has("challenge") ? m.get("challenge") : m.get("nonce");   // nonce= from a 0.4.0 host
+                logLine(format("OFFER from %s (%s) port %d%s", ipText(from).c_str(), m.get("host").c_str(), port,
+                               proved ? ", host authenticated" : ", unauthenticated: no farm.key here yet"));
                 SOCKET s = connectWithTimeout(host, 3000);
                 if (s == INVALID_SOCKET) { logLine("connect failed"); continue; }
                 tcp_ = s;
@@ -894,6 +994,7 @@ private:
                 status_.hostName = m.get("host");
                 status_.hostIp = hostIp;
                 status_.hostMac = macOf(hostIp, info_);
+                status_.hostAuthenticated = hostAuthenticated_;
                 status_.haveReport = false;
                 status_.report = Message();
                 LeaveCriticalSection(&lock_);
@@ -939,6 +1040,11 @@ private:
         m.set("lightning2_version", info_.lightning2Version);
         m.set("relay", boolText(relay));
         m.set("relay_ip", relay ? relayIp : std::string());
+        m.set("keyed", boolText(!key_.empty()));
+        if (!key_.empty() && !offerChallenge_.empty()) {
+            m.set("challenge", offerChallenge_);
+            m.set("auth", helloAuth(key_, offerChallenge_, info_.mac));
+        }
         bool ok = sendMessage(m);
         // The sound of this event waits for Thunderhead's SET, which answers the
         // HELLO within the same exchange: by then a scheme message that names
@@ -1013,6 +1119,16 @@ private:
 
     void handle(const Message& m)
     {
+        if (key_.empty() && m.verb != "SET" && m.verb != "PING") {
+            // Unpaired: the host was not proved, so nothing it asks for is done.
+            logLine(m.verb + " refused: no farm.key on this node yet, the host is not authenticated");
+            Message ack("ACK");
+            ack.set("cmd", m.verb);
+            ack.set("ok", "no");
+            ack.set("error", "not paired: this node holds no farm.key; Thunderhead writes it into the shared folder once that folder opens from the host");
+            sendMessage(ack);
+            return;
+        }
         if (m.verb == "SET") {
             int iv = m.getInt("interval", intervalSec_);
             if (iv < 1) iv = 1;
@@ -1253,8 +1369,11 @@ private:
                 }
             }
         } else if (m.verb == "PING") {
-            // Report at once, with every value rather than only the changed ones,
-            // and restart the report timer from here. Agents before 0.2.11 sent PONG.
+            // HELLO again, so that both sides play their HELLO sounds and Thunderhead
+            // lights the row, then a report with every value rather than only the
+            // changed ones, and the report timer restarts from here. Agents from
+            // 0.2.11 to 0.3.6 answered with the report alone; older ones sent PONG.
+            if (!sendHello()) { dropSession("hello send failed"); return; }
             sent_ = Message();
             sendReport();
             nextReport_ = tickMs() + (unsigned long long)intervalSec_ * 1000;
@@ -1546,6 +1665,12 @@ private:
                 if (!sendHello()) { dropSession("hello send failed"); return; }
                 logLine("HELLO sent again: SMB1 relay " + relayText());
             }
+            if (pollKey()) {
+                // This session began without a key, so the host was never proved;
+                // the next OFFER has to prove it.
+                dropSession("farm.key arrived; reconnecting to authenticate the host");
+                return;
+            }
             unsigned long long now = tickMs();
             if (now >= nextReport_) {
                 if (!sendReport()) { dropSession("report send failed"); return; }
@@ -1593,6 +1718,12 @@ private:
     bool tvWindowWanted_;                 // TEAMVIEWER started TeamViewer and its window is still to be found
     unsigned long long tvStartMs_;
     bool helloSoundPending_;              // HELLO sent; the Proximity Connection sound plays when Thunderhead's SET answers it
+    std::string key_;                     // farm.key; empty while unpaired
+    std::string announceChallenge_;           // challenge token of the latest ANNOUNCE, which the OFFER has to sign
+    std::string offerChallenge_;              // challenge token of the OFFER this session came from, signed in HELLO
+    bool hostAuthenticated_;              // the OFFER of this session proved the key
+    unsigned long long lastKeyPollMs_;    // tickMs() of the last re-read of farm.key while unpaired
+    unsigned long long lastRejectLogMs_;  // tickMs() of the last "OFFER rejected" line
     int intervalSec_;
     unsigned long long nextReport_;
     CRITICAL_SECTION lock_;
@@ -1665,7 +1796,8 @@ void refreshAll()
     std::wstring host;
     if (s.connected) {
         host = L"Reporting to Thunderhead on " + widen(s.hostName) + L"  (" + widen(s.hostIp) +
-               (s.hostMac.empty() ? L"" : L", " + widen(s.hostMac)) + L")";
+               (s.hostMac.empty() ? L"" : L", " + widen(s.hostMac)) + L")" +
+               (s.hostAuthenticated ? L", host authenticated" : L", host not authenticated: commands refused until farm.key arrives");
     } else if (s.waitingIp) {
         host = widen(format("No valid IP address (read \"%s\"): re-reading it in %u s, try %d of %d",
                             s.badIp.c_str(), (unsigned)(kIpWaitMs / 1000), s.ipTry, kIpTries));
@@ -1719,6 +1851,8 @@ void refreshAll()
                                         : widen(i.lightning2Version.empty() ? i.lightning2Path : i.lightning2Version + " at " + i.lightning2Path));
     setRow(row++, L"Sounds",              widen(format("%u file(s) in ", (unsigned)soundFilesIn(soundDir()).size())) + soundDir());
     setRow(row++, L"SMB1 relay",          widen(relayText()));
+    setRow(row++, L"Authentication",      s.keyed ? L"farm.key present: only a host that proves it is obeyed"
+                                                  : L"no farm.key in " + exeDirectory() + L": Thunderhead writes it through the shared folder; commands are refused until then");
     refreshClock();
 }
 

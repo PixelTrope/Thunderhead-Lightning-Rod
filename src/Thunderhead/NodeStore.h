@@ -42,11 +42,27 @@ struct NodeRecord {
     unsigned long long pingSentMs;   // tickMs() of that PING
     bool updateViaRelay;             // the running update was staged through an SMB1 relay: the node swaps the file in itself
     std::string relayProbe;          // a relay's answer to RELAY op=probe: "reachable" or the error
+    // Authentication and the shared-folder gate (docs/PROTOCOL.md, Authentication)
+    bool authenticated;              // its HELLO proved the farm key
+    bool keyed;                      // the agent says it holds a farm.key (HELLO keyed=yes; absent from agents before 0.4.0)
+    int shareState;                  // the host's view of \node\share: 0 not checked yet, 1 readable, 2 not readable
+    std::string shareError;          // why, when shareState is 2
+    std::wstring sharePath;          // the UNC path that opened, when shareState is 1
+    bool shareChecking;              // a check thread is running for it
+    unsigned long long shareNextMs;  // tickMs() when the next check is due (0 at once)
+    unsigned long long shareRetryUntilMs;   // while before this, failed checks are repeated every few seconds (after Open Client's Shared Folder)
+    bool helloFollowupPending;       // the messages that follow HELLO (audio switch, sound scheme, relay probe) wait for the share check
+    unsigned long long lastAnnounceMs;      // tickMs() of its latest ANNOUNCE
+    int announcesUnanswered;         // ANNOUNCEs since its last HELLO
+    unsigned long long pingFlashUntilMs;    // the row is painted in the ping color until then (0 none)
+    int shadeKey;                    // the shade conditions as last painted (see shadeKey in main.cpp); -1 never
 
     NodeRecord()
         : wol(false), boot(false), autoLogin(false), autoRod(false), autoLightning(false), autoShutdown(false),
           online(false), conn(-1), lastReportMs(0), nextReportMs(0), nudgeDueMs(0), arrivalSec(0), onlineSinceMs(0), updating(false), updateStaged(false), updatePrompted(false), updateStartMs(0),
-          rebootAfterRename(false), pingPending(false), haveClockOffset(false), clockOffsetMs(0), pingSentMs(0), updateViaRelay(false) {}
+          rebootAfterRename(false), pingPending(false), haveClockOffset(false), clockOffsetMs(0), pingSentMs(0), updateViaRelay(false),
+          authenticated(false), keyed(false), shareState(0), shareChecking(false), shareNextMs(0), shareRetryUntilMs(0), helloFollowupPending(false),
+          lastAnnounceMs(0), announcesUnanswered(0), pingFlashUntilMs(0), shadeKey(-1) {}
 };
 
 struct Settings {

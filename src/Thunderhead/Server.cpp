@@ -1,9 +1,15 @@
 #include "Server.h"
+#include "Auth.h"
 #include "StrUtil.h"
 
 #include <cstring>
 
 namespace tlr {
+
+// An OFFER challenge token is good for this long; an agent connects within milliseconds
+// of the OFFER, and a renewed HELLO on an authenticated connection is not
+// checked again, so the window only has to outlast a slow connect.
+const unsigned long long kChallengeLifeMs = 10 * 60 * 1000;
 
 Server::Server()
     : window_(NULL), message_(0), tcpPort_(0), stopFlag_(0),
@@ -18,12 +24,13 @@ Server::~Server()
     DeleteCriticalSection(&lock_);
 }
 
-bool Server::start(HWND window, UINT message, unsigned short tcpPort, const std::string& hostName)
+bool Server::start(HWND window, UINT message, unsigned short tcpPort, const std::string& hostName, const std::string& farmKey)
 {
     window_ = window;
     message_ = message;
     tcpPort_ = tcpPort;
     hostName_ = hostName;
+    farmKey_ = farmKey;
 
     udp_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     listen_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -91,7 +98,7 @@ void Server::close(int conn)
     LeaveCriticalSection(&lock_);
 }
 
-void Server::post(NetEvent::Type type, int conn, const std::string& ip, const Message& msg, const std::string& text)
+void Server::post(NetEvent::Type type, int conn, const std::string& ip, const Message& msg, const std::string& text, bool authenticated)
 {
     NetEvent* e = new NetEvent();
     e->type = type;
@@ -99,6 +106,7 @@ void Server::post(NetEvent::Type type, int conn, const std::string& ip, const Me
     e->ip = ip;
     e->msg = msg;
     e->text = text;
+    e->authenticated = authenticated;
     if (!PostMessageW(window_, message_, 0, (LPARAM)e)) delete e;
 }
 
@@ -109,6 +117,50 @@ void Server::dropConn(size_t index, const std::string& reason)
     post(NetEvent::Disconnected, c->id, c->ip, Message(), reason);
     conns_.erase(conns_.begin() + index);
     delete c;
+}
+
+// OFFER to an ANNOUNCE: host and port as before, plus challenge token=, a fresh value
+// the agent has to echo in its HELLO proof, and auth=, this host's proof of the
+// farm key over the challenge token the agent put in its ANNOUNCE (agents before 0.4.0
+// send none and ignore both fields).
+void Server::answerAnnounce(const Message& m, const sockaddr_in& from)
+{
+    unsigned long long now = tickMs();
+    for (std::map<std::string, unsigned long long>::iterator it = offeredChallenges_.begin(); it != offeredChallenges_.end();) {
+        if (now - it->second > kChallengeLifeMs) offeredChallenges_.erase(it++); else ++it;
+    }
+    Message offer("OFFER");
+    offer.set("host", hostName_);
+    offer.set("port", (long long)tcpPort_);
+    std::string challenge = randomHex(kChallengeBytes);
+    if (!challenge.empty()) {
+        offeredChallenges_[challenge] = now;
+        offer.set("challenge", challenge);
+        offer.set("nonce", challenge);   // the field's name in 0.4.0 agents; dropped once none remain
+        std::string theirs = m.has("challenge") ? m.get("challenge") : m.get("nonce");
+        if (!farmKey_.empty() && !theirs.empty()) offer.set("auth", offerAuth(farmKey_, theirs, hostName_, format("%d", (int)tcpPort_)));
+    }
+    std::string wire = offer.encode();
+    sendto(udp_, wire.data(), (int)wire.size(), 0, (sockaddr*)&from, sizeof(from));
+    post(NetEvent::Announce, -1, ipText(from), m, "");
+}
+
+// A HELLO that carries challenge token= and auth= is checked: the challenge token must be one this
+// host put in an OFFER within kChallengeLifeMs, and auth must be the proof of
+// the farm key over it and the agent's MAC. A HELLO without the fields comes
+// from an agent before 0.4.0 or from one that holds no farm.key yet; it is
+// accepted as unauthenticated and the window decides what it may do. A
+// renewed HELLO on a connection already authenticated is not checked again.
+bool Server::verifyHello(Conn* c, const Message& m, std::string& why)
+{
+    if (c->authenticated) return true;
+    if (!m.has("auth")) return true;   // unauthenticated, not refused
+    std::string challenge = m.has("challenge") ? m.get("challenge") : m.get("nonce");   // nonce= from 0.4.0 agents
+    if (farmKey_.empty()) { why = "this host has no farm key"; return false; }
+    if (offeredChallenges_.find(challenge) == offeredChallenges_.end()) { why = "its challenge token is not one this host offered"; return false; }
+    if (!equalsConstantTime(m.get("auth"), helloAuth(farmKey_, challenge, m.get("mac")))) { why = "its farm.key is not this host's"; return false; }
+    c->authenticated = true;
+    return true;
 }
 
 DWORD WINAPI Server::threadMain(LPVOID p)
@@ -145,13 +197,7 @@ void Server::loop()
             int n = recvfrom(udp_, buf, sizeof(buf) - 1, 0, (sockaddr*)&from, &fromLen);
             if (n > 0) {
                 Message m;
-                if (parseMessage(std::string(buf, (size_t)n), m) && m.verb == "ANNOUNCE") {
-                    Message offer("OFFER");
-                    offer.set("host", hostName_);
-                    offer.set("port", (long long)tcpPort_);
-                    std::string wire = offer.encode();
-                    sendto(udp_, wire.data(), (int)wire.size(), 0, (sockaddr*)&from, sizeof(from));
-                }
+                if (parseMessage(std::string(buf, (size_t)n), m) && m.verb == "ANNOUNCE") answerAnnounce(m, from);
             }
         }
 
@@ -166,6 +212,7 @@ void Server::loop()
                 c->s = s;
                 c->ip = ipText(from);
                 c->pendingClose = false;
+                c->authenticated = false;
                 EnterCriticalSection(&lock_);
                 c->id = nextId_++;
                 conns_.push_back(c);
@@ -185,11 +232,22 @@ void Server::loop()
             if (c->parser.overflow()) { dropConn(i, "oversized message"); continue; }
             Message m;
             bool dropped = false;
-            while (c->parser.next(m)) {
+            while (!dropped && c->parser.next(m)) {
                 if (m.verb == "HELLO") {
+                    std::string why;
+                    if (!verifyHello(c, m, why)) {
+                        // A refused HELLO ends the connection; the agent goes back to
+                        // announcing, and its OFFERs keep failing its own check as well
+                        // until the two farm.key files agree.
+                        post(NetEvent::Info, -1, c->ip, m, format("HELLO from %s (%s, agent %s) refused: %s", m.get("name").c_str(), c->ip.c_str(),
+                                                                   m.get("agent").c_str(), why.c_str()));
+                        dropConn(i, "authentication failed");
+                        dropped = true;
+                        break;
+                    }
                     // The SET that answers HELLO is sent by the window thread, which
                     // knows the report slots of the other nodes (see sendSchedule).
-                    post(NetEvent::Hello, c->id, c->ip, m, "");
+                    post(NetEvent::Hello, c->id, c->ip, m, "", c->authenticated);
                 } else if (m.verb == "REPORT") {
                     post(NetEvent::Report, c->id, c->ip, m, "");
                 } else if (m.verb == "ACK") {

@@ -18,6 +18,7 @@
 #include "Server.h"
 #include "Theme.h"
 #include "Sound.h"
+#include "Auth.h"
 #include "resource.h"
 
 #include <commctrl.h>
@@ -44,8 +45,10 @@ namespace {
 const UINT WM_NET = WM_APP + 1;
 const UINT WM_UPDATE_DONE = WM_APP + 2;   // lParam: UpdateResult*
 const UINT WM_THEME_CHANGED = WM_APP + 5; // to every other top-level window of this thread: dress for the current scheme
+const UINT WM_SHARE_CHECKED = WM_APP + 6; // lParam: ShareResult* from a share check thread
 const UINT_PTR kTimerId = 1;
 const UINT_PTR kNudgeTimerId = 2;   // 100 ms while a nudge SET is pending
+const UINT_PTR kFlashTimerId = 3;   // 100 ms while a row is painted in the ping color
 
 HINSTANCE g_inst = NULL;
 HWND g_main = NULL, g_status = NULL;
@@ -63,12 +66,23 @@ NodeStore* g_store = NULL;
 Server* g_server = NULL;
 Logger g_events;
 std::map<std::string, Logger*> g_nodeLogs;
+std::string g_farmKey;                    // farm.key beside Thunderhead.exe; see docs/PROTOCOL.md, Authentication
+std::string g_pushVersion;                // version of the agent file to push; what Outdated is measured against
 
 // SMB1 relay lookups; defined with the relay code below.
 bool isRelay(const NodeRecord* n);
 std::string relayTarget(const NodeRecord* n);
 NodeRecord* nodeAtIp(const std::string& ip);
 NodeRecord* relayFor(const NodeRecord* n);
+// Shared-folder gate and authentication; defined with the share check code below.
+std::string shareStateText(const NodeRecord* n);
+std::string authText(const NodeRecord* n);
+bool nodeOutdated(const NodeRecord* n);
+bool commandAllowed(NodeRecord* n, const std::string& label);
+int shadeKey(const NodeRecord* n);
+COLORREF rowShade(const NodeRecord* n, int row, COLORREF* textColor);
+NodeRecord* nodeAt(int row);
+void fillRect(HDC dc, const RECT& rc, COLORREF color);
 
 // ---------------------------------------------------------------- inventory columns
 
@@ -283,7 +297,8 @@ std::wstring columnText(const NodeRecord& n, int col)
     case ColName:         return widen(n.name.empty() ? n.mac : n.name);
     case ColIp:           return widen(nodeIp(n));
     case ColMac:          return widen(n.mac);
-    case ColStatus:       return n.updating ? L"Updating" : (n.online ? L"Online" : L"Offline");
+    case ColStatus:       return n.updating ? L"Updating" : n.online ? L"Online"
+                               : (n.lastAnnounceMs && tickMs() - n.lastAnnounceMs < 12000) ? L"Announcing" : L"Offline";
     case ColAgent:        return widen(n.hello.get("agent"));
     case ColRendering:    return !live ? L"" : (parseBool(r.get("rendering")) ? L"Yes" : L"No");
     case ColLightning:    return !live ? L"" : (r.get("lightning") == "running" ? L"Running" : L"Stopped");
@@ -330,6 +345,17 @@ NodeRecord* nodeAt(int row)
 
 void setCell(HWND list, int row, int col, const std::wstring& text)
 {
+    // Only a changed cell is written. LVM_SETITEMTEXT repaints the cell at
+    // once, erasing it to the list's background first, so a cell rewritten with
+    // the same text every second flashed white.
+    wchar_t have[512];
+    LVITEMW get;
+    memset(&get, 0, sizeof(get));
+    get.iSubItem = col;
+    get.pszText = have;
+    get.cchTextMax = 512;
+    int len = (int)SendMessageW(list, LVM_GETITEMTEXTW, (WPARAM)row, (LPARAM)&get);
+    if (len >= 0 && len < 511 && text.compare(have) == 0) return;
     LVITEMW item;
     memset(&item, 0, sizeof(item));
     item.iSubItem = col;
@@ -362,6 +388,14 @@ void refreshRow(NodeRecord* n, int onlyColumn = -1)
         if (onlyColumn >= 0 && col != onlyColumn) continue;
         if (g_edit && row == g_editRow && col == g_editCol) continue;   // being edited
         setCell(g_list, row, col, columnText(*n, col));
+    }
+    // The cells a text update repaints take the shade of that moment; when the
+    // condition behind the shade has changed since the row was last painted,
+    // the whole row is repainted so that every cell shows the same shade.
+    int key = shadeKey(n);
+    if (key != n->shadeKey) {
+        n->shadeKey = key;
+        SendMessageW(g_list, LVM_REDRAWITEMS, (WPARAM)row, (LPARAM)row);
     }
     if (inserted) applySort();   // a new row takes its place in the current order
 }
@@ -632,6 +666,8 @@ void showStaticPane(NodeRecord* n)
     add(L"Auto Shutdown", n->autoShutdown ? L"Yes" : L"No");
     add(L"Boot on Alarm time", n->bootAlarm.empty() ? std::wstring(L"not set") : bootAlarmText(n->bootAlarm));
     add(L"Agent", widen(h.get("agent")));
+    add(L"Shared folder", widen(shareStateText(n)));
+    add(L"Authentication", widen(authText(n)));
     add(L"OS", widen(h.get("os")));
     add(L"CPU", widen(h.get("cpu")));
     add(L"MHz", widen(h.get("cpu_mhz")));
@@ -842,6 +878,7 @@ void checkOutdated()
                     L"Thunderhead", MB_OK | MB_ICONWARNING);
         return;
     }
+    g_pushVersion = version;
     int outdated = 0, online = 0;
     int count = (int)SendMessageW(g_list, LVM_GETITEMCOUNT, 0, 0);
     for (int row = 0; row < count; ++row) {
@@ -1006,6 +1043,7 @@ static std::string byteText(ULONGLONG bytes);
 struct UpdateJob {
     std::string name; std::string ip; std::wstring source; std::wstring share; std::wstring dir; std::wstring sounds;
     bool viaRelay; int relayConn; std::string relayName, relayIp;   // the client's share is reached through a relay
+    std::string key;                                                 // farm.key to place beside the agent
 };
 struct UpdateResult {
     std::string name; int phase; bool ok; std::string text; std::wstring dir;
@@ -1085,6 +1123,20 @@ std::string copySoundsTo(const std::wstring& from, const std::wstring& shareDir)
     return text;
 }
 
+// Writes farm.key into dir (ending with a backslash) unless the file there
+// already holds the key. Returns text for the log, empty when nothing was done.
+std::string copyKeyTo(const std::wstring& dir, const std::string& key, bool& written)
+{
+    written = false;
+    if (key.empty()) return std::string();
+    std::wstring path = dir + kFarmKeyFile;
+    if (readKeyFile(path) == key) return std::string();
+    std::string err;
+    if (!writeKeyFile(path, key, err)) return "; farm.key not written: " + err;
+    written = true;
+    return "; farm.key written";
+}
+
 // Phase 1, worker thread: places the agent file beside the running agent as
 // LightningRod.new while everything on the node is still running, so a share
 // that cannot be written is reported before anything is stopped.
@@ -1111,7 +1163,8 @@ DWORD WINAPI updateStageThread(LPVOID p)
             err = "copy to " + narrow(stage) + " failed: " + lastErrorText((int)GetLastError());
             removeTree(stage);
         } else {
-            std::string sounds = copySoundsTo(job->sounds, stage);
+            bool keyWritten = false;
+            std::string sounds = copySoundsTo(job->sounds, stage) + copyKeyTo(stage, job->key, keyWritten);
             Message ack;
             if (relayRequest(job->relayConn, relayMessage("push", relayJob, job->ip, job->share), 10 * 60 * 1000, ack, err)) {
                 res->ok = true;
@@ -1144,7 +1197,7 @@ DWORD WINAPI updateStageThread(LPVOID p)
             if (!res->needCredentials && isCredentialError(err)) { res->needCredentials = true; res->credDir = dirs[i]; }
         }
     }
-    if (res->ok) res->text += copySoundsTo(job->sounds, res->dir);
+    if (res->ok) { bool keyWritten = false; res->text += copySoundsTo(job->sounds, res->dir) + copyKeyTo(res->dir, job->key, keyWritten); }
     if (!res->ok) res->text = errors;
     delete job;
     if (!PostMessageW(g_main, WM_UPDATE_DONE, 0, (LPARAM)res)) delete res;
@@ -1199,6 +1252,7 @@ void startUpdateThread(NodeRecord* n, LPTHREAD_START_ROUTINE fn, const char* wha
     job->share = widen(g_store->settings.shareName);
     job->dir = n->updateDir;
     job->sounds = soundDir();
+    job->key = g_farmKey;
     NodeRecord* relay = relayFor(n);
     job->viaRelay = relay != NULL;
     job->relayConn = relay ? relay->conn : -1;
@@ -1257,6 +1311,13 @@ void onUpdateDone(UpdateResult* r)
         runCredQueue();
         return;
     }
+    if (r->phase == 1 && r->ok) {
+        // The staging wrote the share, which proves it readable from here.
+        n->shareState = 1;
+        n->shareError.clear();
+        n->sharePath = r->dir;
+        n->shareNextMs = tickMs() + 10 * 60 * 1000;
+    }
     if (r->phase == 1 && r->ok && n->online) {
         n->updateDir = r->dir;
         n->updateStaged = true;
@@ -1285,6 +1346,7 @@ void updateChecked()
         MessageBoxW(g_main, (L"No agent file with a version resource at\n" + file).c_str(), L"Thunderhead", MB_OK | MB_ICONWARNING);
         return;
     }
+    g_pushVersion = version;
     std::vector<NodeRecord*> targets = checkedNodes();
     int sent = 0;
     for (size_t i = 0; i < targets.size(); ++i) {
@@ -1310,17 +1372,20 @@ void sendCommandMessage(const Message& m)
 {
     std::vector<NodeRecord*> targets = checkedNodes();
     if (targets.empty()) { updateStatusBar(L"|  no clients checked"); return; }
-    int sent = 0;
+    int sent = 0, blocked = 0;
     for (size_t i = 0; i < targets.size(); ++i) {
         NodeRecord* n = targets[i];
         if (!n->online) continue;
+        if (!commandAllowed(n, m.oneLine())) { ++blocked; continue; }
         if (g_server->send(n->conn, m)) {
             ++sent;
             logEvent(format("%s -> %s", m.oneLine().c_str(), n->name.c_str()));
             logNode(*n, std::string("-> ") + m.oneLine());
         }
     }
-    updateStatusBar(widen(format("|  %s sent to %d of %d checked", m.verb.c_str(), sent, (int)targets.size())).c_str());
+    std::string status = format("|  %s sent to %d of %d checked", m.verb.c_str(), sent, (int)targets.size());
+    if (blocked) status += format(", %d blocked: shared folder not readable", blocked);
+    updateStatusBar(widen(status).c_str());
 }
 
 void sendCommand(const char* verb)
@@ -1357,9 +1422,9 @@ void pingChecked()
             continue;
         }
         Message m("PING");
-        if (!g_server->send(n->conn, m)) {
+        if (!commandAllowed(n, "PING") || !g_server->send(n->conn, m)) {
             ++g_pingNoReply;
-            logEvent("PING could not be sent to " + n->name);
+            logEvent("PING not sent to " + n->name);
             continue;
         }
         ++g_pingSent;
@@ -1606,7 +1671,7 @@ const char* const kPowerAgent = "0.2.6";
 void sendVersioned(const Message& m, const std::string& label, const char* minAgent)
 {
     std::vector<NodeRecord*> targets = checkedNodes();
-    int online = 0, sent = 0, old = 0;
+    int online = 0, sent = 0, old = 0, blocked = 0;
     for (size_t i = 0; i < targets.size(); ++i) {
         NodeRecord* n = targets[i];
         if (!n->online) continue;
@@ -1618,6 +1683,7 @@ void sendVersioned(const Message& m, const std::string& label, const char* minAg
                             label.c_str(), n->name.c_str(), agent.c_str(), minAgent));
             continue;
         }
+        if (!commandAllowed(n, label)) { ++blocked; continue; }
         if (g_server->send(n->conn, m)) {
             ++sent;
             logEvent(format("%s -> %s", label.c_str(), n->name.c_str()));
@@ -1627,6 +1693,7 @@ void sendVersioned(const Message& m, const std::string& label, const char* minAg
     if (online == 0) { updateStatusBar(L"|  no online clients checked"); return; }
     std::string status = format("|  %s sent to %d of %d checked", label.c_str(), sent, (int)targets.size());
     if (old) status += format(", %d skipped: agent older than %s", old, minAgent);
+    if (blocked) status += format(", %d blocked: shared folder not readable", blocked);
     updateStatusBar(widen(status).c_str());
 }
 
@@ -1651,7 +1718,7 @@ void sendAudio(const char* action)
 // One message to one online client, logged as the others are.
 bool sendToNode(NodeRecord* n, const Message& m, const std::string& label)
 {
-    if (!n->online || !g_server->send(n->conn, m)) return false;
+    if (!n->online || !commandAllowed(n, label) || !g_server->send(n->conn, m)) return false;
     logEvent(format("%s -> %s", label.c_str(), n->name.c_str()));
     logNode(*n, "-> " + label);
     return true;
@@ -3040,6 +3107,11 @@ void openSharedFolders()
             continue;
         }
         paths->push_back("\\\\" + n->name + "\\" + g_store->settings.shareName + "\\");
+        // The folder opening in Explorer is where the credentials get typed; the
+        // share is checked again every few seconds for a while so that the row
+        // clears as soon as they are in.
+        n->shareRetryUntilMs = tickMs() + 120000;
+        if (n->shareState != 1) n->shareNextMs = tickMs() + 5000;
     }
     if (paths->empty()) { delete paths; return; }
     logEvent(format("opening the shared folder of %u client(s)", (unsigned)paths->size()));
@@ -3460,7 +3532,7 @@ void renameChecked()
         if (!n->online) continue;          // went offline while the dialog was up
         Message m("RENAME");
         m.set("name", narrow(req.name));
-        if (g_server->send(n->conn, m)) {
+        if (commandAllowed(n, "RENAME") && g_server->send(n->conn, m)) {
             ++sent;
             n->rebootAfterRename = req.reboot;
             logEvent(format("RENAME -> %s (%s): new name %s%s", n->name.c_str(), n->mac.c_str(), narrow(req.name).c_str(),
@@ -3965,10 +4037,287 @@ INT_PTR CALLBACK intervalDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 
 // ---------------------------------------------------------------- network events
 
+// ---------------------------------------------------------------- shared-folder gate, pairing, ping flash
+// No command goes to a node whose shared folder this host has not read: the
+// farm's security is Windows file sharing, so a host that cannot open
+// \\node\LightningRod has no business commanding the node. SET, the report
+// schedule, is the one message outside the gate, since it instructs nothing. A
+// node's share is checked on a worker thread when its HELLO arrives, every
+// minute while it fails, every ten minutes while it passes, and every few
+// seconds for two minutes after Open Client's Shared Folder, where the
+// credentials get typed. A readable share also receives farm.key, which pairs
+// the agent (see Authentication). A node reached through an SMB1 relay is
+// checked by the relay's RELAY op=probe instead and paired by a push through it.
+
+struct ShareJob { std::string mac, name, ip; std::wstring share; std::string key; bool viaRelay; int relayConn; std::string relayName, relayIp; };
+struct ShareResult { std::string mac; bool viaRelay; bool ok; std::wstring dir; std::string error; bool credential; bool keyWritten; std::string keyError; };
+
+DWORD WINAPI shareCheckThread(LPVOID p)
+{
+    ShareJob* job = (ShareJob*)p;
+    ShareResult* res = new ShareResult();
+    res->mac = job->mac;
+    res->viaRelay = job->viaRelay;
+    res->ok = false;
+    res->credential = false;
+    res->keyWritten = false;
+    if (job->viaRelay) {
+        // Pairing only: farm.key is staged under relay\<job> on the relay's share
+        // and RELAY op=push carries it on over SMB1. Reachability came from the probe.
+        std::string relayJob = newRelayJob(), err;
+        std::wstring stage = relayStageDir(job->relayIp, job->share, relayJob);
+        bool written = false;
+        if (!makeDirs(stage)) {
+            err = "staging folder " + narrow(stage) + " on relay " + job->relayName + " could not be created: " + lastErrorText((int)GetLastError());
+        } else {
+            std::string note = copyKeyTo(stage, job->key, written);
+            Message ack;
+            if (!written) { err = note.size() > 2 ? note.substr(2) : std::string("no key to write"); removeTree(stage); }
+            else if (!relayRequest(job->relayConn, relayMessage("push", relayJob, job->ip, job->share), 2 * 60 * 1000, ack, err)) removeTree(stage);
+            else res->keyWritten = true;
+        }
+        res->ok = true;
+        res->keyError = err;
+        delete job;
+        if (!PostMessageW(g_main, WM_SHARE_CHECKED, 0, (LPARAM)res)) delete res;
+        return 0;
+    }
+    std::vector<std::wstring> dirs;
+    dirs.push_back(L"\\\\" + widen(job->ip) + L"\\" + job->share + L"\\");
+    if (!job->name.empty() && nameResolvesTo(job->name, job->ip)) dirs.push_back(L"\\\\" + widen(job->name) + L"\\" + job->share + L"\\");
+    std::string errors;
+    for (size_t i = 0; i < dirs.size() && !res->ok; ++i) {
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((dirs[i] + L"*").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) { FindClose(h); res->ok = true; res->dir = dirs[i]; break; }
+        int err = (int)GetLastError();
+        errors += std::string(errors.empty() ? "" : "; ") + narrow(dirs[i]) + ": " + lastErrorText(err);
+        if (isCredentialError(err)) res->credential = true;
+    }
+    if (res->ok) {
+        std::string note = copyKeyTo(res->dir, job->key, res->keyWritten);
+        if (!res->keyWritten && note.size() > 2) res->keyError = note.substr(2);
+    } else {
+        res->error = errors;
+    }
+    delete job;
+    if (!PostMessageW(g_main, WM_SHARE_CHECKED, 0, (LPARAM)res)) delete res;
+    return 0;
+}
+
+std::string shareStateText(const NodeRecord* n)
+{
+    if (n->shareState == 1) return "readable from this host: " + (n->sharePath.empty() ? std::string("through its relay") : narrow(n->sharePath));
+    if (n->shareState == 2) return "not readable from this host: " + n->shareError;
+    return n->online ? std::string("being checked") : std::string("not checked yet");
+}
+
+const char* const kAuthAgent = "0.4.0";   // first agent version that knows farm.key
+
+std::string authText(const NodeRecord* n)
+{
+    std::string agent = n->hello.get("agent");
+    if (agent.empty()) return std::string();
+    if (compareVersions(agent, kAuthAgent) < 0) return "none: agent " + agent + " is older than " + kAuthAgent + "; update it";
+    if (n->authenticated) return "authenticated: its HELLO proved the farm key";
+    if (n->keyed) return "not authenticated: the agent holds a farm.key but did not prove it";
+    return "not paired yet: the agent holds no farm.key; it is written to its shared folder once that is readable, and the agent then reconnects";
+}
+
+bool nodeOutdated(const NodeRecord* n)
+{
+    if (!n->online || n->updating) return false;
+    std::string against = g_pushVersion.empty() ? std::string(TLR_VERSION_STRING) : g_pushVersion;
+    return compareVersions(n->hello.get("agent"), against) < 0;
+}
+
+bool commandAllowed(NodeRecord* n, const std::string& label)
+{
+    if (n->shareState == 1) return true;
+    logEvent(format("%s not sent to %s: its shared folder is %s. Use Open Client's Shared Folder and enter the credentials Windows asks for",
+                    label.c_str(), n->name.c_str(), shareStateText(n).c_str()));
+    return false;
+}
+
+void startShareCheck(NodeRecord* n, const char* why)
+{
+    if (n->shareChecking) return;
+    unsigned long long now = tickMs();
+    if (NodeRecord* relay = relayFor(n)) {
+        // The relay probes the SMB1 share; relayProbeResult takes the answer. The
+        // relay itself must have passed the gate first, and the probe that its
+        // own verification sends covers this node as well.
+        if (relay->shareState != 1 || compareVersions(relay->hello.get("agent"), kRelayAgent) < 0) { n->shareNextMs = now + 15000; return; }
+        Message probe = relayMessage("probe", std::string(), n->ip, widen(g_store->settings.shareName));
+        if (!sendToNode(relay, probe, probe.oneLine())) { n->shareNextMs = now + 15000; return; }
+        n->shareChecking = true;
+        n->shareNextMs = now + 60000;
+        return;
+    }
+    if (n->ip.empty()) { n->shareNextMs = now + 60000; return; }
+    ShareJob* job = new ShareJob();
+    job->mac = n->mac;
+    job->name = n->name;
+    job->ip = n->ip;
+    job->share = widen(g_store->settings.shareName);
+    job->key = g_farmKey;
+    job->viaRelay = false;
+    job->relayConn = -1;
+    HANDLE t = CreateThread(NULL, 0, shareCheckThread, job, 0, NULL);
+    if (!t) { delete job; n->shareNextMs = now + 60000; return; }
+    CloseHandle(t);
+    n->shareChecking = true;
+    n->shareNextMs = now + 60000;
+    logNode(*n, format("share check (%s): \\\\%s\\%s\\", why, n->ip.c_str(), g_store->settings.shareName.c_str()));
+}
+
+// farm.key to a node behind an SMB1 relay, on a thread, through the relay.
+void pairThroughRelay(NodeRecord* target, NodeRecord* relay)
+{
+    if (g_farmKey.empty() || relay->conn < 0) return;
+    ShareJob* job = new ShareJob();
+    job->mac = target->mac;
+    job->name = target->name;
+    job->ip = target->ip;
+    job->share = widen(g_store->settings.shareName);
+    job->key = g_farmKey;
+    job->viaRelay = true;
+    job->relayConn = relay->conn;
+    job->relayName = relay->name;
+    job->relayIp = relay->ip;
+    HANDLE t = CreateThread(NULL, 0, shareCheckThread, job, 0, NULL);
+    if (!t) { delete job; return; }
+    CloseHandle(t);
+    logEvent(format("%s: farm.key is being pushed to its share through relay %s", target->name.c_str(), relay->name.c_str()));
+}
+
+// What follows a HELLO once the node's share has been read: the audio switch,
+// the sound scheme, and for a relay the probe of the share it relays to.
+void shareVerified(NodeRecord* n)
+{
+    if (!n->online) return;
+    if (n->helloFollowupPending) {
+        n->helloFollowupPending = false;
+        sendAudioSwitch(n, g_store->settings.lrAudio);   // All Lightning Rods Audio
+        sendSoundScheme(n);                              // the files of the agent's own events
+    }
+    if (isRelay(n) && compareVersions(n->hello.get("agent"), kRelayAgent) >= 0) {
+        Message probe = relayMessage("probe", std::string(), relayTarget(n), widen(g_store->settings.shareName));
+        if (sendToNode(n, probe, probe.oneLine())) {
+            if (NodeRecord* target = nodeAtIp(relayTarget(n))) { target->shareChecking = true; target->shareNextMs = tickMs() + 60000; }
+        }
+    }
+    if (!n->keyed && compareVersions(n->hello.get("agent"), kAuthAgent) >= 0 && n->shareState == 1 && !n->sharePath.empty())
+        logEvent(format("%s: the agent holds no farm.key yet; it reads the one written to its share and reconnects with authentication", n->name.c_str()));
+}
+
+void onShareChecked(ShareResult* r)
+{
+    NodeRecord* n = g_store->find(r->mac);
+    if (!n) return;
+    if (r->viaRelay) {
+        if (r->keyWritten) logEvent(format("%s: farm.key pushed to its share through the relay", n->name.c_str()));
+        else logEvent(format("%s: farm.key could not be pushed through the relay: %s", n->name.c_str(), r->keyError.c_str()));
+        return;
+    }
+    n->shareChecking = false;
+    int prev = n->shareState;
+    unsigned long long now = tickMs();
+    if (r->ok) {
+        n->shareState = 1;
+        n->sharePath = r->dir;
+        n->shareError.clear();
+        n->shareNextMs = now + 10 * 60 * 1000;
+        if (prev != 1) logEvent(format("%s: shared folder %s is readable from this host%s", n->name.c_str(), narrow(r->dir).c_str(),
+                                       r->keyWritten ? "; farm.key written to it" : ""));
+        else if (r->keyWritten) logEvent(format("%s: farm.key written to %s", n->name.c_str(), narrow(r->dir).c_str()));
+        if (!r->keyError.empty()) logEvent(format("%s: farm.key could not be written to %s: %s", n->name.c_str(), narrow(r->dir).c_str(), r->keyError.c_str()));
+        shareVerified(n);
+    } else {
+        n->shareState = 2;
+        n->shareError = r->error;
+        n->shareNextMs = now + (now < n->shareRetryUntilMs ? 5000 : 60000);
+        if (prev != 2) logEvent(format("%s: shared folder not readable from this host (%s); no command goes to it until it is. "
+                                       "Use Open Client's Shared Folder and enter the credentials Windows asks for%s",
+                                       n->name.c_str(), r->error.c_str(), r->credential ? "" : " (or check that the folder is shared)"));
+    }
+    refreshRow(n);
+    if (g_staticNode == n) showStaticPane(n);
+}
+
+// The relay's answer to RELAY op=probe stands in for the share check of the
+// SMB1 node it relays to.
+void relayProbeResult(NodeRecord* target, NodeRecord* relay, bool ok, const std::string& error)
+{
+    target->shareChecking = false;
+    int prev = target->shareState;
+    unsigned long long now = tickMs();
+    target->shareState = ok ? 1 : 2;
+    target->sharePath = ok ? L"\\\\" + widen(target->ip) + L"\\" + widen(g_store->settings.shareName) + L"\\ (SMB1, through relay " + widen(relay->name) + L")" : std::wstring();
+    target->shareError = ok ? std::string() : error + " (probed by relay " + relay->name + ")";
+    target->shareNextMs = now + (ok ? 10 * 60 * 1000 : 60000);
+    if (prev != target->shareState) {
+        if (ok) logEvent(format("%s: its SMB1 share opens from relay %s; commands may go to it", target->name.c_str(), relay->name.c_str()));
+        else logEvent(format("%s: its SMB1 share does not open from relay %s (%s); no command goes to it until it does", target->name.c_str(), relay->name.c_str(), error.c_str()));
+    }
+    if (ok) {
+        if (target->online && !target->keyed) pairThroughRelay(target, relay);
+        shareVerified(target);
+    }
+    refreshRow(target);
+    if (g_staticNode == target) showStaticPane(target);
+}
+
+// The row of a node that answered Lightning Rod Ping is painted in the ping
+// color for one second; a 100 ms timer runs while any row is lit.
+void startPingFlash(NodeRecord* n, unsigned long long now)
+{
+    n->pingFlashUntilMs = now + 1000;
+    int row = rowOf(n);
+    if (row >= 0) SendMessageW(g_list, LVM_REDRAWITEMS, (WPARAM)row, (LPARAM)row);
+    SetTimer(g_main, kFlashTimerId, 100, NULL);
+}
+
+void onFlashTimer()
+{
+    unsigned long long now = tickMs();
+    bool active = false;
+    std::vector<NodeRecord*>& nodes = g_store->nodes();
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        NodeRecord* n = nodes[i];
+        if (!n->pingFlashUntilMs) continue;
+        if (now < n->pingFlashUntilMs) { active = true; continue; }
+        n->pingFlashUntilMs = 0;
+        int row = rowOf(n);
+        if (row >= 0) SendMessageW(g_list, LVM_REDRAWITEMS, (WPARAM)row, (LPARAM)row);
+    }
+    if (!active) KillTimer(g_main, kFlashTimerId);
+}
+
 void onNet(NetEvent* e)
 {
     unsigned long long now = tickMs();
     switch (e->type) {
+    case NetEvent::Announce: {
+        // Every ANNOUNCE is answered by the server thread; here it only shows a
+        // known node as Announcing, and a node that keeps announcing without
+        // connecting most likely holds another farm.key: the key is written to
+        // its shared folder when that is readable, and it reconnects by itself.
+        NodeRecord* n = e->msg.get("mac").empty() ? NULL : g_store->find(e->msg.get("mac"));
+        if (!n) break;   // a new node joins the inventory with its HELLO
+        n->lastAnnounceMs = now;
+        if (n->online) break;
+        if (!e->ip.empty()) n->ip = e->ip;
+        ++n->announcesUnanswered;
+        if (n->announcesUnanswered == 4 || n->announcesUnanswered % 120 == 0) {
+            logEvent(format("%s announces from %s but has not connected (%d announcements): its farm.key may differ from this host's; "
+                            "the key is written to its shared folder when that is readable", n->name.c_str(), n->ip.c_str(), n->announcesUnanswered));
+            startShareCheck(n, "announce");
+        }
+        refreshRow(n, ColStatus);
+        refreshRow(n, ColIp);
+        break;
+    }
     case NetEvent::Hello: {
         std::string mac = e->msg.get("mac");
         if (mac.empty()) { g_server->close(e->conn); break; }
@@ -3996,9 +4345,15 @@ void onNet(NetEvent* e)
             n->updating = false;
             logEvent(format("%s update finished: agent %s is back", n->name.c_str(), e->msg.get("agent").c_str()));
         }
-        if (again) logEvent(format("%s sent HELLO again (agent %s)", n->name.c_str(), e->msg.get("agent").c_str()));
-        else logEvent(format("%s online from %s, agent %s%s", n->name.c_str(), n->ip.c_str(),
-                             e->msg.get("agent").c_str(), isNew ? " (new client)" : ""));
+        n->authenticated = e->authenticated;
+        n->keyed = parseBool(e->msg.get("keyed"));
+        n->announcesUnanswered = 0;
+        // An agent from 0.4.0 answers Lightning Rod Ping with HELLO (then a full REPORT).
+        bool pinged = again && n->pingPending;
+        if (pinged) { pingReplied(n, "HELLO"); startPingFlash(n, now); }
+        else if (again) logEvent(format("%s sent HELLO again (agent %s)", n->name.c_str(), e->msg.get("agent").c_str()));
+        else logEvent(format("%s online from %s, agent %s%s; authentication: %s", n->name.c_str(), n->ip.c_str(),
+                             e->msg.get("agent").c_str(), isNew ? " (new client)" : "", authText(n).c_str()));
         logNode(*n, "<- " + e->msg.oneLine());
         // The SET that answers HELLO: the interval and the node's report slot. A
         // renewed HELLO keeps the slot the node already holds.
@@ -4006,22 +4361,24 @@ void onNet(NetEvent* e)
         if (phase < 0) phase = freeReportPhase(n, now);
         sendSchedule(n, phase, now);
         playEventSound(SoundThHello);                        // every HELLO, the renewed one as well
-        if (!again) {
-            sendAudioSwitch(n, g_store->settings.lrAudio);   // All Lightning Rods Audio
-            sendSoundScheme(n);                              // the files of the agent's own events
-        }
         if (isRelay(n)) {
             NodeRecord* target = nodeAtIp(relayTarget(n));
             logEvent(format("%s acts as SMB1 relay to %s%s", n->name.c_str(), relayTarget(n).c_str(),
                             target ? (" (" + target->name + ")").c_str() : ""));
             n->relayProbe.clear();
-            if (compareVersions(e->msg.get("agent"), kRelayAgent) >= 0) {
-                Message probe = relayMessage("probe", std::string(), relayTarget(n), widen(g_store->settings.shareName));
-                sendToNode(n, probe, probe.oneLine());
-            }
             if (target && g_staticNode == target) showStaticPane(target);
         } else if (NodeRecord* via = relayFor(n)) {
             logEvent(format("%s: share operations go through SMB1 relay %s", n->name.c_str(), via->name.c_str()));
+        }
+        if (!again) {
+            // Nothing but SET goes to the node until its shared folder has been
+            // read from this host: the audio switch, the sound scheme and the
+            // relay probe follow from onShareChecked (see the shared-folder gate).
+            n->helloFollowupPending = true;
+            n->shareState = 0;
+            n->shareError.clear();
+            n->shareRetryUntilMs = 0;
+            startShareCheck(n, "HELLO");
         }
         refreshRow(n);
         if (g_staticNode == n) showStaticPane(n);
@@ -4099,6 +4456,7 @@ void onNet(NetEvent* e)
                 text = ok ? format("RELAY probe ok on %s: \\\\%s\\%s\\ opens from there", n->name.c_str(), dest.c_str(), g_store->settings.shareName.c_str())
                           : format("RELAY probe failed on %s: %s", n->name.c_str(), e->msg.get("error").c_str());
                 if (g_staticNode == n) showStaticPane(n);
+                if (NodeRecord* target = nodeAtIp(dest)) relayProbeResult(target, n, ok, e->msg.get("error"));
             } else {
                 relayAckDelivered(e->msg);   // the worker thread waiting for this job goes on
                 std::string file = e->msg.get("file");
@@ -4154,7 +4512,7 @@ void onNet(NetEvent* e)
                 }
                 if (n->rebootAfterRename) {
                     Message reboot("REBOOT");
-                    if (g_server->send(n->conn, reboot)) {
+                    if (commandAllowed(n, "REBOOT") && g_server->send(n->conn, reboot)) {
                         logEvent("REBOOT -> " + n->name + " (after rename)");
                         logNode(*n, "-> " + reboot.oneLine());
                     }
@@ -4210,7 +4568,12 @@ void onTimer()
             logEvent(n->name + " update: the agent did not come back within 10 minutes");
             refreshRow(n);
         }
-        if (!n->online) continue;
+        if (!n->online) {
+            if (n->lastAnnounceMs && now - n->lastAnnounceMs < 14000) refreshRow(n, ColStatus);   // Announcing ages into Offline
+            continue;
+        }
+        if (n->shareChecking && now >= n->shareNextMs) n->shareChecking = false;   // a check that never answered
+        if (!n->shareChecking && now >= n->shareNextMs) startShareCheck(n, n->shareState == 1 ? "periodic" : "retry");
         if (n->pingPending && now - n->pingSentMs > kPingWaitMs) {
             ++g_pingNoReply;
             setOffline(n, format("no report within %d s of PING", (int)(kPingWaitMs / 1000)));
@@ -4222,6 +4585,12 @@ void onTimer()
             continue;
         }
         refreshRow(n, ColLastReport);
+    }
+    static int pushVersionAge = 0;
+    if (++pushVersionAge >= 60) {   // the agent file beside Thunderhead may have been replaced
+        pushVersionAge = 0;
+        std::string v = fileVersion(pushFilePath());
+        if (v != g_pushVersion) { g_pushVersion = v; InvalidateRect(g_list, NULL, FALSE); }
     }
     if (g_staticNode) showStaticPane(g_staticNode);   // Connected for, Last report
     updateStatusBar();
@@ -4473,22 +4842,28 @@ void fillRect(HDC dc, const RECT& rc, COLORREF color)
     DeleteObject(b);
 }
 
-// The vertical rules at the right edge of every column as the header lays
-// them out, so that they follow a dragged column and the horizontal scroll,
-// between top and bottom in the list's client coordinates.
+// The vertical rules at the right edge of every column, between top and
+// bottom in the list's client coordinates. The edges come from the list's own
+// column order, column widths and scroll position, which is how the list lays
+// its cells out; the header window's item rectangles were used before, and
+// during a horizontal scroll the header moves a moment after the rows repaint,
+// which left rules at the old positions inside the data.
 void drawColumnRules(HDC dc, int top, int bottom)
 {
-    HWND header = listHeader();
-    if (!header) return;
+    int x;
+    RECT first;
+    first.left = LVIR_BOUNDS;
+    if (SendMessageW(g_list, LVM_GETITEMCOUNT, 0, 0) > 0 && SendMessageW(g_list, LVM_GETITEMRECT, 0, (LPARAM)&first)) x = first.left;
+    else x = -GetScrollPos(g_list, SB_HORZ);
+    int order[ColCount];
+    if (!SendMessageW(g_list, LVM_GETCOLUMNORDERARRAY, (WPARAM)ColCount, (LPARAM)order))
+        for (int i = 0; i < ColCount; ++i) order[i] = i;
     HPEN pen = CreatePen(PS_SOLID, 1, theme().columnRule);
     HGDIOBJ old = SelectObject(dc, pen);
-    int count = (int)SendMessageW(header, HDM_GETITEMCOUNT, 0, 0);
-    for (int i = 0; i < count; ++i) {
-        RECT rc;
-        if (!SendMessageW(header, HDM_GETITEMRECT, (WPARAM)i, (LPARAM)&rc)) continue;
-        MapWindowPoints(header, g_list, (POINT*)&rc, 2);
-        MoveToEx(dc, rc.right - 1, top, NULL);
-        LineTo(dc, rc.right - 1, bottom);
+    for (int k = 0; k < ColCount; ++k) {
+        x += (int)SendMessageW(g_list, LVM_GETCOLUMNWIDTH, (WPARAM)order[k], 0);
+        MoveToEx(dc, x - 1, top, NULL);
+        LineTo(dc, x - 1, bottom);
     }
     SelectObject(dc, old);
     DeleteObject(pen);
@@ -4517,6 +4892,37 @@ void drawCheckBoxCell(HDC dc, int row, COLORREF shade)
     ImageList_Draw(il, image, dc, rc.left + (rc.right - rc.left - cx) / 2, rc.top + (rc.bottom - rc.top - cy) / 2, ILD_TRANSPARENT);
 }
 
+// The shade of a row: the alternating gray of the scheme, or that gray tinted
+// to state the node's condition. Strongest first: the ping flash, solid for a
+// second after the node answered Lightning Rod Ping; offline, red; shared
+// folder not readable from this host, orange; agent older than the one to
+// push, yellow; a Windows 7 client acting as SMB1 relay, turquoise.
+// The conditions rowShade paints, as one number, so that a change is seen.
+int shadeKey(const NodeRecord* n)
+{
+    if (!n) return 0;
+    return (n->online ? 1 : 0) | (n->shareState == 1 ? 2 : 0) | (nodeOutdated(n) ? 4 : 0) | (isRelay(n) ? 8 : 0) |
+           ((n->pingFlashUntilMs && tickMs() < n->pingFlashUntilMs) ? 16 : 0);
+}
+
+COLORREF rowShade(const NodeRecord* n, int row, COLORREF* textColor)
+{
+    const Theme& t = theme();
+    COLORREF base = row % 2 == 0 ? t.rowLight : t.rowMedium;
+    if (textColor) *textColor = t.rowText;
+    if (!n) return base;
+    if (n->pingFlashUntilMs && tickMs() < n->pingFlashUntilMs) {
+        if (textColor) *textColor = RGB(255, 255, 255);
+        return RGB(128, 0, 168);   // R 50 %, G 0 %, B 66 %
+    }
+    int pct = t.dark ? 30 : 22;
+    if (!n->online) return mixColor(RGB(255, 0, 0), base, pct);
+    if (n->shareState != 1) return mixColor(RGB(255, 140, 0), base, pct);
+    if (nodeOutdated(n)) return mixColor(RGB(255, 220, 0), base, pct);
+    if (isRelay(n)) return mixColor(RGB(64, 224, 208), base, pct);
+    return base;
+}
+
 LRESULT onListCustomDraw(NMLVCUSTOMDRAW* cd)
 {
     switch (cd->nmcd.dwDrawStage) {
@@ -4529,14 +4935,16 @@ LRESULT onListCustomDraw(NMLVCUSTOMDRAW* cd)
         // repaint hands the handler a DC covering the whole row while the
         // list itself redraws only part of it.
         int row = (int)cd->nmcd.dwItemSpec;
-        cd->clrTextBk = row % 2 == 0 ? theme().rowLight : theme().rowMedium;
-        cd->clrText = theme().rowText;
+        const NodeRecord* n = (const NodeRecord*)cd->nmcd.lItemlParam;
+        COLORREF text;
+        cd->clrTextBk = rowShade(n, row, &text);
+        cd->clrText = text;
         return CDRF_NOTIFYPOSTPAINT;
     }
     case CDDS_ITEMPOSTPAINT: {
         int row = (int)cd->nmcd.dwItemSpec;
         const NodeRecord* n = (const NodeRecord*)cd->nmcd.lItemlParam;
-        drawCheckBoxCell(cd->nmcd.hdc, row, row % 2 == 0 ? theme().rowLight : theme().rowMedium);
+        drawCheckBoxCell(cd->nmcd.hdc, row, rowShade(n, row, NULL));
         if (n) drawAutoShutdownCell(cd->nmcd.hdc, row, n->autoShutdown);
         RECT rc;
         rc.left = LVIR_BOUNDS;
@@ -4791,9 +5199,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     }
-    case WM_TIMER: if (wp == kTimerId) onTimer(); else if (wp == kNudgeTimerId) onNudgeTimer(); return 0;
+    case WM_TIMER:
+        if (wp == kTimerId) onTimer(); else if (wp == kNudgeTimerId) onNudgeTimer(); else if (wp == kFlashTimerId) onFlashTimer();
+        return 0;
     case WM_NET: { NetEvent* e = (NetEvent*)lp; onNet(e); delete e; return 0; }
     case WM_UPDATE_DONE: { UpdateResult* r = (UpdateResult*)lp; onUpdateDone(r); delete r; return 0; }
+    case WM_SHARE_CHECKED: { ShareResult* r = (ShareResult*)lp; onShareChecked(r); delete r; return 0; }
     case WM_NOTIFY: {
         NMHDR* hdr = (NMHDR*)lp;
         if (hdr->hwndFrom == g_list) return onListNotify(hdr);
@@ -4845,6 +5256,29 @@ LRESULT CALLBACK listColorSubclass(HWND w, UINT msg, WPARAM wp, LPARAM lp, UINT_
 {
     if (msg == WM_CTLCOLOREDIT) {
         if (HBRUSH b = themeCtlColor(msg, (HDC)wp, (HWND)lp)) return (LRESULT)b;
+    }
+    if (msg == WM_ERASEBKGND) {
+        // The list erased the invalid area to its background color and painted
+        // the row shade over it a moment later, which showed as a white flash in
+        // every cell rewritten by a text update (Last report, once a second).
+        // Erasing each visible row in the shade the custom draw will paint it
+        // in, and only the rest in the background color, leaves nothing to flash.
+        HDC dc = (HDC)wp;
+        RECT client;
+        GetClientRect(w, &client);
+        FillRect(dc, &client, themeBrush(theme().listBack));
+        int count = (int)SendMessageW(w, LVM_GETITEMCOUNT, 0, 0);
+        int top = (int)SendMessageW(w, LVM_GETTOPINDEX, 0, 0);
+        int perPage = (int)SendMessageW(w, LVM_GETCOUNTPERPAGE, 0, 0) + 1;
+        for (int row = top; row < count && row < top + perPage; ++row) {
+            RECT rc;
+            rc.left = LVIR_BOUNDS;
+            if (!SendMessageW(w, LVM_GETITEMRECT, (WPARAM)row, (LPARAM)&rc)) continue;
+            rc.left = client.left;
+            rc.right = client.right;
+            fillRect(dc, rc, rowShade(nodeAt(row), row, NULL));
+        }
+        return 1;
     }
     return DefSubclassProc(w, msg, wp, lp);
 }
@@ -4964,6 +5398,21 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show)
     g_events.open(g_dir + L"\\logs", L"thunderhead");
     CreateDirectoryW((g_dir + L"\\logs\\nodes").c_str(), NULL);
     logEvent("Thunderhead " TLR_VERSION_STRING " starting");
+    // farm.key: created once, beside Thunderhead.exe; written to every client's
+    // shared folder as that is found readable (see docs/PROTOCOL.md, Authentication).
+    g_farmKey = readKeyFile(g_dir + L"\\" + kFarmKeyFile);
+    if (g_farmKey.empty()) {
+        std::string err;
+        g_farmKey = randomHex(kFarmKeyBytes);
+        if (g_farmKey.empty() || !writeKeyFile(g_dir + L"\\" + kFarmKeyFile, g_farmKey, err)) {
+            logEvent("farm.key could not be created: " + err + "; OFFERs go out unsigned and no agent that holds a key will connect");
+            g_farmKey.clear();
+        } else {
+            logEvent("farm.key created beside Thunderhead.exe; agents that hold no key receive it through their shared folders");
+        }
+    } else {
+        logEvent("farm.key loaded");
+    }
 
     INITCOMMONCONTROLSEX icc;
     icc.dwSize = sizeof(icc);
@@ -4999,7 +5448,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show)
     std::vector<NodeRecord*>& nodes = store.nodes();
     for (size_t i = 0; i < nodes.size(); ++i) refreshRow(nodes[i]);
 
-    if (!server.start(g_main, WM_NET, (unsigned short)store.settings.tcpPort, hostName())) {
+    g_pushVersion = fileVersion(pushFilePath());
+    if (!server.start(g_main, WM_NET, (unsigned short)store.settings.tcpPort, hostName(), g_farmKey)) {
         MessageBoxW(g_main, L"The listening ports could not be opened. Another Thunderhead may be running; see the log.",
                     L"Thunderhead", MB_OK | MB_ICONERROR);
     }

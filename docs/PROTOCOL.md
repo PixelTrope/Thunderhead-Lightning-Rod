@@ -37,7 +37,8 @@ While the agent has no TCP connection it broadcasts every 5 seconds, to
 ANNOUNCE
 mac=00-80-64-BF-49-77
 name=WIN7E0007
-agent=0.1.0
+agent=0.4.0
+challenge=9f1c2b7a0d4e6f8891a2b3c4d5e6f701
 ```
 
 Thunderhead answers by unicast to the sender's address and port:
@@ -46,7 +47,18 @@ Thunderhead answers by unicast to the sender's address and port:
 OFFER
 host=UR
 port=42002
+challenge=3a7e...32 hexadecimal digits
+auth=b41d...64 hexadecimal digits
 ```
+
+`challenge` in the ANNOUNCE is a fresh challenge token, a random value used once, from an agent of 0.4.0 or
+later; `auth` in the OFFER is Thunderhead's proof of the farm key over it
+(see Authentication), and `challenge` in the OFFER is the host's own token, which the agent has to
+sign in its HELLO. (0.4.0 named the field `nonce`; Thunderhead 0.4.1 still
+reads that name and sends the OFFER token under both names, until no 0.4.0
+agent remains.) An agent that holds farm.key connects only to a host whose
+OFFER proves the key; an agent without the file connects to any host, as
+agents before 0.4.0 do, which ignore the two fields.
 
 The agent connects by TCP to the address the OFFER came from, at the port it
 names.
@@ -79,6 +91,9 @@ lightning2_path=
 lightning2_version=
 relay=no
 relay_ip=
+keyed=yes
+challenge=3a7e...the challenge token of the OFFER
+auth=7c02...64 hexadecimal digits
 ```
 
 `mem_mb` is the physical memory the node's Windows can address, the figure
@@ -112,6 +127,14 @@ relays for (see SMB1 relay). Such an agent sends HELLO again, on the same
 connection, when its Settings change; Thunderhead takes the new static fields
 from it and treats the session as unbroken. Both sides play their HELLO sound
 for that HELLO as for any other.
+
+Agents from 0.4.0 send `keyed=yes|no`, whether farm.key lies beside the
+agent, and, when it does, `challenge=`, the challenge token of the OFFER the
+session came from, and `auth=`, the agent's proof of the key over that token and its MAC
+(see Authentication). Thunderhead refuses a HELLO whose proof does not check
+and closes the connection with a line in the event log; a HELLO without the
+fields is accepted as unauthenticated, and the shared-folder gate decides
+what may be sent to the node.
 
 Thunderhead replies with the report interval in seconds (5 to 60 in steps of 5,
 default 15) and the node's phase: the delay in milliseconds before its first
@@ -174,7 +197,7 @@ Thunderhead may send at any time:
 | SET   | interval, phase | change the report interval; `phase=` is the delay in ms before the next report, after which reports follow at the interval (agents from 0.3.2; the full interval when absent) |
 | START | gen           | start the installed Lightning of generation `gen`: 3 = Bryce 7 and 7 Pro, 2 = Bryce 6.x, 1 = Bryce 5.x (3 when absent, as agents before 0.2.19 take it); reply ACK with `gen=`, `path=`, `version=` and `found=` (see Lightning lookup) |
 | STOP  |               | terminate Lightning.exe                                |
-| PING  |               | reply PONG                                             |
+| PING  |               | agents from 0.4.0: send HELLO again, then a REPORT with every value, and restart the report timer; 0.2.11 to 0.3.6: the REPORT alone; older: reply PONG |
 | EXIT  |               | reply ACK, then end the agent process                  |
 | RESTART |             | reply ACK, start a new copy of the agent, end this one |
 | UPDATE |              | reply ACK, start the update helper, end this one (see Agent update) |
@@ -208,7 +231,102 @@ ok=yes
 error=
 ```
 
-and to PING with `PONG`.
+and to PING as the table says: with HELLO and a full REPORT from 0.4.0, with
+the REPORT alone from 0.2.11, with `PONG` before that.
+
+An agent of 0.4.0 or later that holds no farm.key carries out SET and PING
+only; every other verb is answered `ACK ok=no error=not paired: ...` and
+logged, until the file appears (see Authentication).
+
+## Authentication
+
+The farm's security is Windows file sharing: a host that can open
+`\\node\LightningRod` with the credentials Windows demands is the host that may
+command the node. Two mechanisms, both in force from 0.4.0, hold the
+programs to that rule.
+
+**farm.key.** Both programs keep the same secret, `farm.key`, a line of 64
+hexadecimal digits (32 random bytes) beside the executable. Thunderhead
+creates its own at its first start, from the system's random number source,
+and logs the fact. An agent receives its copy when Thunderhead writes the
+file into the node's shared folder, which Windows allows only to a host that
+holds that share's credentials; the agent update stages the file beside
+`LightningRod.new` as well, so an agent updated to 0.4.0 holds the key from
+its first start. The file may also be copied by hand, and when Thunderhead
+and an agent run from the same folder (the host's own agent) one file serves
+both.
+
+Every message that opens a session is signed with HMAC-SHA-256 over the
+key. The agent puts a fresh challenge token (`challenge=`, 32 hexadecimal
+digits, used once) in each ANNOUNCE; the OFFER answers with
+`auth=HMAC(key, "OFFER" LF token LF host LF port)` and a token of its own;
+the HELLO answers that with `auth=HMAC(key, "HELLO" LF offer-token LF mac)`.
+Thunderhead keeps the tokens it has offered for ten minutes and accepts a
+HELLO only against one of them, so a captured HELLO cannot be replayed; a
+renewed HELLO on a connection already authenticated is not checked again.
+An agent that holds the key ignores an OFFER that fails the check and logs
+"OFFER from ... rejected" (at most once a minute), re-reading farm.key in
+case the key was replaced on disk. Thunderhead refuses a HELLO that fails
+the check, logs it, and closes the connection. Neither side ever sends the
+key itself.
+
+An agent of 0.4.0 or later without the file announces, connects to the
+first host that offers, reports, and does nothing else: every verb but SET
+and PING is answered `ACK ok=no` with `error=not paired: ...`. It re-reads
+farm.key every five seconds; when the file appears it ends the session
+("farm.key arrived; reconnecting to authenticate the host") and connects
+again, this time only to a host that proves the key. The agent's window
+shows the state in its first line ("host authenticated" or "host not
+authenticated: commands refused until farm.key arrives") and in the
+Authentication row of its table.
+
+**The shared-folder gate.** Thunderhead sends no command to a node whose
+shared folder it has not read. The one message outside the gate is SET, the
+report schedule, which instructs nothing. When a HELLO arrives Thunderhead
+answers it with SET and starts a worker thread that lists
+`\\<ip>\<share_name>\` (and `\\<name>\<share_name>\` when the name resolves
+to that address, because some nodes accept the host's credentials only under
+their name). While the check is pending or has failed, the row is tinted
+orange, the Client details pane says so under *Shared folder*, and every
+command to the node is refused with a line in the event log ("... not sent
+to NAME: its shared folder is not readable from this host (...). Use Open
+Client's Shared Folder and enter the credentials Windows asks for"); the
+status bar counts them as blocked. A check that passes writes farm.key into
+the folder when it is missing or differs, logs "shared folder ... is
+readable from this host", and releases the messages that used to follow
+HELLO directly: the *All Lightning Rods Audio* switch, the SOUND scheme and,
+for a relay, the RELAY probe. A failed check is repeated every minute, a
+passed one every ten minutes; after *Open Client's Shared Folder* the check
+runs every five seconds for two minutes, so that the row clears as soon as
+the credentials typed into the Explorer prompt are in. A node that is
+staged for an update has proved its share writable and passes the gate.
+
+A node reached through an SMB1 relay cannot be opened from the host; the
+relay's `RELAY op=probe` stands in for the check, sent once the relay itself
+has passed the gate, and farm.key reaches such a node by a push through the
+relay (`relay\<job>\farm.key`, then `RELAY op=push`).
+
+A node that keeps announcing without connecting is shown as *Announcing* in
+the Status column while its announcements arrive. After four of them, and
+every ten minutes after that, Thunderhead logs that its farm.key may differ
+from the host's and checks its share, which writes the host's key into it;
+the agent re-reads the file at its next rejected OFFER and connects.
+
+### Inventory tints
+
+The Client Inventory's alternating gray rows are tinted to state a node's
+condition, in both schemes, the strongest condition winning: red for a node
+that is offline; orange for an online node whose shared folder the host has
+not read (gate closed); yellow for an online node whose agent is older than
+the agent file Thunderhead would push; turquoise for a Windows 7 client set
+to act as SMB1 relay. For one second after a node answers *Lightning Rod
+Ping* its row is painted solid blue-biased purple (R 50 %, G 0 %, B 66 %)
+with white text, so that the answer is seen beyond the Last report column
+going to 0 s. The Last report column itself is rewritten only when its text
+changes, and the list erases each visible row in its own shade rather than in
+the background color, so the per-second update no longer flashes the cell
+white; the column rules are drawn from the list's own column layout, not the
+header window, so they stay on the column edges through a horizontal scroll.
 
 ## Report spacing
 
@@ -278,6 +396,12 @@ Audio* switches of Settings, `sound_scheme` is `default` or `custom`, and each
 the custom scheme; see Audio. The three audio keys are absent until the
 settings are first saved and then read as 1, 1 and `default`.
 
+`farm.key` is the shared secret of Authentication: created at the first
+start, 64 hexadecimal digits on one line, written to each client's shared
+folder as that is found readable. Deleting it makes Thunderhead create a new
+one at its next start, after which every paired client receives the new key
+through its share before it connects again.
+
 `sounds\` holds the sound files: the repository's `assets\sounds`, which the
 build copies beside the executable, plus any file *Sound Schemes* copies in.
 
@@ -319,8 +443,13 @@ and writes `C:\LightningRod\LightningRod-YYYY-MM-DD.log`. Its sounds are in
 `C:\LightningRod\sounds`, put there by the agent update, with `scheme.txt`,
 the file names of its own sound events as the last SOUND scheme message set
 them (see Audio). `settings.txt` beside it holds its Settings dialog
-(`relay=yes|no`, `relay_ip=`), and `relay\` holds the staging folders of
-RELAY jobs while they run; it keeps no other state. Its window has the menu
+(`relay=yes|no`, `relay_ip=`), `farm.key` is the host's key as Thunderhead
+wrote it through the share (see Authentication), and `relay\` holds the
+staging folders of RELAY jobs while they run; it keeps no other state. The
+intended place for the folder is `X:\LightningRod` on any drive with room,
+shared under the one name, and Thunderhead, the agent and the programs that
+will work with them are meant to live in that same folder; a folder under
+Program Files is not meant to be shared. Its window has the menu
 File (Exit), Control (Settings) and Help (About) and
 shows the Thunderhead it reports to (name, IP, MAC), its own start time and
 running time, every value it has sent, refreshed at each report, the
@@ -540,7 +669,13 @@ The agent runs a PowerShell script as `batch\batch-YYYYMMDD-HHMMSS.ps1`,
 written in UTF-8 with a byte order mark, through
 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File <path>` in a console
 window titled *Thunderhead script NAME.ps1*, otherwise exactly as a batch
-file below. An executable is checked again on the node (it must be inside the
+file below. On a 64-bit Windows an agent from 0.4.0 starts both shells from
+`%windir%\Sysnative`, the alias through which a 32-bit process reaches the
+real System32, so that the script runs 64-bit and sees the real System32 and
+registry; the 32-bit agent's own System32 is the redirected SysWOW64, whose
+shells ran scripts 32-bit with the WOW6432Node registry in place of the real
+one and silently missed 64-bit components. On a 32-bit Windows System32 is
+used as before. The agent's log names the shell each script ran through. An executable is checked again on the node (it must be inside the
 shared folder, with no drive letter, leading separator or `..`) and started
 from its own folder as it is; *Start maximized* applies when the program
 honours the request, *Bring to front* does not, since the agent does not know
