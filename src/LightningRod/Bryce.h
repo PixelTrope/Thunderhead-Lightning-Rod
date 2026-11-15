@@ -31,7 +31,19 @@ bool findBryce(int gen, BryceInstall& out, std::string& error);
 // restart is set (a render job replaces whatever is open), otherwise it is an
 // error. inst receives what was found even when the start fails; restarted
 // says whether a running Bryce was ended.
-bool startBryce(int gen, const std::wstring& scene, bool restart, BryceInstall& inst, std::string& error, bool& restarted);
+// prefsNote receives what ensureImageWithScene did before the start.
+bool startBryce(int gen, const std::wstring& scene, bool restart, BryceInstall& inst, std::string& error, bool& restarted, std::string& prefsNote);
+// Bryce's preference "Image with Scene Open/Save", without which Bryce begins
+// a render proof the moment it opens a scene. It lives in the file
+// "Bryce Prefs" beside Bryce.exe (16336 or 14276 bytes on the two installs
+// seen; the offset is the same in both), byte 0x21F0: 1 on, 0 off
+// (found by comparing the file with the preference off and on; Bryce 7.1).
+// Windows may redirect that file into the user's VirtualStore for a program
+// without a UAC manifest, so both copies that exist are read and set. Call
+// while Bryce is not running, since a running Bryce rewrites the file on exit.
+// Returns true when the preference is on afterwards (or no file exists yet);
+// note says what was found and done.
+bool ensureImageWithScene(const std::wstring& bryceExe, std::string& note);
 // Ends the running Bryce.exe, whatever its generation.
 bool stopBryce(std::string& error);
 DWORD findBrycePid();

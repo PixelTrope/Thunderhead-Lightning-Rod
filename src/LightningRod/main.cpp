@@ -16,6 +16,7 @@
 #include "Audio.h"
 #include "TeamViewer.h"
 #include "Bryce.h"
+#include "BryceScene.h"
 #include "Sound.h"
 #include "Auth.h"
 #include "resource.h"
@@ -822,6 +823,25 @@ void takeMessageOutcomes(std::vector<MessageOutcome>& out)
     LeaveCriticalSection(&g_messageLock);
 }
 
+// Writes a fresh neutral 50 % gray image, at the scene's render resolution,
+// beside the scene under the scene's name, replacing whatever is there: with
+// "Image with Scene Open/Save" on, Bryce then opens the scene showing this
+// image instead of starting (or resuming) a render. Text for the log and ACK.
+std::string grayImageBeside(const std::wstring& scene)
+{
+    if (scene.empty()) return "no scene to protect (none given and no job.txt)";
+    if (GetFileAttributesW(scene.c_str()) == INVALID_FILE_ATTRIBUTES) return "scene " + narrow(scene) + " does not exist";
+    BryceSceneInfo info;
+    std::string err;
+    if (!readBryceScene(scene, info, err)) return "resolution of " + narrow(scene) + " not read: " + err;
+    size_t slash = scene.find_last_of(L"\\/");
+    size_t dot = scene.rfind(L'.');
+    std::wstring bmp = (dot == std::wstring::npos || (slash != std::wstring::npos && dot < slash) ? scene : scene.substr(0, dot)) + L".bmp";
+    bool had = GetFileAttributesW(bmp.c_str()) != INVALID_FILE_ATTRIBUTES;
+    if (!writeSolidBmp(bmp, info.width, info.height, 128, err)) return narrow(bmp) + " could not be written: " + err;
+    return format("%dx%d gray written as %s%s", info.width, info.height, narrow(bmp).c_str(), had ? " (replaced the one there)" : "");
+}
+
 class Agent {
 public:
     Agent() : udp_(INVALID_SOCKET), tcp_(INVALID_SOCKET), intervalSec_(kDefaultReportInterval), nextReport_(0)
@@ -1280,6 +1300,7 @@ private:
             std::string action = trim(m.get("action")), scene = trim(m.get("scene")), err;
             int gen = m.getInt("gen", 3);
             bool restarted = false;
+            std::string prefsNote, imageNote;
             BryceInstall bi;
             bool ok = false;
             std::wstring scenePath;
@@ -1309,8 +1330,18 @@ private:
                                           format("\r\nstarted=%04d-%02d-%02d %02d:%02d:%02d\r\n", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
                         if (!writeTextFile(exeDirectory() + L"\\job.txt", job)) logLine("job.txt could not be written: " + lastErrorText((int)GetLastError()));
                     }
-                    // A job replaces whatever Bryce has open: with a scene, a running Bryce is ended first.
-                    ok = startBryce(gen, scenePath, !scenePath.empty(), bi, err, restarted);
+                    // The neutral gray image beside the scene Bryce is about to open, written
+                    // here on the node every time, whatever Thunderhead did: with no scene
+                    // given, Bryce launches to its previous state, so the scene of the last
+                    // job (job.txt) is the one it opens.
+                    std::wstring protect = scenePath;
+                    if (protect.empty()) {
+                        std::vector<std::string> lines = split(readTextFile(exeDirectory() + L"\\job.txt"), '\n');
+                        for (size_t i = 0; i < lines.size(); ++i)
+                            if (lines[i].compare(0, 6, "scene=") == 0 && lines[i].size() > 6) protect = exeDirectory() + L"\\" + widen(trim(lines[i].substr(6)));
+                    }
+                    imageNote = grayImageBeside(protect);
+                    ok = startBryce(gen, scenePath, !scenePath.empty(), bi, err, restarted, prefsNote);
                     if (ok) { bryceWindowWanted_ = true; bryceStartMs_ = tickMs(); }
                 }
             } else if (action == "stop") {
@@ -1327,6 +1358,8 @@ private:
                 : format(" [%s, version %s, found through %s]", narrow(bi.path).c_str(), bi.version.empty() ? "unknown" : bi.version.c_str(), bi.found.c_str());
             logLine(format("BRYCE %s %s%s%s: %s%s%s%s%s", action.c_str(), bryceLabel(gen), scene.empty() ? "" : " scene ", scene.c_str(), ok ? "ok" : "failed",
                            restarted ? " (the running Bryce was ended first)" : "", err.empty() ? "" : ": ", err.c_str(), where.c_str()));
+            if (!prefsNote.empty()) logLine("BRYCE: Image with Scene Open/Save: " + prefsNote);
+            if (!imageNote.empty()) logLine("BRYCE: gray image: " + imageNote);
             Message ack("ACK");
             ack.set("cmd", m.verb);
             ack.set("ok", boolText(ok));
@@ -1334,6 +1367,8 @@ private:
             ack.set("action", action);
             ack.set("gen", (long long)gen);
             ack.set("restarted", boolText(restarted));
+            ack.set("prefs", prefsNote);
+            ack.set("image", imageNote);
             ack.set("scene", scene);
             ack.set("path", narrow(bi.path));
             ack.set("version", bi.version);

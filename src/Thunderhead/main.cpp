@@ -4127,18 +4127,20 @@ void renderJob()
     std::string frames = (d.first.empty() ? "?" : d.first) + "-" + (d.last.empty() ? "?" : d.last);
 
     // The image Bryce shows instead of rendering when it opens the scene with
-    // "Image with Scene Open/Save" on: the real one when it lies beside the
-    // scene, otherwise a neutral 50 % gray one at the scene's resolution.
+    // "Image with Scene Open/Save" on: always a fresh neutral 50 % gray one at
+    // the scene's resolution, replacing whatever lies there, because a partly
+    // rendered frame left beside the scene makes Bryce resume rendering it on
+    // load whatever the preference says.
     std::string imageNote;
     if (d.existing) {
         std::wstring base = fileTitle(d.sceneRel);
         std::wstring dir = d.scene.substr(0, d.scene.find_last_of(L"\\/") + 1);
         std::wstring bmp = dir + base + L".bmp";
-        if (GetFileAttributesW(bmp.c_str()) != INVALID_FILE_ATTRIBUTES) imageNote = "image beside the scene kept";
-        else if (!d.infoOk) imageNote = "no image beside the scene and the scene's resolution could not be read, so none was made";
+        bool had = GetFileAttributesW(bmp.c_str()) != INVALID_FILE_ATTRIBUTES;
+        if (!d.infoOk) imageNote = std::string("the scene's resolution could not be read, so no gray image was written") + (had ? " (the image beside the scene stays)" : "");
         else {
             std::string err;
-            if (writeSolidBmp(bmp, d.info.width, d.info.height, 128, err)) imageNote = format("gray %dx%d image written as %s", d.info.width, d.info.height, narrow(base + L".bmp").c_str());
+            if (writeSolidBmp(bmp, d.info.width, d.info.height, 128, err)) imageNote = format("gray %dx%d image written as %s%s", d.info.width, d.info.height, narrow(base + L".bmp").c_str(), had ? ", replacing the one there" : "");
             else imageNote = "gray image could not be written: " + err;
         }
         Message m("BRYCE");
@@ -4187,10 +4189,8 @@ void renderJob()
     job->sources.push_back(d.scene);
     if (!d.textures.empty()) job->sources.push_back(d.textures);
     {
-        std::wstring srcDir = d.scene.substr(0, d.scene.find_last_of(L"\\/") + 1);
-        std::wstring beside = srcDir + base + L".bmp";
-        if (GetFileAttributesW(beside.c_str()) != INVALID_FILE_ATTRIBUTES) { job->sources.push_back(beside); imageNote = "image beside the source scene copied"; }
-        else if (!d.infoOk) imageNote = "no image beside the scene and the scene's resolution could not be read, so none was made";
+        // Always the gray image, never the one beside the source: the copy overwrites what the job folder holds.
+        if (!d.infoOk) imageNote = "the scene's resolution could not be read, so no gray image was made";
         else {
             CreateDirectoryW((g_dir + L"\\jobs").c_str(), NULL);
             std::wstring gray = g_dir + L"\\jobs\\" + base + L".bmp";
@@ -5216,6 +5216,8 @@ void onNet(NetEvent* e)
                                   e->msg.get("found").empty() ? "" : ", found through ", e->msg.get("found").c_str(),
                                   scene.empty() ? "" : "; scene ", scene.c_str(),
                                   parseBool(e->msg.get("restarted")) ? " (the Bryce that was open was ended first)" : "");
+            if (!e->msg.get("prefs").empty()) logEvent(format("%s: Image with Scene Open/Save: %s", n->name.c_str(), e->msg.get("prefs").c_str()));
+            if (!e->msg.get("image").empty()) logEvent(format("%s: gray image: %s", n->name.c_str(), e->msg.get("image").c_str()));
             else text = format("BRYCE %s failed on %s: %s%s%s", action.c_str(), n->name.c_str(), e->msg.get("error").c_str(),
                                path.empty() ? "" : (" (" + what + ")").c_str(), "");
         } else if (cmd == "SHARE") {

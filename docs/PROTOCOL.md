@@ -467,7 +467,21 @@ generation's Bryce from its own folder, with the scene named in `scene=` as
 its one argument when there is one (as a double-click on a .br7 does; the
 line is `"<Bryce.exe>" "<agent folder>\<scene>"`, verified by hand on the
 host), looks for Bryce's window for up to 60 s and brings it to the front as
-it does for TeamViewer; `front` brings the window to the front again. A start
+it does for TeamViewer; `front` brings the window to the front again. Before every start the agent also writes the neutral gray image itself,
+beside the scene it is about to open (the one named in `scene=`, or, with no
+scene given, the scene of its last job from job.txt, since Bryce launches to
+its previous state), at the scene's render resolution read from the file,
+replacing any image there, and reports it in the ACK's `image=`; so the
+image is in place whatever happened on Thunderhead's side. Before every
+start the agent makes sure Bryce's preference *Image with
+Scene Open/Save* is on, since without it Bryce begins a render proof the
+moment it opens a scene: the preference is byte 0x21F0 of the file
+`Bryce Prefs` beside Bryce.exe (16336 bytes on one Bryce 7.1 install, 14276
+on another, the offset the same in both) (1 on, 0 off, found by comparing the
+file with the preference off and on in Bryce 7.1), and the agent sets it in
+that file and in the VirtualStore copy under the user's profile when Windows
+keeps one there, while Bryce is not running; the ACK's `prefs=` says what
+was found and done, and the event log repeats it. A start
 with a scene replaces whatever Bryce is open: a running Bryce is ended first
 and the ACK says `restarted=yes`; a start without a scene while a Bryce runs
 is refused with `error=` naming the running file. The ACK carries `gen=`,
@@ -502,13 +516,13 @@ for a still) and the frame rate (float at 0x40); the last frame Bryce shows
 is length times rate (verified on 604 scenes of the farm: 30 s at 30 fps is
 frames 0 to 900). The info line shows resolution, rate, length and frame
 range, and empty frame fields take 0 and that last frame. When the job
-starts, an image file named like the scene is put beside it in the job
-folder: the real one when a `<scene>.bmp` lies beside the source scene,
-otherwise a neutral 50 % gray 24-bit BMP at the scene's resolution, the
-format Bryce itself writes; with Bryce's preference *Image with Scene
-Open/Save* on, Bryce shows that image when it opens the scene instead of
-starting a render, which keeps the host idle until the network render is
-begun. The jobs.txt line records the resolution and what was done about the
+starts, a neutral 50 % gray 24-bit BMP at the scene's resolution, the format
+Bryce itself writes, is put beside the scene in the job folder under the
+scene's name, replacing any image already there (a partly rendered frame
+left beside the scene makes Bryce resume rendering it on load whatever the
+preference says); with Bryce's preference *Image with Scene Open/Save* on,
+Bryce shows that gray image when it opens the scene instead of starting a
+render, which keeps the host idle until the network render is begun. The jobs.txt line records the resolution and what was done about the
 image. With *Use existing job on host*, *Browse...* opens the host's jobs
 folder through the share the gate verified, the chosen file must lie under
 that share, nothing is copied, and *Start Bryce* sends BRYCE at once with

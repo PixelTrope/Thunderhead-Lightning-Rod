@@ -5,6 +5,7 @@
 #include "StrUtil.h"
 
 #include <tlhelp32.h>
+#include <shlobj.h>
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -221,7 +222,68 @@ HWND bryceWindow()
     return s.best;
 }
 
-bool startBryce(int gen, const std::wstring& scene, bool restart, BryceInstall& inst, std::string& error, bool& restarted)
+namespace {
+const size_t kPrefsImageWithScene = 0x21F0;
+
+std::vector<std::wstring> prefsCandidates(const std::wstring& bryceExe)
+{
+    std::vector<std::wstring> out;
+    std::wstring dir = bryceExe.substr(0, bryceExe.rfind(L'\\'));
+    out.push_back(dir + L"\\Bryce Prefs");
+    // The VirtualStore copy: %LOCALAPPDATA%\VirtualStore\<path without the drive>
+    wchar_t local[MAX_PATH];
+    if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, SHGFP_TYPE_CURRENT, local)) && dir.size() > 3 && dir[1] == L':')
+        out.push_back(std::wstring(local) + L"\\VirtualStore\\" + dir.substr(3) + L"\\Bryce Prefs");
+    return out;
+}
+} // namespace
+
+bool ensureImageWithScene(const std::wstring& bryceExe, std::string& note)
+{
+    std::vector<std::wstring> paths = prefsCandidates(bryceExe);
+    bool anyOn = false, anyFile = false;
+    for (size_t i = 0; i < paths.size(); ++i) {
+        HANDLE h = CreateFileW(paths[i].c_str(), GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h == INVALID_HANDLE_VALUE) {
+            DWORD e = GetLastError();
+            if (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND) continue;
+            // present but not writable: still read it, so the state is known
+            h = CreateFileW(paths[i].c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (h == INVALID_HANDLE_VALUE) { note += narrow(paths[i]) + ": " + lastErrorText((int)GetLastError()) + "; "; continue; }
+            anyFile = true;
+            LARGE_INTEGER off; off.QuadPart = (LONGLONG)kPrefsImageWithScene;
+            unsigned char v = 0; DWORD got = 0;
+            SetFilePointerEx(h, off, NULL, FILE_BEGIN);
+            ReadFile(h, &v, 1, &got, NULL);
+            CloseHandle(h);
+            if (v == 1) { anyOn = true; note += narrow(paths[i]) + ": on; "; }
+            else note += narrow(paths[i]) + ": off and not writable (" + lastErrorText((int)e) + "); ";
+            continue;
+        }
+        anyFile = true;
+        LARGE_INTEGER size;
+        // The file is 16336 bytes on one Bryce 7.1 install and 14276 on another; the
+        // byte sits at the same offset in both (the layouts agree around it).
+        if (!GetFileSizeEx(h, &size) || size.QuadPart <= (LONGLONG)kPrefsImageWithScene) { CloseHandle(h); note += narrow(paths[i]) + ": unexpected size; "; continue; }
+        LARGE_INTEGER off; off.QuadPart = (LONGLONG)kPrefsImageWithScene;
+        unsigned char v = 0; DWORD got = 0, wrote = 0;
+        SetFilePointerEx(h, off, NULL, FILE_BEGIN);
+        if (!ReadFile(h, &v, 1, &got, NULL) || got != 1) { CloseHandle(h); note += narrow(paths[i]) + ": read failed; "; continue; }
+        if (v == 1) { anyOn = true; note += narrow(paths[i]) + ": already on; "; CloseHandle(h); continue; }
+        unsigned char one = 1;
+        SetFilePointerEx(h, off, NULL, FILE_BEGIN);
+        bool ok = WriteFile(h, &one, 1, &wrote, NULL) && wrote == 1;
+        DWORD e = GetLastError();
+        CloseHandle(h);
+        if (ok) { anyOn = true; note += narrow(paths[i]) + ": was off, turned on; "; }
+        else note += narrow(paths[i]) + ": was off, write failed (" + lastErrorText((int)e) + "); ";
+    }
+    if (!anyFile) { note = "no Bryce Prefs file yet (Bryce has not been run on this node); the preference is set by Bryce itself at its first exit"; return true; }
+    if (note.size() > 2) note.erase(note.size() - 2);
+    return anyOn;
+}
+
+bool startBryce(int gen, const std::wstring& scene, bool restart, BryceInstall& inst, std::string& error, bool& restarted, std::string& prefsNote)
 {
     restarted = false;
     if (!findBryce(gen, inst, error)) return false;
@@ -236,6 +298,8 @@ bool startBryce(int gen, const std::wstring& scene, bool restart, BryceInstall& 
         for (int i = 0; i < 50 && findBrycePid() != 0; ++i) Sleep(100);   // the process entry goes a moment after the terminate
         restarted = true;
     }
+    // Image with Scene Open/Save on, so that opening the scene shows its image instead of starting a render proof.
+    ensureImageWithScene(inst.path, prefsNote);
     std::wstring dir = inst.path.substr(0, inst.path.rfind(L'\\'));
     std::wstring cmd = L"\"" + inst.path + L"\"";
     if (!scene.empty()) cmd += L" \"" + scene + L"\"";
