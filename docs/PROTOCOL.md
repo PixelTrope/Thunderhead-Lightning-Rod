@@ -491,7 +491,25 @@ nothing is sent. It appends the job to `jobs.txt` beside Thunderhead.exe
 (time, host, scene, textures, where it was copied, output folder, frames),
 and, as soon as the copy has ended without a failure, sends the host `BRYCE
 action=start gen= scene=jobs\<scene name>\<scene file> output= first=
-last=`. With *Use existing job on host*, *Browse...* opens the host's jobs
+last=`. When a scene is chosen (either source), Thunderhead reads its render
+settings from the file: a Bryce scene is a `Bryce_6.0_File` container of
+zlib streams, one of the last of which inflates to a 416-byte record holding
+the document width and height (big-endian 32-bit at offsets 0 and 4) and the
+render width and height (at 8 and 12, repeated as height and width at 0x18
+and 0x1c; the same as the document size unless the render size is a
+multiple, as in a 200 % render), the animation length in seconds (big-endian float at 0x3c, 0
+for a still) and the frame rate (float at 0x40); the last frame Bryce shows
+is length times rate (verified on 604 scenes of the farm: 30 s at 30 fps is
+frames 0 to 900). The info line shows resolution, rate, length and frame
+range, and empty frame fields take 0 and that last frame. When the job
+starts, an image file named like the scene is put beside it in the job
+folder: the real one when a `<scene>.bmp` lies beside the source scene,
+otherwise a neutral 50 % gray 24-bit BMP at the scene's resolution, the
+format Bryce itself writes; with Bryce's preference *Image with Scene
+Open/Save* on, Bryce shows that image when it opens the scene instead of
+starting a render, which keeps the host idle until the network render is
+begun. The jobs.txt line records the resolution and what was done about the
+image. With *Use existing job on host*, *Browse...* opens the host's jobs
 folder through the share the gate verified, the chosen file must lie under
 that share, nothing is copied, and *Start Bryce* sends BRYCE at once with
 the file's path below the share as `scene=`; the texture folder does not

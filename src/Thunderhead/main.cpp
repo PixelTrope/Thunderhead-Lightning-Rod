@@ -19,6 +19,7 @@
 #include "Theme.h"
 #include "Sound.h"
 #include "Auth.h"
+#include "BryceScene.h"
 #include "resource.h"
 
 #include <commctrl.h>
@@ -3911,6 +3912,10 @@ struct RenderJobData {
     std::wstring scene, textures, output;
     std::wstring sceneRel;   // existing mode: the scene's path below the share root, as the agent takes it
     std::string first, last;
+    BryceSceneInfo info;     // read from the scene file: resolution, frame rate, length
+    bool infoOk;
+    std::wstring infoPath;   // the scene the info belongs to
+    RenderJobData() : host(0), gen(3), existing(false), infoOk(false) {}
 };
 std::wstring g_jobScene, g_jobTextures;   // remembered while Thunderhead runs
 bool g_jobExisting = false;
@@ -3927,6 +3932,31 @@ std::wstring fileName(const std::wstring& path)
 {
     size_t slash = path.find_last_of(L"\\/");
     return slash == std::wstring::npos ? path : path.substr(slash + 1);
+}
+
+// Reads the chosen scene's render settings: the info line shows resolution,
+// frame rate and length, and empty frame fields take 0 and the last frame.
+void showSceneFacts(HWND dlg, RenderJobData* d, const std::wstring& path)
+{
+    if (path.empty()) return;
+    if (d->infoOk && d->infoPath == path) return;
+    std::string err;
+    d->infoOk = readBryceScene(path, d->info, err);
+    d->infoPath = path;
+    std::wstring line;
+    if (!d->infoOk) {
+        line = L"Scene not readable: " + widen(err);
+    } else if (d->info.animation()) {
+        line = widen(format("Scene: %d x %d, %g fps, %g s: frames 0 to %d (%d images)", d->info.width, d->info.height, d->info.fps, d->info.seconds,
+                            d->info.lastFrame, d->info.lastFrame + 1));
+        wchar_t a[32], b[32];
+        GetDlgItemTextW(dlg, IDC_JOB_FIRST, a, 32);
+        GetDlgItemTextW(dlg, IDC_JOB_LAST, b, 32);
+        if (a[0] == L'\0' && b[0] == L'\0') { SetDlgItemTextW(dlg, IDC_JOB_FIRST, L"0"); SetDlgItemTextW(dlg, IDC_JOB_LAST, widen(format("%d", d->info.lastFrame)).c_str()); }
+    } else {
+        line = widen(format("Scene: %d x %d, a still image (no animation length set)", d->info.width, d->info.height));
+    }
+    SetDlgItemTextW(dlg, IDC_JOB_INFO, (widen(format("%u online Bryce 3D Network Render Host(s).  ", (unsigned)d->hosts.size())) + line).c_str());
 }
 
 // The texture controls serve the copy only; an existing job is taken as it lies.
@@ -3983,12 +4013,15 @@ INT_PTR CALLBACK renderJobDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 }
                 std::wstring startIn = d->roots[h] + L"jobs";
                 if (GetFileAttributesW(startIn.c_str()) == INVALID_FILE_ATTRIBUTES) startIn = d->roots[h];
-                if (pickPath(dlg, false, L"Select the scene in the host's jobs folder", L"Bryce scenes (*.br7;*.br6;*.br5)", L"*.br7;*.br6;*.br5", path, startIn))
+                if (pickPath(dlg, false, L"Select the scene in the host's jobs folder", L"Bryce scenes (*.br7;*.br6;*.br5)", L"*.br7;*.br6;*.br5", path, startIn)) {
                     SetDlgItemTextW(dlg, IDC_JOB_SCENE, path.c_str());
+                    showSceneFacts(dlg, d, path);
+                }
                 return TRUE;
             }
             if (pickPath(dlg, false, L"Select the Bryce scene", L"Bryce scenes (*.br7;*.br6;*.br5)", L"*.br7;*.br6;*.br5", path)) {
                 SetDlgItemTextW(dlg, IDC_JOB_SCENE, path.c_str());
+                showSceneFacts(dlg, d, path);
                 wchar_t out[512];
                 GetDlgItemTextW(dlg, IDC_JOB_OUTPUT, out, 512);
                 if (out[0] == L'\0') {
@@ -4018,6 +4051,12 @@ INT_PTR CALLBACK renderJobDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             if (a == INVALID_FILE_ATTRIBUTES || (a & FILE_ATTRIBUTE_DIRECTORY)) {
                 MessageBoxW(dlg, d->existing ? L"Browse for the scene file in the host's jobs folder." : L"Enter or browse for the scene file.", L"Render Job on Host", MB_OK | MB_ICONWARNING);
                 return TRUE;
+            }
+            // A typed path has not been read yet; the frame fields may still be empty.
+            if (!d->infoOk || d->infoPath != d->scene) {
+                showSceneFacts(dlg, d, d->scene);
+                GetDlgItemTextW(dlg, IDC_JOB_FIRST, buf, 1024);   d->first = trim(narrow(buf));
+                GetDlgItemTextW(dlg, IDC_JOB_LAST, buf, 1024);    d->last = trim(narrow(buf));
             }
             if (d->existing) {
                 // The file must lie under the host's share; the agent gets the path below it.
@@ -4087,8 +4126,21 @@ void renderJob()
     GetLocalTime(&t);
     std::string frames = (d.first.empty() ? "?" : d.first) + "-" + (d.last.empty() ? "?" : d.last);
 
+    // The image Bryce shows instead of rendering when it opens the scene with
+    // "Image with Scene Open/Save" on: the real one when it lies beside the
+    // scene, otherwise a neutral 50 % gray one at the scene's resolution.
+    std::string imageNote;
     if (d.existing) {
         std::wstring base = fileTitle(d.sceneRel);
+        std::wstring dir = d.scene.substr(0, d.scene.find_last_of(L"\\/") + 1);
+        std::wstring bmp = dir + base + L".bmp";
+        if (GetFileAttributesW(bmp.c_str()) != INVALID_FILE_ATTRIBUTES) imageNote = "image beside the scene kept";
+        else if (!d.infoOk) imageNote = "no image beside the scene and the scene's resolution could not be read, so none was made";
+        else {
+            std::string err;
+            if (writeSolidBmp(bmp, d.info.width, d.info.height, 128, err)) imageNote = format("gray %dx%d image written as %s", d.info.width, d.info.height, narrow(base + L".bmp").c_str());
+            else imageNote = "gray image could not be written: " + err;
+        }
         Message m("BRYCE");
         m.set("action", std::string("start"));
         m.set("gen", (long long)d.gen);
@@ -4096,9 +4148,9 @@ void renderJob()
         m.set("output", narrow(d.output));
         m.set("first", d.first);
         m.set("last", d.last);
-        std::string record = format("%04d-%02d-%02d %02d:%02d:%02d  host=%s (%s)  bryce=%s  existing=%s  output=%s  frames=%s",
+        std::string record = format("%04d-%02d-%02d %02d:%02d:%02d  host=%s (%s)  bryce=%s  existing=%s  output=%s  frames=%s  resolution=%dx%d  image: %s",
                                     t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, n->name.c_str(), n->ip.c_str(), bryceGenLabel(d.gen),
-                                    narrow(d.scene).c_str(), narrow(d.output).c_str(), frames.c_str());
+                                    narrow(d.scene).c_str(), narrow(d.output).c_str(), frames.c_str(), d.info.width, d.info.height, imageNote.c_str());
         appendJobRecord(record);
         logEvent("render job: " + record);
         sendBryce(n, m, "BRYCE start (existing job " + narrow(base) + ")");
@@ -4134,6 +4186,19 @@ void renderJob()
     CopyJob* job = new CopyJob;
     job->sources.push_back(d.scene);
     if (!d.textures.empty()) job->sources.push_back(d.textures);
+    {
+        std::wstring srcDir = d.scene.substr(0, d.scene.find_last_of(L"\\/") + 1);
+        std::wstring beside = srcDir + base + L".bmp";
+        if (GetFileAttributesW(beside.c_str()) != INVALID_FILE_ATTRIBUTES) { job->sources.push_back(beside); imageNote = "image beside the source scene copied"; }
+        else if (!d.infoOk) imageNote = "no image beside the scene and the scene's resolution could not be read, so none was made";
+        else {
+            CreateDirectoryW((g_dir + L"\\jobs").c_str(), NULL);
+            std::wstring gray = g_dir + L"\\jobs\\" + base + L".bmp";
+            std::string err;
+            if (writeSolidBmp(gray, d.info.width, d.info.height, 128, err)) { job->sources.push_back(gray); imageNote = format("gray %dx%d image made and copied as %s", d.info.width, d.info.height, narrow(base + L".bmp").c_str()); }
+            else imageNote = "gray image could not be made: " + err;
+        }
+    }
     CopyTarget tg;
     tg.name = n->name;
     tg.shareName = widen(g_store->settings.shareName);
@@ -4157,10 +4222,10 @@ void renderJob()
     job->after = m;
     job->afterMac = n->mac;
     job->afterLabel = "BRYCE start (render job " + narrow(base) + ")";
-    std::string record = format("%04d-%02d-%02d %02d:%02d:%02d  host=%s (%s)  bryce=%s  scene=%s  textures=%s  copied_to=\\\\%s\\%s\\%s  output=%s  frames=%s",
+    std::string record = format("%04d-%02d-%02d %02d:%02d:%02d  host=%s (%s)  bryce=%s  scene=%s  textures=%s  copied_to=\\\\%s\\%s\\%s  output=%s  frames=%s  resolution=%dx%d  image: %s",
                                 t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, n->name.c_str(), n->ip.c_str(), bryceGenLabel(d.gen), narrow(d.scene).c_str(),
                                 d.textures.empty() ? "(none)" : narrow(d.textures).c_str(), n->name.c_str(), g_store->settings.shareName.c_str(),
-                                narrow(subdir).c_str(), narrow(d.output).c_str(), frames.c_str());
+                                narrow(subdir).c_str(), narrow(d.output).c_str(), frames.c_str(), d.info.width, d.info.height, imageNote.c_str());
     appendJobRecord(record);
     logEvent("render job: " + record);
     HANDLE th = CreateThread(NULL, 0, copyToClientsThread, job, 0, NULL);

@@ -13,7 +13,7 @@ endforeach()
 if(NOT DEFINED TLR_MAJOR OR NOT DEFINED TLR_MINOR OR NOT DEFINED TLR_PATCH)
     message(FATAL_ERROR "src/common/Version.h does not define TLR_VERSION_MAJOR, MINOR and PATCH")
 endif()
-project(ThunderheadLightningRod VERSION ${TLR_MAJOR}.${TLR_MINOR}.${TLR_PATCH} LANGUAGES CXX)
+project(ThunderheadLightningRod VERSION ${TLR_MAJOR}.${TLR_MINOR}.${TLR_PATCH} LANGUAGES C CXX)
 message(STATUS "Thunderhead / Lightning Rod version ${PROJECT_VERSION} (from src/common/Version.h)")
 
 set(CMAKE_CXX_STANDARD 17)
