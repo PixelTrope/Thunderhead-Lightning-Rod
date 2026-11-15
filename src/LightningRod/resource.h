@@ -15,3 +15,6 @@
 #define IDC_RENDERHOST_LABEL    2004  // "Bryce 3D Network Render Host (B3NDHR) mode"
 #define IDC_RENDERHOST_SWITCH   2005  // the two-position slider (owner-drawn button)
 #define IDC_RENDERHOST_STATE    2006  // "Off" / "On" beside it
+#define IDC_RENDERBIN_LABEL     2007  // "RENDER.BIN folder"
+#define IDC_RENDERBIN_PATH      2008  // where the host writes the frames
+#define IDC_RENDERBIN_NOTE      2009  // exists / is created note

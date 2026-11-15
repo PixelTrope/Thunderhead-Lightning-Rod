@@ -92,6 +92,8 @@ lightning2_version=
 relay=no
 relay_ip=
 render_host=no
+render_bin=C:\LightningRod\RENDER.BIN
+render_bin_exists=yes
 bryce3_path=C:\Program Files (x86)\DAZ 3D\Bryce7\Bryce.exe
 bryce3_version=7.1.0.109
 bryce2_path=
@@ -137,7 +139,9 @@ for that HELLO as for any other.
 
 Agents from 0.4.2 send `render_host=yes|no`, the node's Bryce 3D Network
 Render Host setting (see Bryce 3D Network Render Host), in HELLO and in every
-full REPORT, and in a later REPORT whenever it changes. Agents from 0.4.4 send
+full REPORT, and in a later REPORT whenever it changes. Agents from 0.4.5 send `render_bin`, the RENDER.BIN folder of the node, and
+`render_bin_exists=yes|no`, in HELLO and in every full REPORT (see Bryce 3D
+Network Render Host). Agents from 0.4.4 send
 `bryce3_path` and `bryce3_version`, `bryce2_path` and `bryce2_version`,
 `bryce1_path` and `bryce1_version`: the installed full Bryce 3D of each
 generation (3 = Bryce 7 and 7 Pro, 2 = 6.x, 1 = 5.x) as found at the agent's
@@ -228,7 +232,7 @@ Thunderhead may send at any time:
 | TEAMVIEWER |          | start the installed TeamViewer, found through the registry or the Start menu, and bring its window to the front; reply ACK with where it was found (see TeamViewer); agents from 0.2.18 |
 | SOUND | action, file, logon, hello, logoff, report, badip | `action=play`: play `file`, a name in the agent's `sounds` folder, on the node's playback device; `action=scheme`: take the file names of the agent's own three sound events; reply ACK with `action=` and `file=` (see Audio); agents from 0.2.21 |
 | BRYCE | action, gen, scene, output, first, last | the full Bryce 3D on the node: `action=start` starts the installed Bryce of generation `gen` (3 = Bryce 7 and 7 Pro, 2 = 6.x, 1 = 5.x; 3 when absent), with `scene=` (a path inside the agent's shared folder, empty for none) as its argument, and brings its window to the front; `output=`, `first=` and `last=` describe the render job and are kept in the agent's job.txt, the output folder being created when it lies inside the shared folder; `action=stop` ends whichever Bryce.exe runs; `action=front` brings its window to the front; reply ACK with `action=`, `gen=`, `scene=`, `path=`, `version=` and `found=`, then a full REPORT (see Bryce 3D on the host); agents from 0.4.4 |
-| RENDERHOST | set     | `set=yes|no` becomes the node's Bryce 3D Network Render Host setting, saved for the next start; reply ACK with `render_host=` as now in force, then a full REPORT (see Bryce 3D Network Render Host); agents from 0.4.2 |
+| RENDERHOST | set, render_bin | `set=yes|no` becomes the node's Bryce 3D Network Render Host setting, saved for the next start; `render_bin=` (agents from 0.4.5), when present, becomes the node's RENDER.BIN folder, created when the node is the host; reply ACK with `render_host=`, `render_bin=`, `render_bin_exists=` and `render_bin_in_share=` as now in force, then a full REPORT (see Bryce 3D Network Render Host); agents from 0.4.2 |
 | RELAYSET | relay, relay_ip | set the agent's SMB1 relay values as its Settings dialog would (`relay=yes|no`, `relay_ip=`), save them and send HELLO again when they changed; reply ACK with the values in force (see SMB1 relay); agents from 0.3.1 |
 | RELAY | op, job, dest, share, pattern | SMB1 relay work for the client at `dest`, each op on a thread so that an unreachable destination never stalls the agent's reports (probe on a thread from 0.3.2): `op=probe` answers whether `\\dest\share\` opens from the node; `op=push` copies what Thunderhead staged under `relay\<job>` in the node's own share to the root of that share; `op=pull` fetches the newest file matching `pattern` from it into `relay\<job>`; reply ACK with `op=`, `job=`, `dest=`, `files=`, `bytes=` and `file=` (see SMB1 relay); agents from 0.3.0 |
 | MESSAGE | title, text, sound, timeout | open a message window on the node's screen with `title` in its caption and `text` (hexadecimal digits of its UTF-8 bytes), play `sound`, a name in the agent's `sounds` folder (none when empty), and close the window by itself after `timeout` seconds (0: when dismissed); reply ACK when opened and again when closed (see Display Message); agents from 0.3.3 |
@@ -378,6 +382,33 @@ the latest report says the node is the render host; the tint ranks below
 offline, gate-closed and outdated and above the relay tint (see Inventory
 tints).
 
+### RENDER.BIN
+
+RENDER.BIN is the folder the host writes the frames to. Its default is
+RENDER.BIN inside the agent's own folder, the shared one, so that it is
+`C:\LightningRod\RENDER.BIN` on a node installed as intended and reachable
+from the host as `\\node\LightningRod\RENDER.BIN`; the agent's Settings
+dialog has a *RENDER.BIN folder* entry (a full path on the node; empty
+restores the default), saved as `render_bin` in its settings.txt, and the
+folder is created when the node is the render host and it is missing. The
+agent sends `render_bin` and `render_bin_exists` in HELLO and in every full
+REPORT, Client details shows them as *RENDER.BIN*, and its own window shows
+them too.
+
+When *Toggle B3D Net Render Host* switches a client on, a dialog shows that
+client's RENDER.BIN as the agent reports it (or `C:\LightningRod\RENDER.BIN`
+when the agent has not reported one), to confirm or change; *Skip* leaves the
+client untouched. OK sends `RENDERHOST set=yes render_bin=<path>`: the agent
+takes the folder, creates it if it is missing, and answers with
+`render_bin=`, `render_bin_exists=` and `render_bin_in_share=`, the path below
+its shared folder when the folder lies inside it. Thunderhead then checks
+the folder by opening `\\node\<share_name>\<render_bin_in_share>\` in
+Windows Explorer; a folder outside the shared folder cannot be reached from
+the host and the event log says so, as it does when the folder could not be
+created. Switching a client off asks nothing. *Render Job on Host...* offers
+the chosen host's RENDER.BIN as the output folder, following the host chosen
+in its list.
+
 ## Bryce 3D on the host
 
 The full Bryce 3D is what a Bryce 3D Network Render Host runs, in one of
@@ -422,8 +453,9 @@ scene jobs\x\x.br7".
 
 *Render Job on Host...* (Render Control) is the dialog for a render: the host
 (a list of the online render hosts), the scene file, an optional texture
-folder, the output folder on the host, the first and last frame, and which
-Bryce opens the scene (the same three generations, Bryce 7 & 7 Pro by default). *Copy and
+folder, the output folder on the host (its RENDER.BIN, as reported), the first
+and last frame, and which Bryce opens the scene (the same three generations,
+Bryce 7 & 7 Pro by default). *Copy and
 Start Bryce* copies the scene and the texture folder to `jobs\<scene name>\`
 in the host's shared folder through the same copy machinery and progress
 window as *Copy Files or Folder to Client* (through the relay for an SMB1
@@ -562,8 +594,9 @@ and writes `C:\LightningRod\LightningRod-YYYY-MM-DD.log`. Its sounds are in
 `C:\LightningRod\sounds`, put there by the agent update, with `scheme.txt`,
 the file names of its own sound events as the last SOUND scheme message set
 them (see Audio). `settings.txt` beside it holds its Settings dialog
-(`relay=yes|no`, `relay_ip=`, and `render_host=yes|no`, the Bryce 3D Network
-Render Host switch), `job.txt` holds the last render job the agent was
+(`relay=yes|no`, `relay_ip=`, `render_host=yes|no`, the Bryce 3D Network
+Render Host switch, and `render_bin=`, its RENDER.BIN folder, empty for the
+default), `job.txt` holds the last render job the agent was
 given with BRYCE (scene, output, first, last, started), `jobs\` the scenes
 Thunderhead copied for render jobs, `farm.key` is the host's key as Thunderhead
 wrote it through the share (see Authentication), and `relay\` holds the

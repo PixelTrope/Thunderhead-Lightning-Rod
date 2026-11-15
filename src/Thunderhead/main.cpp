@@ -85,6 +85,7 @@ int shadeKey(const NodeRecord* n);
 COLORREF rowShade(const NodeRecord* n, int row, COLORREF* textColor);
 bool isRenderHost(const NodeRecord* n);
 std::wstring renderHostText(const NodeRecord* n);
+std::wstring renderBinText(const NodeRecord* n);
 NodeRecord* nodeAt(int row);
 void fillRect(HDC dc, const RECT& rc, COLORREF color);
 
@@ -678,6 +679,7 @@ void showStaticPane(NodeRecord* n)
     add(L"Shared folder", widen(shareStateText(n)));
     add(L"Authentication", widen(authText(n)));
     add(L"Net Render Host", renderHostText(n));
+    add(L"RENDER.BIN", renderBinText(n));
     add(L"OS", widen(h.get("os")));
     add(L"CPU", widen(h.get("cpu")));
     add(L"MHz", widen(h.get("cpu_mhz")));
@@ -723,9 +725,9 @@ void showStaticPane(NodeRecord* n)
     }
     static const char* const knownHello[] = { "agent", "os", "cpu", "cpu_mhz", "cores", "mem_mb", "mem_installed_mb", "mem_type", "disk_total_mb", "board",
                                               "chipset", "gpu", "vram_mb", "ip", "mac", "name", "lightning3_path", "lightning3_version",
-                                              "lightning2_path", "lightning2_version", "relay", "relay_ip", "render_host", "bryce3_path", "bryce3_version", "bryce2_path", "bryce2_version", "bryce1_path", "bryce1_version" };
+                                              "lightning2_path", "lightning2_version", "relay", "relay_ip", "render_host", "render_bin", "render_bin_exists", "bryce3_path", "bryce3_version", "bryce2_path", "bryce2_version", "bryce1_path", "bryce1_version" };
     static const char* const knownReport[] = { "cpu_pct", "cpu_temp_c", "disk_free_mb", "lightning", "lightning_cpu_pct",
-                                               "mem_free_mb", "rendering", "uptime_s", "clock", "utc_ms", "render_host", "bryce", "bryce_cpu_pct" };
+                                               "mem_free_mb", "rendering", "uptime_s", "clock", "utc_ms", "render_host", "render_bin", "render_bin_exists", "bryce", "bryce_cpu_pct" };
     for (std::map<std::string, std::string>::const_iterator it = h.fields.begin(); it != h.fields.end(); ++it) {
         bool known = false;
         for (size_t k = 0; k < sizeof(knownHello) / sizeof(knownHello[0]); ++k) if (it->first == knownHello[k]) known = true;
@@ -794,6 +796,55 @@ bool isRenderHost(const NodeRecord* n)
     return parseBool(v);
 }
 
+// The RENDER.BIN folder the agent reports (REPORT first, then HELLO); empty from agents before 0.4.5.
+std::string renderBinOf(const NodeRecord* n)
+{
+    return n->report.has("render_bin") ? n->report.get("render_bin") : n->hello.get("render_bin");
+}
+
+std::wstring renderBinText(const NodeRecord* n)
+{
+    std::string bin = renderBinOf(n);
+    if (bin.empty()) return n->hello.get("agent").empty() ? std::wstring() : std::wstring(L"not reported (agent before 0.4.5)");
+    std::string ex = n->report.has("render_bin_exists") ? n->report.get("render_bin_exists") : n->hello.get("render_bin_exists");
+    return widen(bin + (parseBool(ex) ? "  (exists)" : "  (missing)"));
+}
+
+// The RENDER.BIN dialog of Toggle B3D Net Render Host: the folder as the agent
+// reports it (or the installation default), editable; OK sends it with the
+// toggle, Skip leaves this client untouched.
+struct RenderBinDlgData { std::wstring info, path; };
+
+INT_PTR CALLBACK renderBinDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    RenderBinDlgData* d = (RenderBinDlgData*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
+    if (INT_PTR r = themeDialogMessage(dlg, msg, wp, lp)) return r;
+    switch (msg) {
+    case WM_INITDIALOG:
+        d = (RenderBinDlgData*)lp;
+        SetWindowLongPtrW(dlg, GWLP_USERDATA, (LONG_PTR)d);
+        SetDlgItemTextW(dlg, IDC_RBIN_INFO, d->info.c_str());
+        SetDlgItemTextW(dlg, IDC_RBIN_PATH, d->path.c_str());
+        return TRUE;
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDOK && d) {
+            wchar_t buf[1024];
+            GetDlgItemTextW(dlg, IDC_RBIN_PATH, buf, 1024);
+            std::wstring path = trim(std::wstring(buf));
+            if (path.size() < 3 || path[1] != L':' || path[2] != L'\\') {
+                MessageBoxW(dlg, L"Enter the folder as a full path on the host, for example C:\\LightningRod\\RENDER.BIN.", L"RENDER.BIN", MB_OK | MB_ICONWARNING);
+                return TRUE;
+            }
+            d->path = path;
+            EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDCANCEL) { EndDialog(dlg, IDCANCEL); return TRUE; }
+        break;
+    }
+    return FALSE;
+}
+
 std::wstring renderHostText(const NodeRecord* n)
 {
     if (n->hello.get("agent").empty()) return std::wstring();
@@ -809,11 +860,27 @@ void toggleRenderHost()
 {
     std::vector<NodeRecord*> targets = checkedNodes();
     if (targets.empty()) { updateStatusBar(L"|  no clients checked"); return; }
-    int flagged = 0, told = 0, old = 0;
+    int flagged = 0, told = 0, old = 0, skipped = 0;
     for (size_t i = 0; i < targets.size(); ++i) {
         NodeRecord* n = targets[i];
+        std::wstring bin;
+        if (!n->renderHost) {
+            // Switching on: the RENDER.BIN folder, as the agent reports it or as the
+            // installation lays it out, is confirmed or changed first.
+            RenderBinDlgData d;
+            std::string reported = renderBinOf(n);
+            d.path = reported.empty() ? L"C:\\LightningRod\\RENDER.BIN" : widen(reported);
+            d.info = widen(n->name) + L" becomes a Bryce 3D Network Render Host. Confirm the folder where it writes the frames: the default is RENDER.BIN in its "
+                     L"shared Lightning Rod folder" + (reported.empty() ? L" (the agent has not reported its folder yet)" : L"") + L".";
+            if (DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_RENDERBIN), g_main, renderBinDlgProc, (LPARAM)&d) != IDOK) {
+                ++skipped;
+                logEvent(n->name + ": Net Render Host toggle skipped");
+                continue;
+            }
+            bin = d.path;
+        }
         n->renderHost = !n->renderHost;
-        logEvent(format("%s render_host=%s (Info Flag)", n->name.c_str(), boolText(n->renderHost)));
+        logEvent(format("%s render_host=%s (Info Flag)%s%s", n->name.c_str(), boolText(n->renderHost), bin.empty() ? "" : ", RENDER.BIN ", narrow(bin).c_str()));
         if (n->renderHost) ++flagged;
         if (n->online) {
             if (compareVersions(n->hello.get("agent"), kRenderHostAgent) < 0) {
@@ -823,6 +890,7 @@ void toggleRenderHost()
             } else {
                 Message m("RENDERHOST");
                 m.set("set", std::string(boolText(n->renderHost)));
+                if (!bin.empty()) m.set("render_bin", narrow(bin));
                 if (sendToNode(n, m, m.oneLine())) ++told;
             }
         }
@@ -832,6 +900,7 @@ void toggleRenderHost()
     g_store->save();
     std::string status = format("|  Net Render Host toggled on %d checked: %d now flagged, %d agent(s) told", (int)targets.size(), flagged, told);
     if (old) status += format(", %d skipped: agent older than %s", old, kRenderHostAgent);
+    if (skipped) status += format(", %d skipped at the RENDER.BIN dialog", skipped);
     updateStatusBar(widen(status).c_str());
 }
 
@@ -3718,6 +3787,7 @@ bool pickPath(HWND owner, bool folder, const wchar_t* title, const wchar_t* filt
 
 struct RenderJobData {
     std::vector<NodeRecord*> hosts;
+    std::vector<std::wstring> bins;   // each host's RENDER.BIN as reported (empty when not reported)
     int host;
     int gen;                 // which Bryce opens the scene: 3, 2 or 1
     std::wstring scene, textures, output;
@@ -3759,13 +3829,23 @@ INT_PTR CALLBACK renderJobDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         return TRUE;
     }
     case WM_COMMAND:
+        if (LOWORD(wp) == IDC_JOB_HOST && HIWORD(wp) == CBN_SELCHANGE && d) {
+            // Another host: its RENDER.BIN becomes the output folder.
+            int h = (int)SendDlgItemMessageW(dlg, IDC_JOB_HOST, CB_GETCURSEL, 0, 0);
+            if (h >= 0 && h < (int)d->bins.size() && !d->bins[h].empty()) SetDlgItemTextW(dlg, IDC_JOB_OUTPUT, d->bins[h].c_str());
+            return TRUE;
+        }
         if (LOWORD(wp) == IDC_JOB_SCENE_BROWSE) {
             std::wstring path;
             if (pickPath(dlg, false, L"Select the Bryce scene", L"Bryce scenes (*.br7;*.br6;*.br5)", L"*.br7;*.br6;*.br5", path)) {
                 SetDlgItemTextW(dlg, IDC_JOB_SCENE, path.c_str());
                 wchar_t out[512];
                 GetDlgItemTextW(dlg, IDC_JOB_OUTPUT, out, 512);
-                if (out[0] == L'\0') SetDlgItemTextW(dlg, IDC_JOB_OUTPUT, (L"renders\\" + fileTitle(path)).c_str());
+                if (out[0] == L'\0') {
+                    int h = (int)SendDlgItemMessageW(dlg, IDC_JOB_HOST, CB_GETCURSEL, 0, 0);
+                    bool known = h >= 0 && h < (int)d->bins.size() && !d->bins[h].empty();
+                    SetDlgItemTextW(dlg, IDC_JOB_OUTPUT, known ? d->bins[h].c_str() : L"RENDER.BIN");
+                }
             }
             return TRUE;
         }
@@ -3790,7 +3870,7 @@ INT_PTR CALLBACK renderJobDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 DWORD t = GetFileAttributesW(d->textures.c_str());
                 if (t == INVALID_FILE_ATTRIBUTES || !(t & FILE_ATTRIBUTE_DIRECTORY)) { MessageBoxW(dlg, L"The texture folder does not exist. Leave it empty or browse for a folder.", L"Render Job on Host", MB_OK | MB_ICONWARNING); return TRUE; }
             }
-            if (d->output.empty()) d->output = L"renders\\" + fileTitle(d->scene);
+            if (d->output.empty()) d->output = (d->host < (int)d->bins.size() && !d->bins[d->host].empty()) ? d->bins[d->host] : L"RENDER.BIN";
             if (d->first.empty() != d->last.empty() || (!d->first.empty() && atoi(d->last.c_str()) < atoi(d->first.c_str()))) {
                 MessageBoxW(dlg, L"Enter both the first and the last frame, the last not before the first, or leave both empty.", L"Render Job on Host", MB_OK | MB_ICONWARNING);
                 return TRUE;
@@ -3830,7 +3910,8 @@ void renderJob()
     d.gen = 3;
     d.scene = g_jobScene;
     d.textures = g_jobTextures;
-    if (!d.scene.empty()) d.output = L"renders\\" + fileTitle(d.scene);
+    for (size_t i = 0; i < d.hosts.size(); ++i) d.bins.push_back(widen(renderBinOf(d.hosts[i])));
+    d.output = d.bins[0].empty() ? L"RENDER.BIN" : d.bins[0];   // the host's RENDER.BIN; relative means inside its shared folder
     if (DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_RENDERJOB), g_main, renderJobDlgProc, (LPARAM)&d) != IDOK) return;
     g_jobScene = d.scene;
     g_jobTextures = d.textures;
@@ -4820,8 +4901,26 @@ void onNet(NetEvent* e)
             else text = format("BRYCE %s failed on %s: %s%s%s", action.c_str(), n->name.c_str(), e->msg.get("error").c_str(),
                                path.empty() ? "" : (" (" + what + ")").c_str(), "");
         } else if (cmd == "RENDERHOST") {
-            if (ok) text = format("RENDERHOST ok on %s: Net Render Host %s", n->name.c_str(), parseBool(e->msg.get("render_host")) ? "on" : "off");
+            bool hostOn = parseBool(e->msg.get("render_host"));
+            std::string bin = e->msg.get("render_bin"), inShare = e->msg.get("render_bin_in_share");
+            bool exists = parseBool(e->msg.get("render_bin_exists"));
+            if (ok) text = format("RENDERHOST ok on %s: Net Render Host %s%s%s%s", n->name.c_str(), hostOn ? "on" : "off",
+                                  bin.empty() ? "" : ", RENDER.BIN ", bin.c_str(), bin.empty() ? "" : exists ? " (exists)" : " (missing)");
             else text = format("RENDERHOST failed on %s: %s", n->name.c_str(), e->msg.get("error").c_str());
+            if (ok && hostOn && !bin.empty()) {
+                // The folder is checked by opening it: through the share when it lies
+                // inside the agent's folder, otherwise it cannot be reached from here.
+                if (!inShare.empty() && exists) {
+                    std::vector<std::string>* paths = new std::vector<std::string>();
+                    paths->push_back("\\\\" + n->name + "\\" + g_store->settings.shareName + "\\" + inShare + "\\");
+                    HANDLE t = CreateThread(NULL, 0, openSharedFoldersThread, paths, 0, NULL);
+                    if (t) CloseHandle(t); else delete paths;
+                } else if (!exists) {
+                    logEvent(format("%s: RENDER.BIN %s does not exist and could not be created on the node", n->name.c_str(), bin.c_str()));
+                } else {
+                    logEvent(format("%s: RENDER.BIN %s lies outside its shared folder, so it cannot be opened from this host", n->name.c_str(), bin.c_str()));
+                }
+            }
         } else if (cmd == "RELAYSET") {
             if (ok) text = format("RELAYSET ok on %s: relay %s%s%s", n->name.c_str(), parseBool(e->msg.get("relay")) ? "on" : "off",
                                   parseBool(e->msg.get("relay")) ? " to " : "", e->msg.get("relay_ip").c_str());

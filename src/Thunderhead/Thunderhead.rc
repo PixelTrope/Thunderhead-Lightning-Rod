@@ -208,7 +208,7 @@ BEGIN
     EDITTEXT        IDC_JOB_TEXTURES, 84, 72, 290, 13, ES_AUTOHSCROLL
     PUSHBUTTON      "Browse...", IDC_JOB_TEXTURES_BROWSE, 380, 71, 50, 14
     LTEXT           "(optional; copied beside the scene)", -1, 84, 87, 290, 10
-    LTEXT           "Output folder on host:", -1, 10, 102, 74, 10
+    LTEXT           "RENDER.BIN on host:", -1, 10, 102, 74, 10
     EDITTEXT        IDC_JOB_OUTPUT, 84, 100, 290, 13, ES_AUTOHSCROLL
     LTEXT           "Frames, first and last:", -1, 10, 122, 74, 10
     EDITTEXT        IDC_JOB_FIRST, 84, 120, 40, 13, ES_AUTOHSCROLL | ES_NUMBER
@@ -221,6 +221,19 @@ BEGIN
     LTEXT           "The scene and the texture folder are copied to jobs\<scene name>\ in the host's shared folder, the job is recorded in jobs.txt beside Thunderhead, and the chosen Bryce is started on the host with the scene. The network render itself is begun from Bryce's own Render menu on the host; a relative output folder lies inside the host's shared folder and is created there.", -1, 10, 154, 420, 40
     DEFPUSHBUTTON   "Copy and Start Bryce", IDOK, 270, 200, 104, 14
     PUSHBUTTON      "Cancel", IDCANCEL, 380, 200, 50, 14
+END
+
+IDD_RENDERBIN DIALOGEX 0, 0, 340, 110
+STYLE DS_MODALFRAME | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Bryce 3D Network Render Host: RENDER.BIN"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT           "", IDC_RBIN_INFO, 10, 8, 320, 36
+    LTEXT           "RENDER.BIN folder on the host:", -1, 10, 50, 120, 10
+    EDITTEXT        IDC_RBIN_PATH, 10, 62, 320, 13, ES_AUTOHSCROLL
+    LTEXT           "The agent creates the folder if it is missing; when it lies inside the shared folder it is then opened from here in Windows Explorer.", -1, 10, 78, 320, 18
+    DEFPUSHBUTTON   "OK", IDOK, 226, 92, 50, 14
+    PUSHBUTTON      "Skip", IDCANCEL, 280, 92, 50, 14
 END
 
 VS_VERSION_INFO VERSIONINFO

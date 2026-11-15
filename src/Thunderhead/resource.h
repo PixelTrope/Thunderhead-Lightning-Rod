@@ -10,6 +10,7 @@
 #define IDD_RELAY               108
 #define IDD_MESSAGE             109
 #define IDD_RENDERJOB           110
+#define IDD_RENDERBIN           111
 
 #define IDM_FILE_EXIT           1001
 #define IDM_HELP_ABOUT          1301
@@ -113,6 +114,10 @@
 #define IDC_MSG_TIMED_STATE     3104
 #define IDC_MSG_SECONDS         3105
 #define IDC_MSG_RADIO_FIRST     3110   // one radio per sound category, in kSoundCategories order, then Silent message
+
+// RENDER.BIN dialog, shown when a client is toggled to Bryce 3D Network Render Host
+#define IDC_RBIN_INFO           3301
+#define IDC_RBIN_PATH           3302
 
 // Render Job on Host dialog
 #define IDC_JOB_INFO            3201

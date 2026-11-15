@@ -22,6 +22,7 @@
 
 #include <commctrl.h>
 #include <iphlpapi.h>
+#include <shlobj.h>
 #include <objbase.h>
 #include <cstring>
 #include <cwchar>
@@ -90,6 +91,7 @@ CRITICAL_SECTION g_settingsLock;
 bool g_relay = false;
 std::string g_relayIp;
 bool g_renderHost = false;       // Bryce 3D Network Render Host (B3NDHR) mode: render_host= in settings.txt, reported in HELLO and REPORT
+std::wstring g_renderBin;        // RENDER.BIN, the folder the host writes the frames to: render_bin= in settings.txt; empty = <this folder>\RENDER.BIN
 volatile long g_rehello = 0;     // set by the window thread: send HELLO again with the new values
 
 std::wstring settingsFile() { return exeDirectory() + L"\\settings.txt"; }
@@ -105,6 +107,7 @@ void loadSettings()
         if (key == "relay") g_relay = parseBool(value);
         else if (key == "relay_ip") g_relayIp = value;
         else if (key == "render_host") g_renderHost = parseBool(value);
+        else if (key == "render_bin") g_renderBin = widen(value);
     }
     if (g_relayIp.empty()) g_relay = false;
 }
@@ -112,7 +115,7 @@ void loadSettings()
 void saveSettings()
 {
     std::string text = std::string("relay=") + boolText(g_relay) + "\r\nrelay_ip=" + g_relayIp + "\r\n" +
-                       "render_host=" + boolText(g_renderHost) + "\r\n";
+                       "render_host=" + boolText(g_renderHost) + "\r\n" + "render_bin=" + narrow(g_renderBin) + "\r\n";
     if (!writeTextFile(settingsFile(), text)) logLine("settings.txt could not be written: " + lastErrorText((int)GetLastError()));
 }
 
@@ -140,6 +143,62 @@ bool renderHostSetting()
     return on;
 }
 
+// ---- RENDER.BIN -------------------------------------------------------------
+// The folder the Bryce 3D Network Render Host writes the frames to. The default
+// is RENDER.BIN in this agent's folder, the shared one, so that it is reachable
+// as \\node\LightningRod\RENDER.BIN; the Settings dialog or Thunderhead
+// (RENDERHOST render_bin=) can name another folder on this node.
+std::wstring renderBinDefault() { return exeDirectory() + L"\\RENDER.BIN"; }
+
+std::wstring renderBinSetting()
+{
+    EnterCriticalSection(&g_settingsLock);
+    std::wstring p = g_renderBin;
+    LeaveCriticalSection(&g_settingsLock);
+    return p.empty() ? renderBinDefault() : p;
+}
+
+bool renderBinExists()
+{
+    DWORD a = GetFileAttributesW(renderBinSetting().c_str());
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+// The path below this agent's folder when RENDER.BIN lies inside it (what
+// Thunderhead appends to the share), empty when it lies elsewhere.
+std::string renderBinInShare()
+{
+    std::wstring p = renderBinSetting(), base = exeDirectory() + L"\\";
+    if (p.size() > base.size() && _wcsnicmp(p.c_str(), base.c_str(), base.size()) == 0) return narrow(p.substr(base.size()));
+    return std::string();
+}
+
+// Creates a folder and the folders above it; true when it exists afterwards.
+bool createFolder(const std::wstring& path)
+{
+    int r = SHCreateDirectoryExW(NULL, path.c_str(), NULL);
+    return r == ERROR_SUCCESS || r == ERROR_ALREADY_EXISTS || r == ERROR_FILE_EXISTS;
+}
+
+// Sets the RENDER.BIN folder (empty for the default), saves it, and creates it
+// when this node is the render host; says whether it changed.
+bool applyRenderBin(const std::wstring& path, bool& changed)
+{
+    std::wstring p = trim(path);
+    if (p == renderBinDefault()) p.clear();
+    EnterCriticalSection(&g_settingsLock);
+    changed = g_renderBin != p;
+    g_renderBin = p;
+    saveSettings();
+    LeaveCriticalSection(&g_settingsLock);
+    if (changed) logLine("RENDER.BIN folder set to " + narrow(renderBinSetting()));
+    if (!renderHostSetting()) return true;
+    if (renderBinExists()) return true;
+    bool ok = createFolder(renderBinSetting());
+    logLine("RENDER.BIN folder " + narrow(renderBinSetting()) + (ok ? " created" : " could not be created: " + lastErrorText((int)GetLastError())));
+    return ok;
+}
+
 // Sets the B3NDHR mode (Settings dialog on the window thread, RENDERHOST from
 // Thunderhead on the agent thread), saves it, and says whether it changed.
 bool applyRenderHostSetting(bool on)
@@ -150,6 +209,10 @@ bool applyRenderHostSetting(bool on)
     saveSettings();
     LeaveCriticalSection(&g_settingsLock);
     if (changed) logLine(std::string("Bryce 3D Network Render Host mode ") + (on ? "on" : "off"));
+    if (on && !renderBinExists()) {
+        bool ok = createFolder(renderBinSetting());
+        logLine("RENDER.BIN folder " + narrow(renderBinSetting()) + (ok ? " created" : " could not be created: " + lastErrorText((int)GetLastError())));
+    }
     return changed;
 }
 
@@ -1088,6 +1151,8 @@ private:
         m.set("relay", boolText(relay));
         m.set("relay_ip", relay ? relayIp : std::string());
         m.set("render_host", boolText(renderHostSetting()));
+        m.set("render_bin", narrow(renderBinSetting()));
+        m.set("render_bin_exists", boolText(renderBinExists()));
         m.set("keyed", boolText(!key_.empty()));
         if (!key_.empty() && !offerChallenge_.empty()) {
             m.set("challenge", offerChallenge_);
@@ -1115,6 +1180,8 @@ private:
         full.set("lightning_cpu_pct", (long long)l.cpuPct);
         full.set("rendering", boolText(l.rendering));
         full.set("render_host", boolText(renderHostSetting()));
+        full.set("render_bin", narrow(renderBinSetting()));
+        full.set("render_bin_exists", boolText(renderBinExists()));
         BryceState b = bryce_.query();
         full.set("bryce", b.running ? "running" : "stopped");
         full.set("bryce_cpu_pct", (long long)b.cpuPct);   // the B3NDHR mode, so that a change made here reaches Thunderhead within a report
@@ -1227,10 +1294,10 @@ private:
                 }
                 if (err.empty()) {
                     std::string output = trim(m.get("output"));
-                    if (!output.empty() && output.find(':') == std::string::npos && output[0] != '\\' && output.find("..") == std::string::npos) {
-                        std::wstring dir = exeDirectory() + L"\\" + widen(output);
-                        if (!CreateDirectoryW(dir.c_str(), NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
-                            logLine("BRYCE: output folder " + narrow(dir) + " could not be created: " + lastErrorText((int)GetLastError()));
+                    if (!output.empty() && output.find("..") == std::string::npos && output.compare(0, 2, "\\\\") != 0) {
+                        // relative: inside this folder; absolute (a drive letter): anywhere on this node, RENDER.BIN as a rule
+                        std::wstring dir = output.find(':') == std::string::npos && output[0] != '\\' ? exeDirectory() + L"\\" + widen(output) : widen(output);
+                        if (!createFolder(dir)) logLine("BRYCE: output folder " + narrow(dir) + " could not be created: " + lastErrorText((int)GetLastError()));
                         else logLine("BRYCE: output folder " + narrow(dir));
                     }
                     if (!scene.empty()) {
@@ -1282,13 +1349,25 @@ private:
             std::string set = trim(m.get("set")), err;
             bool ok = set == "yes" || set == "no";
             if (!ok) err = "set must be yes or no";
-            else applyRenderHostSetting(set == "yes");
-            logLine(format("RENDERHOST set=%s: %s%s%s", set.c_str(), ok ? "ok" : "failed", err.empty() ? "" : ": ", err.c_str()));
+            else {
+                if (m.has("render_bin") && !trim(m.get("render_bin")).empty()) {
+                    bool changed = false;
+                    EnterCriticalSection(&g_settingsLock);
+                    g_renderHost = set == "yes";   // so that applyRenderBin creates the folder for a host
+                    LeaveCriticalSection(&g_settingsLock);
+                    if (!applyRenderBin(widen(m.get("render_bin")), changed)) err = "RENDER.BIN folder could not be created";
+                }
+                applyRenderHostSetting(set == "yes");
+            }
+            logLine(format("RENDERHOST set=%s render_bin=%s: %s%s%s", set.c_str(), narrow(renderBinSetting()).c_str(), ok ? "ok" : "failed", err.empty() ? "" : ": ", err.c_str()));
             Message ack("ACK");
             ack.set("cmd", m.verb);
             ack.set("ok", boolText(ok));
             ack.set("error", err);
             ack.set("render_host", boolText(renderHostSetting()));
+            ack.set("render_bin", narrow(renderBinSetting()));
+            ack.set("render_bin_exists", boolText(renderBinExists()));
+            ack.set("render_bin_in_share", renderBinInShare());
             sendMessage(ack);
             notify();
             sendReport();
@@ -2023,6 +2102,7 @@ void refreshAll()
     setRow(row++, L"Sounds",              widen(format("%u file(s) in ", (unsigned)soundFilesIn(soundDir()).size())) + soundDir());
     setRow(row++, L"SMB1 relay",          widen(relayText()));
     setRow(row++, L"Net Render Host",     renderHostSetting() ? L"On: this node is the Bryce 3D Network Render Host (B3NDHR)" : L"Off");
+    setRow(row++, L"RENDER.BIN",          renderBinSetting() + (renderBinExists() ? L"  (exists)" : L"  (missing; created when this node is the host)"));
     setRow(row++, L"Authentication",      s.keyed ? L"farm.key present: only a host that proves it is obeyed"
                                                   : L"no farm.key in " + exeDirectory() + L": Thunderhead writes it through the shared folder; commands are refused until then");
     refreshClock();
@@ -2102,6 +2182,8 @@ INT_PTR CALLBACK settingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         std::string ip;
         relaySnapshot(relay, ip);
         setRenderHostSwitch(dlg, renderHostSetting());
+        SetDlgItemTextW(dlg, IDC_RENDERBIN_PATH, renderBinSetting().c_str());
+        SetDlgItemTextW(dlg, IDC_RENDERBIN_NOTE, renderBinExists() ? L"The folder exists." : L"The folder does not exist yet; it is created when this node is the host.");
         CheckDlgButton(dlg, IDC_RELAY_CHECK, relay ? BST_CHECKED : BST_UNCHECKED);
         SetDlgItemTextW(dlg, IDC_RELAY_IP, widen(ip).c_str());
         SendDlgItemMessageW(dlg, IDC_RELAY_IP, EM_LIMITTEXT, 15, 0);
@@ -2139,8 +2221,19 @@ INT_PTR CALLBACK settingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                     return TRUE;
                 }
             }
+            wchar_t binBuf[1024];
+            GetDlgItemTextW(dlg, IDC_RENDERBIN_PATH, binBuf, 1024);
+            std::wstring bin = trim(std::wstring(binBuf));
+            if (bin.empty()) bin = renderBinDefault();
+            if (bin.size() < 3 || bin[1] != L':' || bin[2] != L'\\') {
+                MessageBoxW(dlg, L"Enter the RENDER.BIN folder as a full path on this node, for example C:\\LightningRod\\RENDER.BIN.",
+                            L"Lightning Rod Settings", MB_OK | MB_ICONWARNING);
+                return TRUE;
+            }
             applyRelaySetting(on, ip, s.info.ip);   // the checks above make it succeed
             applyRenderHostSetting(g_dlgRenderHost);   // reaches Thunderhead with the next report
+            bool binChanged = false;
+            applyRenderBin(bin, binChanged);
             EndDialog(dlg, IDOK);
             return TRUE;
         }
