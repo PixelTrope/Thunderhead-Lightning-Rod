@@ -236,6 +236,21 @@ BEGIN
     PUSHBUTTON      "Skip", IDCANCEL, 280, 92, 50, 14
 END
 
+IDD_SHARE DIALOGEX 0, 0, 340, 124
+STYLE DS_MODALFRAME | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Create Remote Shared Folder"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT           "", IDC_SHARE_INFO, 10, 8, 320, 20
+    LTEXT           "Folder on the client (full local path):", -1, 10, 34, 130, 10
+    EDITTEXT        IDC_SHARE_PATH, 10, 46, 320, 13, ES_AUTOHSCROLL
+    LTEXT           "Share name:", -1, 10, 66, 130, 10
+    EDITTEXT        IDC_SHARE_NAME, 10, 78, 150, 13, ES_AUTOHSCROLL
+    LTEXT           "The agent creates the folder if it is missing and shares it with everyone at share level; the folder's own permissions still apply. Needs administrator rights on the client.", -1, 10, 94, 320, 18
+    DEFPUSHBUTTON   "Create", IDOK, 226, 106, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 280, 106, 50, 14
+END
+
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION     TLR_VERSION_MAJOR, TLR_VERSION_MINOR, TLR_VERSION_PATCH, 0
 PRODUCTVERSION  TLR_VERSION_MAJOR, TLR_VERSION_MINOR, TLR_VERSION_PATCH, 0

@@ -81,6 +81,7 @@ std::string authText(const NodeRecord* n);
 bool nodeOutdated(const NodeRecord* n);
 bool commandAllowed(NodeRecord* n, const std::string& label);
 bool sendToNode(NodeRecord* n, const Message& m, const std::string& label);
+void createRemoteShare(const std::vector<NodeRecord*>& nodes);
 int shadeKey(const NodeRecord* n);
 COLORREF rowShade(const NodeRecord* n, int row, COLORREF* textColor);
 bool isRenderHost(const NodeRecord* n);
@@ -3589,6 +3590,94 @@ DWORD WINAPI copyToClientsThread(LPVOID param)
     return 0;
 }
 
+// Create Remote Shared Folder: a folder on each checked online client, created
+// and shared under one name by the agent (SHARE action=create; agents from
+// kShareAgent, administrator rights on the client). The new share is opened
+// from here in Windows Explorer when the agent reports success.
+const char* const kShareAgent = "0.4.6";
+struct ShareDlgData { std::wstring info, path, name; };
+
+INT_PTR CALLBACK shareDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    ShareDlgData* d = (ShareDlgData*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
+    if (INT_PTR r = themeDialogMessage(dlg, msg, wp, lp)) return r;
+    switch (msg) {
+    case WM_INITDIALOG:
+        d = (ShareDlgData*)lp;
+        SetWindowLongPtrW(dlg, GWLP_USERDATA, (LONG_PTR)d);
+        SetDlgItemTextW(dlg, IDC_SHARE_INFO, d->info.c_str());
+        SetDlgItemTextW(dlg, IDC_SHARE_PATH, d->path.c_str());
+        SetDlgItemTextW(dlg, IDC_SHARE_NAME, d->name.c_str());
+        SendDlgItemMessageW(dlg, IDC_SHARE_NAME, EM_LIMITTEXT, 80, 0);
+        return TRUE;
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDC_SHARE_PATH && HIWORD(wp) == EN_KILLFOCUS && d) {
+            // The share name follows the folder's last part until typed by hand.
+            wchar_t buf[1024], name[128];
+            GetDlgItemTextW(dlg, IDC_SHARE_PATH, buf, 1024);
+            GetDlgItemTextW(dlg, IDC_SHARE_NAME, name, 128);
+            std::wstring path = trim(std::wstring(buf));
+            while (!path.empty() && path[path.size() - 1] == L'\\') path.erase(path.size() - 1);
+            size_t slash = path.find_last_of(L"\\/");
+            if (name[0] == L'\0' && slash != std::wstring::npos && slash + 1 < path.size()) SetDlgItemTextW(dlg, IDC_SHARE_NAME, path.substr(slash + 1).c_str());
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDOK && d) {
+            wchar_t buf[1024];
+            GetDlgItemTextW(dlg, IDC_SHARE_PATH, buf, 1024);
+            d->path = trim(std::wstring(buf));
+            GetDlgItemTextW(dlg, IDC_SHARE_NAME, buf, 1024);
+            d->name = trim(std::wstring(buf));
+            if (d->path.size() < 3 || d->path[1] != L':' || d->path[2] != L'\\' || d->path.find(L"..") != std::wstring::npos) {
+                MessageBoxW(dlg, L"Enter the folder as a full local path on the client, for example D:\\RENDER.BIN.", L"Create Remote Shared Folder", MB_OK | MB_ICONWARNING);
+                return TRUE;
+            }
+            if (d->name.empty() || d->name.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos) {
+                MessageBoxW(dlg, L"Enter a share name without \\ / : * ? \" < > |.", L"Create Remote Shared Folder", MB_OK | MB_ICONWARNING);
+                return TRUE;
+            }
+            EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDCANCEL) { EndDialog(dlg, IDCANCEL); return TRUE; }
+        break;
+    }
+    return FALSE;
+}
+
+void createRemoteShare(const std::vector<NodeRecord*>& nodes)
+{
+    int online = 0;
+    for (size_t i = 0; i < nodes.size(); ++i) if (nodes[i]->online) ++online;
+    if (online == 0) { updateStatusBar(L"|  no online clients checked"); return; }
+    static std::wstring lastPath = L"D:\\RENDER.BIN", lastName = L"RENDER.BIN";
+    ShareDlgData d;
+    d.info = widen(format("The folder is created and shared on %d checked online client(s); an existing share of the same name and folder is kept.", online));
+    d.path = lastPath;
+    d.name = lastName;
+    if (DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_SHARE), g_main, shareDlgProc, (LPARAM)&d) != IDOK) return;
+    lastPath = d.path;
+    lastName = d.name;
+    Message m("SHARE");
+    m.set("action", std::string("create"));
+    m.set("path", narrow(d.path));
+    m.set("name", narrow(d.name));
+    int sent = 0, old = 0;
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        NodeRecord* n = nodes[i];
+        if (!n->online) continue;
+        if (compareVersions(n->hello.get("agent"), kShareAgent) < 0) {
+            ++old;
+            logEvent(format("SHARE not sent to %s: agent %s is older than %s, update it first", n->name.c_str(), n->hello.get("agent").c_str(), kShareAgent));
+            continue;
+        }
+        if (sendToNode(n, m, m.oneLine())) ++sent;
+    }
+    std::string status = format("|  SHARE create %s as %s sent to %d of %d online checked", narrow(d.path).c_str(), narrow(d.name).c_str(), sent, online);
+    if (old) status += format(", %d skipped: agent older than %s", old, kShareAgent);
+    updateStatusBar(widen(status).c_str());
+}
+
 // Asks for files or a folder, lets the user pick them, and copies them to the
 // shared folder of every checked client.
 void copyToClients()
@@ -3600,7 +3689,7 @@ void copyToClients()
     }
     std::wstring content = widen(format("The selection is copied to \\\\NAME\\%s\\ of %u checked client(s).",
                                         g_store->settings.shareName.c_str(), (unsigned)nodes.size()));
-    TASKDIALOG_BUTTON buttons[2] = { { 100, L"Files..." }, { 101, L"A folder..." } };
+    TASKDIALOG_BUTTON buttons[3] = { { 100, L"Files..." }, { 101, L"A folder..." }, { 102, L"Create Remote Shared Folder...\nCreate a folder on each checked client and share it" } };
     TASKDIALOGCONFIG tc;
     memset(&tc, 0, sizeof(tc));
     tc.cbSize = sizeof(tc);
@@ -3611,10 +3700,11 @@ void copyToClients()
     tc.pszMainInstruction = L"What do you want to copy?";
     tc.pszContent = content.c_str();
     tc.pButtons = buttons;
-    tc.cButtons = 2;
+    tc.cButtons = 3;
     tc.nDefaultButton = 100;
     int pressed = 0;
-    if (FAILED(TaskDialogIndirect(&tc, &pressed, NULL, NULL)) || (pressed != 100 && pressed != 101)) return;
+    if (FAILED(TaskDialogIndirect(&tc, &pressed, NULL, NULL)) || (pressed != 100 && pressed != 101 && pressed != 102)) return;
+    if (pressed == 102) { createRemoteShare(nodes); return; }
     bool folder = pressed == 101;
 
     std::vector<std::wstring> sources;
@@ -4555,8 +4645,8 @@ DWORD WINAPI shareCheckThread(LPVOID p)
 std::string shareStateText(const NodeRecord* n)
 {
     if (n->shareState == 1) return "readable from this host: " + (n->sharePath.empty() ? std::string("through its relay") : narrow(n->sharePath));
-    if (n->shareState == 2) return "not readable from this host: " + n->shareError;
-    return n->online ? std::string("being checked") : std::string("not checked yet");
+    if (n->shareState == 2) return "not readable from this host (commands and reports refused): " + n->shareError;
+    return n->online ? std::string("being checked (commands and reports refused until it passes)") : std::string("not checked yet");
 }
 
 const char* const kAuthAgent = "0.4.0";   // first agent version that knows farm.key
@@ -4679,10 +4769,12 @@ void onShareChecked(ShareResult* r)
                                        r->keyWritten ? "; farm.key written to it" : ""));
         else if (r->keyWritten) logEvent(format("%s: farm.key written to %s", n->name.c_str(), narrow(r->dir).c_str()));
         if (!r->keyError.empty()) logEvent(format("%s: farm.key could not be written to %s: %s", n->name.c_str(), narrow(r->dir).c_str(), r->keyError.c_str()));
+        if (n->reportsRefused) { n->reportsRefused = false; logEvent(format("%s: its reports are accepted again from the next one", n->name.c_str())); }
         shareVerified(n);
     } else {
         n->shareState = 2;
         n->shareError = r->error;
+        n->report = Message();   // nothing of an untrusted client is shown live
         n->shareNextMs = now + (now < n->shareRetryUntilMs ? 5000 : 60000);
         if (prev != 2) logEvent(format("%s: shared folder not readable from this host (%s); no command goes to it until it is. "
                                        "Use Open Client's Shared Folder and enter the credentials Windows asks for%s",
@@ -4834,6 +4926,23 @@ void onNet(NetEvent* e)
     case NetEvent::Report: {
         NodeRecord* n = g_store->findByConn(e->conn);
         if (!n) break;
+        if (n->shareState != 1) {
+            // Untrusted until its shared folder opens from here: the report keeps
+            // the session alive and nothing more; its values are not taken and the
+            // live columns stay blank. The first refusal goes to the event log.
+            n->lastReportMs = now;
+            n->nextReportMs = now + (unsigned long long)g_store->settings.intervalSec * 1000;
+            n->arrivalSec = utcNowMs() / 1000;
+            n->report = Message();
+            logNode(*n, "<- " + e->msg.oneLine() + "  (discarded: shared folder not readable from this host)");
+            if (!n->reportsRefused) {
+                n->reportsRefused = true;
+                logEvent(format("%s: its reports are discarded until its shared folder is readable from this host", n->name.c_str()));
+            }
+            refreshRow(n);
+            if (g_staticNode == n) showStaticPane(n);
+            break;
+        }
         // A REPORT carries only the values that changed since the previous one.
         n->report.verb = e->msg.verb;
         for (std::map<std::string, std::string>::const_iterator it = e->msg.fields.begin(); it != e->msg.fields.end(); ++it)
@@ -4900,6 +5009,19 @@ void onNet(NetEvent* e)
                                   scene.empty() ? "" : "; scene ", scene.c_str());
             else text = format("BRYCE %s failed on %s: %s%s%s", action.c_str(), n->name.c_str(), e->msg.get("error").c_str(),
                                path.empty() ? "" : (" (" + what + ")").c_str(), "");
+        } else if (cmd == "SHARE") {
+            std::string path = e->msg.get("path"), name = e->msg.get("name");
+            if (ok) {
+                text = format("SHARE create ok on %s: \\\\%s\\%s -> %s%s", n->name.c_str(), n->name.c_str(), name.c_str(), path.c_str(),
+                              parseBool(e->msg.get("existed")) ? " (was shared already)" : "");
+                // Checked by opening it from here, as the shared folders are.
+                std::vector<std::string>* paths = new std::vector<std::string>();
+                paths->push_back("\\\\" + n->name + "\\" + name + "\\");
+                HANDLE t = CreateThread(NULL, 0, openSharedFoldersThread, paths, 0, NULL);
+                if (t) CloseHandle(t); else delete paths;
+            } else {
+                text = format("SHARE create failed on %s: %s", n->name.c_str(), e->msg.get("error").c_str());
+            }
         } else if (cmd == "RENDERHOST") {
             bool hostOn = parseBool(e->msg.get("render_host"));
             std::string bin = e->msg.get("render_bin"), inShare = e->msg.get("render_bin_in_share");

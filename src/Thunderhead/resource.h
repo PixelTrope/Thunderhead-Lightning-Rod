@@ -11,6 +11,7 @@
 #define IDD_MESSAGE             109
 #define IDD_RENDERJOB           110
 #define IDD_RENDERBIN           111
+#define IDD_SHARE               112
 
 #define IDM_FILE_EXIT           1001
 #define IDM_HELP_ABOUT          1301
@@ -118,6 +119,11 @@
 // RENDER.BIN dialog, shown when a client is toggled to Bryce 3D Network Render Host
 #define IDC_RBIN_INFO           3301
 #define IDC_RBIN_PATH           3302
+
+// Create Remote Shared Folder dialog (from Copy Files or Folder to Client)
+#define IDC_SHARE_INFO          3401
+#define IDC_SHARE_PATH          3402   // the folder on the client, a full local path
+#define IDC_SHARE_NAME          3403   // the share name
 
 // Render Job on Host dialog
 #define IDC_JOB_INFO            3201

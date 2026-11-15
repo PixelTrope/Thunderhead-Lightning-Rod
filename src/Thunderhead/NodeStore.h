@@ -57,13 +57,14 @@ struct NodeRecord {
     int announcesUnanswered;         // ANNOUNCEs since its last HELLO
     unsigned long long pingFlashUntilMs;    // the row is painted in the ping color until then (0 none)
     int shadeKey;                    // the shade conditions as last painted (see shadeKey in main.cpp); -1 never
+    bool reportsRefused;             // reports arrived while its shared folder was not readable and were discarded (logged once)
 
     NodeRecord()
         : wol(false), boot(false), autoLogin(false), autoRod(false), autoLightning(false), renderHost(false), autoShutdown(false),
           online(false), conn(-1), lastReportMs(0), nextReportMs(0), nudgeDueMs(0), arrivalSec(0), onlineSinceMs(0), updating(false), updateStaged(false), updatePrompted(false), updateStartMs(0),
           rebootAfterRename(false), pingPending(false), haveClockOffset(false), clockOffsetMs(0), pingSentMs(0), updateViaRelay(false),
           authenticated(false), keyed(false), shareState(0), shareChecking(false), shareNextMs(0), shareRetryUntilMs(0), helloFollowupPending(false),
-          lastAnnounceMs(0), announcesUnanswered(0), pingFlashUntilMs(0), shadeKey(-1) {}
+          lastAnnounceMs(0), announcesUnanswered(0), pingFlashUntilMs(0), shadeKey(-1), reportsRefused(false) {}
 };
 
 struct Settings {

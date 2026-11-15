@@ -232,13 +232,14 @@ Thunderhead may send at any time:
 | TEAMVIEWER |          | start the installed TeamViewer, found through the registry or the Start menu, and bring its window to the front; reply ACK with where it was found (see TeamViewer); agents from 0.2.18 |
 | SOUND | action, file, logon, hello, logoff, report, badip | `action=play`: play `file`, a name in the agent's `sounds` folder, on the node's playback device; `action=scheme`: take the file names of the agent's own three sound events; reply ACK with `action=` and `file=` (see Audio); agents from 0.2.21 |
 | BRYCE | action, gen, scene, output, first, last | the full Bryce 3D on the node: `action=start` starts the installed Bryce of generation `gen` (3 = Bryce 7 and 7 Pro, 2 = 6.x, 1 = 5.x; 3 when absent), with `scene=` (a path inside the agent's shared folder, empty for none) as its argument, and brings its window to the front; `output=`, `first=` and `last=` describe the render job and are kept in the agent's job.txt, the output folder being created when it lies inside the shared folder; `action=stop` ends whichever Bryce.exe runs; `action=front` brings its window to the front; reply ACK with `action=`, `gen=`, `scene=`, `path=`, `version=` and `found=`, then a full REPORT (see Bryce 3D on the host); agents from 0.4.4 |
+| SHARE | action, path, name | `action=create`: create the folder `path` (a full local path) on the node and share it as `name` at share level for everyone, keeping an existing share of that name that already points at the folder; needs administrator rights on the node; reply ACK with `action=`, `path=`, `name=` and `existed=` (see Create Remote Shared Folder); agents from 0.4.6 |
 | RENDERHOST | set, render_bin | `set=yes|no` becomes the node's Bryce 3D Network Render Host setting, saved for the next start; `render_bin=` (agents from 0.4.5), when present, becomes the node's RENDER.BIN folder, created when the node is the host; reply ACK with `render_host=`, `render_bin=`, `render_bin_exists=` and `render_bin_in_share=` as now in force, then a full REPORT (see Bryce 3D Network Render Host); agents from 0.4.2 |
 | RELAYSET | relay, relay_ip | set the agent's SMB1 relay values as its Settings dialog would (`relay=yes|no`, `relay_ip=`), save them and send HELLO again when they changed; reply ACK with the values in force (see SMB1 relay); agents from 0.3.1 |
 | RELAY | op, job, dest, share, pattern | SMB1 relay work for the client at `dest`, each op on a thread so that an unreachable destination never stalls the agent's reports (probe on a thread from 0.3.2): `op=probe` answers whether `\\dest\share\` opens from the node; `op=push` copies what Thunderhead staged under `relay\<job>` in the node's own share to the root of that share; `op=pull` fetches the newest file matching `pattern` from it into `relay\<job>`; reply ACK with `op=`, `job=`, `dest=`, `files=`, `bytes=` and `file=` (see SMB1 relay); agents from 0.3.0 |
 | MESSAGE | title, text, sound, timeout | open a message window on the node's screen with `title` in its caption and `text` (hexadecimal digits of its UTF-8 bytes), play `sound`, a name in the agent's `sounds` folder (none when empty), and close the window by itself after `timeout` seconds (0: when dismissed); reply ACK when opened and again when closed (see Display Message); agents from 0.3.3 |
 
 The agent replies to START, STOP, PRIORITY, EXIT, RESTART, UPDATE, RENAME, REBOOT,
-SHUTDOWN, POWER, AUDIO, TEAMVIEWER, SOUND, RELAYSET, RENDERHOST, BRYCE, RELAY, MESSAGE and BATCH with (RENAME adds `name=` with the name that was applied;
+SHUTDOWN, POWER, AUDIO, TEAMVIEWER, SOUND, RELAYSET, RENDERHOST, BRYCE, SHARE, RELAY, MESSAGE and BATCH with (RENAME adds `name=` with the name that was applied;
 START adds `gen=`, `path=`, `version=` and `found=` as described under Lightning lookup;
 PRIORITY adds `level=` as requested and `applied=` with the class Windows reports
 afterwards, and answers `ok=no` when the two differ, as when RealTime is
@@ -304,8 +305,13 @@ authenticated: commands refused until farm.key arrives") and in the
 Authentication row of its table.
 
 **The shared-folder gate.** Thunderhead sends no command to a node whose
-shared folder it has not read. The one message outside the gate is SET, the
-report schedule, which instructs nothing. When a HELLO arrives Thunderhead
+shared folder it has not read, and takes nothing from it either: from 0.4.6 a
+REPORT from such a node keeps its session alive and is otherwise discarded,
+with one line in the event log, its live columns stay blank (what was shown
+is dropped when a check fails), and the Client details pane says that
+commands and reports are refused; the next report after the folder passes is
+taken as usual, and the event log says so. The one message outside the gate
+is SET, the report schedule, which instructs nothing. When a HELLO arrives Thunderhead
 answers it with SET and starts a worker thread that lists
 `\\<ip>\<share_name>\` (and `\\<name>\<share_name>\` when the name resolves
 to that address, because some nodes accept the host's credentials only under
@@ -621,6 +627,22 @@ Close. Existing files are overwritten; a share that refuses the connection gets
 the standard credential prompt once; the event log has one line per client. A
 client reached through an SMB1 relay is copied to through the relay, and its
 shared folder cannot be opened from this host (see SMB1 relay).
+
+### Create Remote Shared Folder
+
+The third choice of *Copy Files or Folder to Client*, *Create Remote Shared
+Folder...*, asks for a folder on the client as a full local path (for example
+`D:\RENDER.BIN`) and a share name (the folder's last part until typed
+otherwise), and sends `SHARE action=create path= name=` to every checked
+online client whose agent is 0.4.6 or later, through the shared-folder gate
+as every command. The agent creates the folder if it is missing and shares it
+with NetShareAdd at share level for everyone, the folder's own permissions
+still applying; a share of that name that already points at the folder is
+kept and reported as existing, one that points elsewhere is an error, and
+without administrator rights on the node Windows refuses with access denied,
+which the ACK reports. On success the event log reads "SHARE create ok on
+NAME: \\NAME\name -> D:\RENDER.BIN" and Thunderhead opens the new share in
+Windows Explorer, which is also where credentials for it get typed.
 
 ## Agent update
 

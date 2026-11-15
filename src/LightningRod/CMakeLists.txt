@@ -10,7 +10,7 @@ add_executable(LightningRod WIN32
     LightningRod.rc
     LightningRod.ico
 )
-target_link_libraries(LightningRod PRIVATE common iphlpapi comctl32 wbemuuid ole32 oleaut32 winmm version shell32)
+target_link_libraries(LightningRod PRIVATE common iphlpapi comctl32 wbemuuid ole32 oleaut32 winmm version shell32 netapi32)
 # The default sound scheme, assets/sounds, is read from sounds\ beside the executable;
 # Thunderhead copies the same folder to every node with the agent update.
 add_custom_command(TARGET LightningRod POST_BUILD

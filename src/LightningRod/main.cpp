@@ -23,6 +23,7 @@
 #include <commctrl.h>
 #include <iphlpapi.h>
 #include <shlobj.h>
+#include <lm.h>
 #include <objbase.h>
 #include <cstring>
 #include <cwchar>
@@ -1343,6 +1344,57 @@ private:
             }
             sendReport();
             nextReport_ = tickMs() + (unsigned long long)intervalSec_ * 1000;
+        } else if (m.verb == "SHARE") {
+            // Create Remote Shared Folder in Thunderhead: action=create path= name=
+            // creates the folder on this node and shares it under the name at share
+            // level for everyone (the folder's own permissions still apply). Needs
+            // administrator rights, which Windows reports as access denied otherwise.
+            std::string action = trim(m.get("action")), path = trim(m.get("path")), name = trim(m.get("name")), err;
+            bool ok = false, existed = false;
+            if (action != "create") err = "unknown action \"" + action + "\"";
+            else if (path.size() < 3 || path[1] != ':' || path[2] != '\\' || path.find("..") != std::string::npos) err = "path must be a full local path";
+            else if (name.empty() || name.size() > 80 || name.find_first_of("\\/:*?\"<>|") != std::string::npos) err = "share name invalid";
+            else if (!createFolder(widen(path))) err = "folder could not be created: " + lastErrorText((int)GetLastError());
+            else {
+                std::wstring wpath = widen(path), wname = widen(name);
+                while (wpath.size() > 3 && wpath[wpath.size() - 1] == L'\\') wpath.erase(wpath.size() - 1);
+                SHARE_INFO_2 si;
+                memset(&si, 0, sizeof(si));
+                si.shi2_netname = (LPWSTR)wname.c_str();
+                si.shi2_type = STYPE_DISKTREE;
+                si.shi2_remark = (LPWSTR)L"Created by Thunderhead";
+                si.shi2_permissions = ACCESS_ALL;
+                si.shi2_max_uses = (DWORD)-1;
+                si.shi2_path = (LPWSTR)wpath.c_str();
+                DWORD bad = 0;
+                NET_API_STATUS st = NetShareAdd(NULL, 2, (LPBYTE)&si, &bad);
+                if (st == NERR_Success) ok = true;
+                else if (st == NERR_DuplicateShare) {
+                    // The name exists: fine when it already points at this folder.
+                    SHARE_INFO_2* have = NULL;
+                    if (NetShareGetInfo(NULL, (LPWSTR)wname.c_str(), 2, (LPBYTE*)&have) == NERR_Success && have) {
+                        std::wstring hp = have->shi2_path ? have->shi2_path : L"";
+                        while (hp.size() > 3 && hp[hp.size() - 1] == L'\\') hp.erase(hp.size() - 1);
+                        if (_wcsicmp(hp.c_str(), wpath.c_str()) == 0) { ok = true; existed = true; }
+                        else err = "share " + name + " exists already and points at " + narrow(hp);
+                        NetApiBufferFree(have);
+                    } else {
+                        err = "share " + name + " exists already";
+                    }
+                } else if (st == ERROR_ACCESS_DENIED) err = "access denied: creating a share needs administrator rights on this node";
+                else err = format("NetShareAdd failed: %s", lastErrorText((int)st).c_str());
+            }
+            logLine(format("SHARE %s %s as %s: %s%s%s", action.c_str(), path.c_str(), name.c_str(), ok ? (existed ? "ok, was shared already" : "ok") : "failed",
+                           err.empty() ? "" : ": ", err.c_str()));
+            Message ack("ACK");
+            ack.set("cmd", m.verb);
+            ack.set("ok", boolText(ok));
+            ack.set("error", err);
+            ack.set("action", action);
+            ack.set("path", path);
+            ack.set("name", name);
+            ack.set("existed", boolText(existed));
+            sendMessage(ack);
         } else if (m.verb == "RENDERHOST") {
             // Toggle B3D Net Render Host in Thunderhead: set=yes|no becomes this
             // node's B3NDHR mode, saved for the next start; a report follows at once.
