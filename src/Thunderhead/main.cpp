@@ -3869,7 +3869,9 @@ void onCopyDone(CopyAfter* ca)
 }
 
 // The Windows file dialog for one file or one folder; false when cancelled.
-bool pickPath(HWND owner, bool folder, const wchar_t* title, const wchar_t* filterName, const wchar_t* filterSpec, std::wstring& out)
+// startIn, when given, is the folder the dialog opens in (a UNC path works).
+bool pickPath(HWND owner, bool folder, const wchar_t* title, const wchar_t* filterName, const wchar_t* filterSpec, std::wstring& out,
+              const std::wstring& startIn = std::wstring())
 {
     IFileOpenDialog* dlg = NULL;
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg))) || !dlg) return false;
@@ -3881,6 +3883,10 @@ bool pickPath(HWND owner, bool folder, const wchar_t* title, const wchar_t* filt
     if (!folder && filterName) {
         COMDLG_FILTERSPEC filters[2] = { { filterName, filterSpec }, { L"All files", L"*.*" } };
         dlg->SetFileTypes(2, filters);
+    }
+    if (!startIn.empty()) {
+        IShellItem* start = NULL;
+        if (SUCCEEDED(SHCreateItemFromParsingName(startIn.c_str(), NULL, IID_PPV_ARGS(&start))) && start) { dlg->SetFolder(start); start->Release(); }
     }
     bool ok = false;
     if (SUCCEEDED(dlg->Show(owner))) {
@@ -3898,12 +3904,16 @@ bool pickPath(HWND owner, bool folder, const wchar_t* title, const wchar_t* filt
 struct RenderJobData {
     std::vector<NodeRecord*> hosts;
     std::vector<std::wstring> bins;   // each host's RENDER.BIN as reported (empty when not reported)
+    std::vector<std::wstring> roots;  // each host's share root as the gate verified it (shareRootOf)
     int host;
     int gen;                 // which Bryce opens the scene: 3, 2 or 1
+    bool existing;           // Use existing job on host: scene is a path under the host's share, nothing is copied
     std::wstring scene, textures, output;
+    std::wstring sceneRel;   // existing mode: the scene's path below the share root, as the agent takes it
     std::string first, last;
 };
 std::wstring g_jobScene, g_jobTextures;   // remembered while Thunderhead runs
+bool g_jobExisting = false;
 
 std::wstring fileTitle(const std::wstring& path)
 {
@@ -3919,6 +3929,14 @@ std::wstring fileName(const std::wstring& path)
     return slash == std::wstring::npos ? path : path.substr(slash + 1);
 }
 
+// The texture controls serve the copy only; an existing job is taken as it lies.
+void applyJobMode(HWND dlg, const RenderJobData* d)
+{
+    EnableWindow(GetDlgItem(dlg, IDC_JOB_TEXTURES), !d->existing);
+    EnableWindow(GetDlgItem(dlg, IDC_JOB_TEXTURES_BROWSE), !d->existing);
+    SetDlgItemTextW(dlg, IDOK, d->existing ? L"Start Bryce" : L"Copy and Start Bryce");
+}
+
 INT_PTR CALLBACK renderJobDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
     RenderJobData* d = (RenderJobData*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
@@ -3932,27 +3950,48 @@ INT_PTR CALLBACK renderJobDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         for (size_t i = 0; i < d->hosts.size(); ++i)
             SendDlgItemMessageW(dlg, IDC_JOB_HOST, CB_ADDSTRING, 0, (LPARAM)widen(d->hosts[i]->name + "  (" + d->hosts[i]->ip + ")").c_str());
         SendDlgItemMessageW(dlg, IDC_JOB_HOST, CB_SETCURSEL, 0, 0);
+        CheckRadioButton(dlg, IDC_JOB_MODE_COPY, IDC_JOB_MODE_EXISTING, d->existing ? IDC_JOB_MODE_EXISTING : IDC_JOB_MODE_COPY);
         SetDlgItemTextW(dlg, IDC_JOB_SCENE, d->scene.c_str());
         SetDlgItemTextW(dlg, IDC_JOB_TEXTURES, d->textures.c_str());
         SetDlgItemTextW(dlg, IDC_JOB_OUTPUT, d->output.c_str());
         CheckRadioButton(dlg, IDC_JOB_GEN3, IDC_JOB_GEN1, d->gen == 2 ? IDC_JOB_GEN2 : d->gen == 1 ? IDC_JOB_GEN1 : IDC_JOB_GEN3);
+        applyJobMode(dlg, d);
         return TRUE;
     }
     case WM_COMMAND:
-        if (LOWORD(wp) == IDC_JOB_HOST && HIWORD(wp) == CBN_SELCHANGE && d) {
-            // Another host: its RENDER.BIN becomes the output folder.
-            int h = (int)SendDlgItemMessageW(dlg, IDC_JOB_HOST, CB_GETCURSEL, 0, 0);
-            if (h >= 0 && h < (int)d->bins.size() && !d->bins[h].empty()) SetDlgItemTextW(dlg, IDC_JOB_OUTPUT, d->bins[h].c_str());
+        if ((LOWORD(wp) == IDC_JOB_MODE_COPY || LOWORD(wp) == IDC_JOB_MODE_EXISTING) && d) {
+            bool existing = LOWORD(wp) == IDC_JOB_MODE_EXISTING;
+            if (existing != d->existing) { d->existing = existing; SetDlgItemTextW(dlg, IDC_JOB_SCENE, L""); applyJobMode(dlg, d); }
             return TRUE;
         }
-        if (LOWORD(wp) == IDC_JOB_SCENE_BROWSE) {
+        if (LOWORD(wp) == IDC_JOB_HOST && HIWORD(wp) == CBN_SELCHANGE && d) {
+            // Another host: its RENDER.BIN becomes the output folder, and a chosen existing job no longer applies.
+            int h = (int)SendDlgItemMessageW(dlg, IDC_JOB_HOST, CB_GETCURSEL, 0, 0);
+            if (h >= 0 && h < (int)d->bins.size() && !d->bins[h].empty()) SetDlgItemTextW(dlg, IDC_JOB_OUTPUT, d->bins[h].c_str());
+            if (d->existing) SetDlgItemTextW(dlg, IDC_JOB_SCENE, L"");
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDC_JOB_SCENE_BROWSE && d) {
             std::wstring path;
+            int h = (int)SendDlgItemMessageW(dlg, IDC_JOB_HOST, CB_GETCURSEL, 0, 0);
+            if (d->existing) {
+                // The host's jobs folder, through the share the gate verified.
+                if (h < 0 || h >= (int)d->roots.size()) return TRUE;
+                if (relayFor(d->hosts[h])) {
+                    MessageBoxW(dlg, L"This host's shared folder is reached through an SMB1 relay and cannot be browsed from here.", L"Render Job on Host", MB_OK | MB_ICONINFORMATION);
+                    return TRUE;
+                }
+                std::wstring startIn = d->roots[h] + L"jobs";
+                if (GetFileAttributesW(startIn.c_str()) == INVALID_FILE_ATTRIBUTES) startIn = d->roots[h];
+                if (pickPath(dlg, false, L"Select the scene in the host's jobs folder", L"Bryce scenes (*.br7;*.br6;*.br5)", L"*.br7;*.br6;*.br5", path, startIn))
+                    SetDlgItemTextW(dlg, IDC_JOB_SCENE, path.c_str());
+                return TRUE;
+            }
             if (pickPath(dlg, false, L"Select the Bryce scene", L"Bryce scenes (*.br7;*.br6;*.br5)", L"*.br7;*.br6;*.br5", path)) {
                 SetDlgItemTextW(dlg, IDC_JOB_SCENE, path.c_str());
                 wchar_t out[512];
                 GetDlgItemTextW(dlg, IDC_JOB_OUTPUT, out, 512);
                 if (out[0] == L'\0') {
-                    int h = (int)SendDlgItemMessageW(dlg, IDC_JOB_HOST, CB_GETCURSEL, 0, 0);
                     bool known = h >= 0 && h < (int)d->bins.size() && !d->bins[h].empty();
                     SetDlgItemTextW(dlg, IDC_JOB_OUTPUT, known ? d->bins[h].c_str() : L"RENDER.BIN");
                 }
@@ -3973,10 +4012,23 @@ INT_PTR CALLBACK renderJobDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             GetDlgItemTextW(dlg, IDC_JOB_FIRST, buf, 1024);   d->first = trim(narrow(buf));
             GetDlgItemTextW(dlg, IDC_JOB_LAST, buf, 1024);    d->last = trim(narrow(buf));
             d->gen = IsDlgButtonChecked(dlg, IDC_JOB_GEN2) == BST_CHECKED ? 2 : IsDlgButtonChecked(dlg, IDC_JOB_GEN1) == BST_CHECKED ? 1 : 3;
+            d->existing = IsDlgButtonChecked(dlg, IDC_JOB_MODE_EXISTING) == BST_CHECKED;
             if (d->host < 0 || d->host >= (int)d->hosts.size()) { MessageBoxW(dlg, L"Choose the render host.", L"Render Job on Host", MB_OK | MB_ICONWARNING); return TRUE; }
             DWORD a = d->scene.empty() ? INVALID_FILE_ATTRIBUTES : GetFileAttributesW(d->scene.c_str());
-            if (a == INVALID_FILE_ATTRIBUTES || (a & FILE_ATTRIBUTE_DIRECTORY)) { MessageBoxW(dlg, L"Enter or browse for the scene file.", L"Render Job on Host", MB_OK | MB_ICONWARNING); return TRUE; }
-            if (!d->textures.empty()) {
+            if (a == INVALID_FILE_ATTRIBUTES || (a & FILE_ATTRIBUTE_DIRECTORY)) {
+                MessageBoxW(dlg, d->existing ? L"Browse for the scene file in the host's jobs folder." : L"Enter or browse for the scene file.", L"Render Job on Host", MB_OK | MB_ICONWARNING);
+                return TRUE;
+            }
+            if (d->existing) {
+                // The file must lie under the host's share; the agent gets the path below it.
+                const std::wstring& rootPath = d->roots[d->host];
+                if (d->scene.size() <= rootPath.size() || _wcsnicmp(d->scene.c_str(), rootPath.c_str(), rootPath.size()) != 0) {
+                    MessageBoxW(dlg, (L"The scene must lie inside the host's shared folder, " + rootPath + L", for Bryce on the host to open it.").c_str(), L"Render Job on Host", MB_OK | MB_ICONWARNING);
+                    return TRUE;
+                }
+                d->sceneRel = d->scene.substr(rootPath.size());
+                d->textures.clear();
+            } else if (!d->textures.empty()) {
                 DWORD t = GetFileAttributesW(d->textures.c_str());
                 if (t == INVALID_FILE_ATTRIBUTES || !(t & FILE_ATTRIBUTE_DIRECTORY)) { MessageBoxW(dlg, L"The texture folder does not exist. Leave it empty or browse for a folder.", L"Render Job on Host", MB_OK | MB_ICONWARNING); return TRUE; }
             }
@@ -4003,10 +4055,13 @@ void appendJobRecord(const std::string& line)
     fclose(f);
 }
 
-// Render Job on Host: the scene (and its texture folder) go to
-// jobs\<scene name>\ in the host's shared folder through the copy machinery,
-// the job is recorded in jobs.txt, and when the copy has ended cleanly the host
-// is sent BRYCE action=start with the scene, output folder and frame range.
+// Render Job on Host. Copy from source: the scene (and its texture folder) go
+// to jobs\<scene name>\ in the host's shared folder through the copy machinery,
+// after asking when the scene is already there, and when the copy has ended
+// cleanly the host is sent BRYCE action=start with the scene, output folder
+// and frame range. Use existing job on host: the chosen file, already under
+// the host's share, is started where it lies and nothing is copied. Both are
+// recorded in jobs.txt.
 void renderJob()
 {
     RenderJobData d;
@@ -4018,17 +4073,64 @@ void renderJob()
     }
     d.host = 0;
     d.gen = 3;
-    d.scene = g_jobScene;
+    d.existing = g_jobExisting;
+    d.scene = d.existing ? std::wstring() : g_jobScene;
     d.textures = g_jobTextures;
-    for (size_t i = 0; i < d.hosts.size(); ++i) d.bins.push_back(widen(renderBinOf(d.hosts[i])));
+    for (size_t i = 0; i < d.hosts.size(); ++i) { d.bins.push_back(widen(renderBinOf(d.hosts[i]))); d.roots.push_back(shareRootOf(d.hosts[i])); }
     d.output = d.bins[0].empty() ? L"RENDER.BIN" : d.bins[0];   // the host's RENDER.BIN; relative means inside its shared folder
     if (DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_RENDERJOB), g_main, renderJobDlgProc, (LPARAM)&d) != IDOK) return;
-    g_jobScene = d.scene;
-    g_jobTextures = d.textures;
+    g_jobExisting = d.existing;
+    if (!d.existing) { g_jobScene = d.scene; g_jobTextures = d.textures; }
     NodeRecord* n = d.hosts[d.host];
     if (!n->online) { logEvent(n->name + ": went offline before the render job started"); return; }
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    std::string frames = (d.first.empty() ? "?" : d.first) + "-" + (d.last.empty() ? "?" : d.last);
+
+    if (d.existing) {
+        std::wstring base = fileTitle(d.sceneRel);
+        Message m("BRYCE");
+        m.set("action", std::string("start"));
+        m.set("gen", (long long)d.gen);
+        m.set("scene", narrow(d.sceneRel));
+        m.set("output", narrow(d.output));
+        m.set("first", d.first);
+        m.set("last", d.last);
+        std::string record = format("%04d-%02d-%02d %02d:%02d:%02d  host=%s (%s)  bryce=%s  existing=%s  output=%s  frames=%s",
+                                    t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, n->name.c_str(), n->ip.c_str(), bryceGenLabel(d.gen),
+                                    narrow(d.scene).c_str(), narrow(d.output).c_str(), frames.c_str());
+        appendJobRecord(record);
+        logEvent("render job: " + record);
+        sendBryce(n, m, "BRYCE start (existing job " + narrow(base) + ")");
+        return;
+    }
+
     std::wstring base = fileTitle(d.scene);
     std::wstring subdir = L"jobs\\" + base;
+    // An earlier copy of the same scene is overwritten only with leave.
+    if (!relayFor(n)) {
+        std::wstring dest = d.roots[d.host] + subdir + L"\\" + fileName(d.scene);
+        if (GetFileAttributesW(dest.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            TASKDIALOG_BUTTON buttons[2] = { { 100, L"Overwrite" }, { 101, L"Cancel the copy" } };
+            std::wstring content = L"The scene is already on " + widen(n->name) + L" as " + dest + L". Overwrite it (and the texture folder beside it), or cancel?";
+            TASKDIALOGCONFIG tc;
+            memset(&tc, 0, sizeof(tc));
+            tc.cbSize = sizeof(tc);
+            tc.hwndParent = g_main;
+            tc.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+            tc.pszWindowTitle = L"Render Job on Host";
+            tc.pszMainInstruction = L"The scene exists on the host already";
+            tc.pszContent = content.c_str();
+            tc.pButtons = buttons;
+            tc.cButtons = 2;
+            tc.nDefaultButton = 101;
+            int pressed = 0;
+            if (FAILED(TaskDialogIndirect(&tc, &pressed, NULL, NULL)) || pressed != 100) {
+                logEvent(format("render job cancelled: %s exists on %s already", narrow(dest).c_str(), n->name.c_str()));
+                return;
+            }
+        }
+    }
     CopyJob* job = new CopyJob;
     job->sources.push_back(d.scene);
     if (!d.textures.empty()) job->sources.push_back(d.textures);
@@ -4055,12 +4157,10 @@ void renderJob()
     job->after = m;
     job->afterMac = n->mac;
     job->afterLabel = "BRYCE start (render job " + narrow(base) + ")";
-    SYSTEMTIME t;
-    GetLocalTime(&t);
-    std::string record = format("%04d-%02d-%02d %02d:%02d:%02d  host=%s (%s)  bryce=%s  scene=%s  textures=%s  copied_to=\\\\%s\\%s\\%s  output=%s  frames=%s-%s",
+    std::string record = format("%04d-%02d-%02d %02d:%02d:%02d  host=%s (%s)  bryce=%s  scene=%s  textures=%s  copied_to=\\\\%s\\%s\\%s  output=%s  frames=%s",
                                 t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, n->name.c_str(), n->ip.c_str(), bryceGenLabel(d.gen), narrow(d.scene).c_str(),
                                 d.textures.empty() ? "(none)" : narrow(d.textures).c_str(), n->name.c_str(), g_store->settings.shareName.c_str(),
-                                narrow(subdir).c_str(), narrow(d.output).c_str(), d.first.empty() ? "?" : d.first.c_str(), d.last.empty() ? "?" : d.last.c_str());
+                                narrow(subdir).c_str(), narrow(d.output).c_str(), frames.c_str());
     appendJobRecord(record);
     logEvent("render job: " + record);
     HANDLE th = CreateThread(NULL, 0, copyToClientsThread, job, 0, NULL);

@@ -477,17 +477,26 @@ NAME: Bryce 7 & 7 Pro 7.1.0.109 at C:\...\Bryce.exe, found through ...;
 scene jobs\x\x.br7".
 
 *Render Job on Host...* (Render Control) is the dialog for a render: the host
-(a list of the online render hosts), the scene file, an optional texture
-folder, the output folder on the host (its RENDER.BIN, as reported), the first
-and last frame, and which Bryce opens the scene (the same three generations,
-Bryce 7 & 7 Pro by default). *Copy and
-Start Bryce* copies the scene and the texture folder to `jobs\<scene name>\`
-in the host's shared folder through the same copy machinery and progress
-window as *Copy Files or Folder to Client* (through the relay for an SMB1
-host), appends the job to `jobs.txt` beside Thunderhead.exe (time, host,
-scene, textures, where it was copied, output folder, frames), and, as soon as
-the copy has ended without a failure, sends the host `BRYCE action=start
-gen= scene=jobs\<scene name>\<scene file> output= first= last=`. The agent keeps
+(a list of the online render hosts), the scene source, the scene file, an
+optional texture folder, the output folder on the host (its RENDER.BIN, as
+reported), the first and last frame, and which Bryce opens the scene (the
+same three generations, Bryce 7 & 7 Pro by default). The scene source is
+*Copy from source* or *Use existing job on host*. With *Copy from source*,
+*Copy and Start Bryce* copies the scene and the texture folder to
+`jobs\<scene name>\` in the host's shared folder through the same copy
+machinery and progress window as *Copy Files or Folder to Client* (through
+the relay for an SMB1 host); when the scene is already there, a question
+offers *Overwrite* or *Cancel the copy* first, and a cancel is logged and
+nothing is sent. It appends the job to `jobs.txt` beside Thunderhead.exe
+(time, host, scene, textures, where it was copied, output folder, frames),
+and, as soon as the copy has ended without a failure, sends the host `BRYCE
+action=start gen= scene=jobs\<scene name>\<scene file> output= first=
+last=`. With *Use existing job on host*, *Browse...* opens the host's jobs
+folder through the share the gate verified, the chosen file must lie under
+that share, nothing is copied, and *Start Bryce* sends BRYCE at once with
+the file's path below the share as `scene=`; the texture folder does not
+apply, and the host's share must be reachable from here (not through a
+relay) for the browsing. The agent keeps
 those values in `job.txt` beside itself and creates a relative output folder
 inside its own folder, so that the person at the host can point Bryce's
 render output at it; the network render itself is begun from Bryce's own
