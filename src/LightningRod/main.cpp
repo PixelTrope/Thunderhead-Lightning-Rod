@@ -797,14 +797,14 @@ public:
                     logLine(err);
                 }
             }
-            // The full Bryce 3D as well, for the Bryce 3D Network Render Host role.
-            {
+            // The full Bryce 3D of each generation as well, for the Bryce 3D Network Render Host role.
+            for (int g = 3; g >= 1; --g) {
                 BryceInstall bi;
                 std::string err;
-                if (findBryce(bi, err)) {
-                    info_.brycePath = narrow(bi.path);
-                    info_.bryceVersion = bi.version;
-                    logLine(format("Bryce 3D: %s, version %s, found through %s", info_.brycePath.c_str(),
+                if (findBryce(g, bi, err)) {
+                    info_.brycePath[g] = narrow(bi.path);
+                    info_.bryceVersion[g] = bi.version;
+                    logLine(format("%s: %s, version %s, found through %s", bryceLabel(g), info_.brycePath[g].c_str(),
                                    bi.version.empty() ? "unknown" : bi.version.c_str(), bi.found.c_str()));
                 } else {
                     logLine(err);
@@ -1079,8 +1079,12 @@ private:
         m.set("lightning3_version", info_.lightning3Version);
         m.set("lightning2_path", info_.lightning2Path);
         m.set("lightning2_version", info_.lightning2Version);
-        m.set("bryce_path", info_.brycePath);
-        m.set("bryce_version", info_.bryceVersion);
+        m.set("bryce3_path", info_.brycePath[3]);
+        m.set("bryce3_version", info_.bryceVersion[3]);
+        m.set("bryce2_path", info_.brycePath[2]);
+        m.set("bryce2_version", info_.bryceVersion[2]);
+        m.set("bryce1_path", info_.brycePath[1]);
+        m.set("bryce1_version", info_.bryceVersion[1]);
         m.set("relay", boolText(relay));
         m.set("relay_ip", relay ? relayIp : std::string());
         m.set("render_host", boolText(renderHostSetting()));
@@ -1197,13 +1201,16 @@ private:
             if (helloSoundPending_) { helloSoundPending_ = false; playEventSound(SoundLrHello); }
         } else if (m.verb == "BRYCE") {
             // The full Bryce 3D on this node (the Bryce 3D Network Render Host):
-            // action=start opens it, with scene= (a path inside this folder, the
-            // shared one) as a double-click on the file would, and brings its window
-            // to the front; output=, first= and last= describe the render job and
-            // are kept in job.txt beside the agent, the output folder created when
-            // it lies inside this folder; action=stop ends Bryce.exe; action=front
-            // brings its window to the front. The ACK carries what was found.
+            // action=start opens the installed Bryce of generation gen= (3 = Bryce 7
+            // and 7 Pro, 2 = 6.x, 1 = 5.x; 3 when absent), with scene= (a path inside
+            // this folder, the shared one) as a double-click on the file would, and
+            // brings its window to the front; output=, first= and last= describe the
+            // render job and are kept in job.txt beside the agent, the output folder
+            // created when it lies inside this folder; action=stop ends whichever
+            // Bryce.exe runs; action=front brings its window to the front. The ACK
+            // carries what was found.
             std::string action = trim(m.get("action")), scene = trim(m.get("scene")), err;
+            int gen = m.getInt("gen", 3);
             BryceInstall bi;
             bool ok = false;
             std::wstring scenePath;
@@ -1233,7 +1240,7 @@ private:
                                           format("\r\nstarted=%04d-%02d-%02d %02d:%02d:%02d\r\n", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
                         if (!writeTextFile(exeDirectory() + L"\\job.txt", job)) logLine("job.txt could not be written: " + lastErrorText((int)GetLastError()));
                     }
-                    ok = startBryce(scenePath, bi, err);
+                    ok = startBryce(gen, scenePath, bi, err);
                     if (ok) { bryceWindowWanted_ = true; bryceStartMs_ = tickMs(); }
                 }
             } else if (action == "stop") {
@@ -1245,16 +1252,17 @@ private:
             } else {
                 err = "unknown action \"" + action + "\"";
             }
-            if (action != "start") { std::string ignore; findBryce(bi, ignore); }   // what the ACK names
+            if (action != "start") { std::string ignore; findBryce(gen, bi, ignore); }   // what the ACK names
             std::string where = bi.path.empty() ? std::string()
                 : format(" [%s, version %s, found through %s]", narrow(bi.path).c_str(), bi.version.empty() ? "unknown" : bi.version.c_str(), bi.found.c_str());
-            logLine(format("BRYCE %s%s%s: %s%s%s%s", action.c_str(), scene.empty() ? "" : " scene ", scene.c_str(), ok ? "ok" : "failed",
+            logLine(format("BRYCE %s %s%s%s: %s%s%s%s", action.c_str(), bryceLabel(gen), scene.empty() ? "" : " scene ", scene.c_str(), ok ? "ok" : "failed",
                            err.empty() ? "" : ": ", err.c_str(), where.c_str()));
             Message ack("ACK");
             ack.set("cmd", m.verb);
             ack.set("ok", boolText(ok));
             ack.set("error", err);
             ack.set("action", action);
+            ack.set("gen", (long long)gen);
             ack.set("scene", scene);
             ack.set("path", narrow(bi.path));
             ack.set("version", bi.version);
@@ -2009,8 +2017,9 @@ void refreshAll()
                                                : widen(i.lightning3Version.empty() ? i.lightning3Path : i.lightning3Version + " at " + i.lightning3Path));
     setRow(row++, L"Lightning 2 (B6.x)", i.lightning2Path.empty() ? std::wstring(L"not installed")
                                         : widen(i.lightning2Version.empty() ? i.lightning2Path : i.lightning2Version + " at " + i.lightning2Path));
-    setRow(row++, L"Bryce 3D installed",  i.brycePath.empty() ? std::wstring(L"not installed")
-                                        : widen(i.bryceVersion.empty() ? i.brycePath : i.bryceVersion + " at " + i.brycePath));
+    for (int g = 3; g >= 1; --g)
+        setRow(row++, widen(std::string(bryceLabel(g))).c_str(), i.brycePath[g].empty() ? std::wstring(L"not installed")
+                                        : widen(i.bryceVersion[g].empty() ? i.brycePath[g] : i.bryceVersion[g] + " at " + i.brycePath[g]));
     setRow(row++, L"Sounds",              widen(format("%u file(s) in ", (unsigned)soundFilesIn(soundDir()).size())) + soundDir());
     setRow(row++, L"SMB1 relay",          widen(relayText()));
     setRow(row++, L"Net Render Host",     renderHostSetting() ? L"On: this node is the Bryce 3D Network Render Host (B3NDHR)" : L"Off");

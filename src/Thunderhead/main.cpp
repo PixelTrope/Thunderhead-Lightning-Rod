@@ -173,8 +173,8 @@ const CommandDef kCommands[] = {
     { IDC_CMD_START63,         L"Run Lightning 2 (B6.x)",         NULL,      true,  GroupRender },
     { IDC_CMD_START50,         L"Run Lightning 1 (B5.x)",         NULL,      false, GroupRender },
     { IDC_CMD_RENDER_JOB,      L"Render Job on Host...",          NULL,      true,  GroupRender },
-    { IDC_CMD_BRYCE_START,     L"Start Bryce on Host",            NULL,      true,  GroupRender },
-    { IDC_CMD_BRYCE_STOP,      L"Stop Bryce on Host",             NULL,      true,  GroupRender },
+    { IDC_CMD_BRYCE_START,     L"Start Bryce 3D",                 NULL,      true,  GroupRender },
+    { IDC_CMD_BRYCE_STOP,      L"Stop Bryce 3D",                  NULL,      true,  GroupRender },
 };
 const int kCommandCount = sizeof(kCommands) / sizeof(kCommands[0]);
 
@@ -692,7 +692,9 @@ void showStaticPane(NodeRecord* n)
     add(L"VRAM MB", widen(h.get("vram_mb")));
     add(L"Lightning 3 (B7 & 7 Pro)", lightningInstallText(h, "lightning3"));
     add(L"Lightning 2 (B6.x)", lightningInstallText(h, "lightning2"));
-    add(L"Bryce 3D installed", lightningInstallText(h, "bryce"));
+    add(L"Bryce 7 & 7 Pro", lightningInstallText(h, "bryce3"));
+    add(L"Bryce 6.x", lightningInstallText(h, "bryce2"));
+    add(L"Bryce 5.x", lightningInstallText(h, "bryce1"));
     add(L"Bryce 3D", !r.has("bryce") ? std::wstring() : (r.get("bryce") == "running" ? L"Running, CPU " + widen(r.get("bryce_cpu_pct")) + L" %" : L"Stopped"));
     if (h.has("relay")) {
         add(L"Relay Node", isRelay(n) ? L"Yes" : L"No");
@@ -721,7 +723,7 @@ void showStaticPane(NodeRecord* n)
     }
     static const char* const knownHello[] = { "agent", "os", "cpu", "cpu_mhz", "cores", "mem_mb", "mem_installed_mb", "mem_type", "disk_total_mb", "board",
                                               "chipset", "gpu", "vram_mb", "ip", "mac", "name", "lightning3_path", "lightning3_version",
-                                              "lightning2_path", "lightning2_version", "relay", "relay_ip", "render_host", "bryce_path", "bryce_version" };
+                                              "lightning2_path", "lightning2_version", "relay", "relay_ip", "render_host", "bryce3_path", "bryce3_version", "bryce2_path", "bryce2_version", "bryce1_path", "bryce1_version" };
     static const char* const knownReport[] = { "cpu_pct", "cpu_temp_c", "disk_free_mb", "lightning", "lightning_cpu_pct",
                                                "mem_free_mb", "rendering", "uptime_s", "clock", "utc_ms", "render_host", "bryce", "bryce_cpu_pct" };
     for (std::map<std::string, std::string>::const_iterator it = h.fields.begin(); it != h.fields.end(); ++it) {
@@ -3611,6 +3613,34 @@ void copyToClients()
 // host); agents before kBryceAgent are passed over with a line in the log.
 const char* const kBryceAgent = "0.4.3";
 
+// The Bryce generations as Lightning's are numbered: 3 = Bryce 7 and 7 Pro, 2 = 6.x, 1 = 5.x.
+const char* bryceGenLabel(int gen)
+{
+    return gen == 3 ? "Bryce 7 & 7 Pro" : gen == 2 ? "Bryce 6.x" : gen == 1 ? "Bryce 5.x" : "Bryce";
+}
+
+// Start Bryce 3D: asks which Bryce, then BRYCE action=start gen= to every
+// render host. Returns 0 when cancelled.
+int askBryceGeneration()
+{
+    TASKDIALOG_BUTTON radios[3] = { { 503, L"Bryce 7 && 7 Pro" }, { 502, L"Bryce 6.x" }, { 501, L"Bryce 5.x" } };
+    TASKDIALOGCONFIG tc;
+    memset(&tc, 0, sizeof(tc));
+    tc.cbSize = sizeof(tc);
+    tc.hwndParent = g_main;
+    tc.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+    tc.dwCommonButtons = TDCBF_OK_BUTTON | TDCBF_CANCEL_BUTTON;
+    tc.pszWindowTitle = L"Start Bryce 3D";
+    tc.pszMainInstruction = L"Which Bryce 3D is to be started on the render host(s)?";
+    tc.pszContent = L"The agent finds that version's installed Bryce.exe and starts it; a version that is not installed is reported in the event log.";
+    tc.pRadioButtons = radios;
+    tc.cRadioButtons = 3;
+    tc.nDefaultRadioButton = 503;
+    int pressed = 0, radio = 0;
+    if (FAILED(TaskDialogIndirect(&tc, &pressed, &radio, NULL)) || pressed != IDOK) return 0;
+    return radio - 500;
+}
+
 std::vector<NodeRecord*> renderHostsOnline()
 {
     std::vector<NodeRecord*> out;
@@ -3640,6 +3670,11 @@ void bryceOnHosts(const char* action)
     }
     Message m("BRYCE");
     m.set("action", std::string(action));
+    if (strcmp(action, "start") == 0) {
+        int gen = askBryceGeneration();
+        if (gen == 0) return;
+        m.set("gen", (long long)gen);
+    }
     int sent = 0;
     for (size_t i = 0; i < hosts.size(); ++i) if (sendBryce(hosts[i], m, m.oneLine())) ++sent;
     updateStatusBar(widen(format("|  BRYCE %s sent to %d of %d render host(s)", action, sent, (int)hosts.size())).c_str());
@@ -3684,6 +3719,7 @@ bool pickPath(HWND owner, bool folder, const wchar_t* title, const wchar_t* filt
 struct RenderJobData {
     std::vector<NodeRecord*> hosts;
     int host;
+    int gen;                 // which Bryce opens the scene: 3, 2 or 1
     std::wstring scene, textures, output;
     std::string first, last;
 };
@@ -3719,6 +3755,7 @@ INT_PTR CALLBACK renderJobDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SetDlgItemTextW(dlg, IDC_JOB_SCENE, d->scene.c_str());
         SetDlgItemTextW(dlg, IDC_JOB_TEXTURES, d->textures.c_str());
         SetDlgItemTextW(dlg, IDC_JOB_OUTPUT, d->output.c_str());
+        CheckRadioButton(dlg, IDC_JOB_GEN3, IDC_JOB_GEN1, d->gen == 2 ? IDC_JOB_GEN2 : d->gen == 1 ? IDC_JOB_GEN1 : IDC_JOB_GEN3);
         return TRUE;
     }
     case WM_COMMAND:
@@ -3745,6 +3782,7 @@ INT_PTR CALLBACK renderJobDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             GetDlgItemTextW(dlg, IDC_JOB_OUTPUT, buf, 1024);  d->output = trim(std::wstring(buf));
             GetDlgItemTextW(dlg, IDC_JOB_FIRST, buf, 1024);   d->first = trim(narrow(buf));
             GetDlgItemTextW(dlg, IDC_JOB_LAST, buf, 1024);    d->last = trim(narrow(buf));
+            d->gen = IsDlgButtonChecked(dlg, IDC_JOB_GEN2) == BST_CHECKED ? 2 : IsDlgButtonChecked(dlg, IDC_JOB_GEN1) == BST_CHECKED ? 1 : 3;
             if (d->host < 0 || d->host >= (int)d->hosts.size()) { MessageBoxW(dlg, L"Choose the render host.", L"Render Job on Host", MB_OK | MB_ICONWARNING); return TRUE; }
             DWORD a = d->scene.empty() ? INVALID_FILE_ATTRIBUTES : GetFileAttributesW(d->scene.c_str());
             if (a == INVALID_FILE_ATTRIBUTES || (a & FILE_ATTRIBUTE_DIRECTORY)) { MessageBoxW(dlg, L"Enter or browse for the scene file.", L"Render Job on Host", MB_OK | MB_ICONWARNING); return TRUE; }
@@ -3789,6 +3827,7 @@ void renderJob()
         return;
     }
     d.host = 0;
+    d.gen = 3;
     d.scene = g_jobScene;
     d.textures = g_jobTextures;
     if (!d.scene.empty()) d.output = L"renders\\" + fileTitle(d.scene);
@@ -3817,6 +3856,7 @@ void renderJob()
     job->targets.push_back(tg);
     Message m("BRYCE");
     m.set("action", std::string("start"));
+    m.set("gen", (long long)d.gen);
     m.set("scene", narrow(subdir + L"\\" + fileName(d.scene)));
     m.set("output", narrow(d.output));
     m.set("first", d.first);
@@ -3826,8 +3866,8 @@ void renderJob()
     job->afterLabel = "BRYCE start (render job " + narrow(base) + ")";
     SYSTEMTIME t;
     GetLocalTime(&t);
-    std::string record = format("%04d-%02d-%02d %02d:%02d:%02d  host=%s (%s)  scene=%s  textures=%s  copied_to=\\\\%s\\%s\\%s  output=%s  frames=%s-%s",
-                                t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, n->name.c_str(), n->ip.c_str(), narrow(d.scene).c_str(),
+    std::string record = format("%04d-%02d-%02d %02d:%02d:%02d  host=%s (%s)  bryce=%s  scene=%s  textures=%s  copied_to=\\\\%s\\%s\\%s  output=%s  frames=%s-%s",
+                                t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, n->name.c_str(), n->ip.c_str(), bryceGenLabel(d.gen), narrow(d.scene).c_str(),
                                 d.textures.empty() ? "(none)" : narrow(d.textures).c_str(), n->name.c_str(), g_store->settings.shareName.c_str(),
                                 narrow(subdir).c_str(), narrow(d.output).c_str(), d.first.empty() ? "?" : d.first.c_str(), d.last.empty() ? "?" : d.last.c_str());
     appendJobRecord(record);
@@ -4773,7 +4813,7 @@ void onNet(NetEvent* e)
             else text = format("TEAMVIEWER failed on %s: %s", n->name.c_str(), e->msg.get("error").c_str());
         } else if (cmd == "BRYCE") {
             std::string action = e->msg.get("action"), scene = e->msg.get("scene"), ver = e->msg.get("version"), path = e->msg.get("path");
-            std::string what = "Bryce" + (ver.empty() ? "" : " " + ver) + (path.empty() ? "" : " at " + path);
+            std::string what = std::string(bryceGenLabel(e->msg.getInt("gen", 3))) + (ver.empty() ? "" : " " + ver) + (path.empty() ? "" : " at " + path);
             if (ok) text = format("BRYCE %s ok on %s: %s%s%s%s%s", action.c_str(), n->name.c_str(), what.c_str(),
                                   e->msg.get("found").empty() ? "" : ", found through ", e->msg.get("found").c_str(),
                                   scene.empty() ? "" : "; scene ", scene.c_str());

@@ -19,13 +19,41 @@ const wchar_t* const kBryceExe = L"Bryce.exe";
 const wchar_t* const kDazKey = L"SOFTWARE\\DAZ 3D";
 const wchar_t* const kUninstallKey = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
 
-// "Bryce 7.1", "Bryce 7.0", "Bryce 6.3": the product keys and Add/Remove
-// Programs entries of the program itself. "Bryce 7.0 Content" is the preset
-// library and "Bryce Lightning 7.0" the render client; neither names Bryce.exe.
-bool isBryceProgramKey(const std::wstring& name)
+// Where each generation's installer leaves its traces. Generation 3 is
+// verified on a Bryce 7.1 (7.1.0.109) install: product key "Bryce 7.1",
+// Add/Remove Programs key "Bryce 7.1 7.1.0.109", shortcut DAZ 3D\Bryce7\
+// Bryce 7.1.lnk, folder DAZ 3D\Bryce7. Generation 2 is verified on the
+// registry export of a Windows XP node: product key "Bryce 6.3" with Location
+// ...\DAZ 3D\Bryce. Generation 1 follows the same pattern by assumption:
+// Bryce 5.5 was DAZ's, Bryce 5 Corel's; its keys and folders are not yet
+// verified on a node, so the file's own version decides.
+struct GenRule {
+    int gen;
+    const char* label;
+    const wchar_t* keyPrefix;        // start of the product key's and the Add/Remove Programs key's name
+    const wchar_t* defaults[3];      // paths below a Program Files folder, NULL-terminated
+    int major;                       // first number of the generation's versions
+};
+const GenRule kRules[] = {
+    { 3, "Bryce 7 and 7 Pro", L"Bryce 7", { L"DAZ 3D\\Bryce7\\Bryce.exe", L"DAZ 3D\\Bryce 7\\Bryce.exe", NULL }, 7 },
+    { 2, "Bryce 6.x",         L"Bryce 6", { L"DAZ 3D\\Bryce\\Bryce.exe", L"DAZ 3D\\Bryce 6\\Bryce.exe", NULL }, 6 },
+    { 1, "Bryce 5.x",         L"Bryce 5", { L"DAZ 3D\\Bryce 5.5\\Bryce.exe", L"DAZ\\Bryce 5.5\\Bryce.exe", L"Corel\\Bryce 5\\Bryce.exe" }, 5 },
+};
+const size_t kRuleCount = sizeof(kRules) / sizeof(kRules[0]);
+
+const GenRule* ruleFor(int gen)
 {
-    if (!startsWithNoCase(name, L"Bryce ")) return false;
-    if (name.size() < 7 || !iswdigit(name[6])) return false;
+    for (size_t i = 0; i < kRuleCount; ++i) if (kRules[i].gen == gen) return &kRules[i];
+    return NULL;
+}
+
+// "Bryce 7.1", "Bryce 7.0", "Bryce 6.3": the product keys and Add/Remove
+// Programs entries of the program itself, by generation. "Bryce 7.0 Content"
+// is the preset library and "Bryce Lightning 7.0" the render client; neither
+// names Bryce.exe, and the Lightning key does not start with the prefix anyway.
+bool isBryceProgramKey(const std::wstring& name, const wchar_t* prefix)
+{
+    if (!startsWithNoCase(name, prefix)) return false;
     std::wstring lower = name;
     for (size_t i = 0; i < lower.size(); ++i) lower[i] = (wchar_t)towlower(lower[i]);
     return lower.find(L"content") == std::wstring::npos && lower.find(L"lightning") == std::wstring::npos;
@@ -47,14 +75,32 @@ int compareVersionText(const std::string& a, const std::string& b)
 struct KeyVersion { std::wstring key; std::string version; };
 bool newerFirst(const KeyVersion& a, const KeyVersion& b) { return compareVersionText(a.version, b.version) > 0; }
 
-bool consider(BryceInstall& out, const std::wstring& path, const std::string& version, const std::string& found)
-{
-    if (!fileExists(path)) return false;
-    out.path = path;
-    out.version = version.empty() ? fileVersionText(path) : version;
-    out.found = found;
-    return true;
-}
+// A candidate is taken when the file exists and its version's first number is
+// the generation's (a file without a version resource passes); a file of
+// another generation is remembered as the error when nothing fits.
+struct Search {
+    const GenRule* rule;
+    BryceInstall* out;
+    std::string rejected;
+    bool done;
+    Search(const GenRule* r, BryceInstall* o) : rule(r), out(o), done(false) {}
+    bool consider(const std::wstring& path, const std::string& version, const std::string& found)
+    {
+        if (done || !fileExists(path)) return false;
+        std::string fileVersion = fileVersionText(path);
+        const std::string& effective = fileVersion.empty() ? version : fileVersion;
+        int major = versionMajor(effective);
+        if (major != 0 && major != rule->major) {
+            if (rejected.empty()) rejected = format("%s is version %s, not a %d.x Bryce", narrow(path).c_str(), effective.c_str(), rule->major);
+            return false;
+        }
+        out->path = path;
+        out->version = version.empty() ? fileVersion : version;
+        out->found = found;
+        done = true;
+        return true;
+    }
+};
 
 ULONGLONG ftToU64(const FILETIME& ft)
 {
@@ -81,45 +127,56 @@ BOOL CALLBACK findWindow(HWND w, LPARAM lp)
 
 } // namespace
 
-bool findBryce(BryceInstall& out, std::string& error)
+const char* bryceLabel(int gen)
+{
+    const GenRule* r = ruleFor(gen);
+    return r ? r->label : "Bryce (unknown generation)";
+}
+
+bool findBryce(int gen, BryceInstall& out, std::string& error)
 {
     out = BryceInstall();
+    out.gen = gen;
     error.clear();
+    const GenRule* rule = ruleFor(gen);
+    if (!rule) { error = format("there is no Bryce generation %d", gen); return false; }
+    Search s(rule, &out);
     // 1. The product keys, highest version first, in both registry views.
-    for (int v = 0; v < 2; ++v) {
+    for (int v = 0; v < 2 && !s.done; ++v) {
         std::vector<std::wstring> subs = regSubKeys(HKEY_LOCAL_MACHINE, kDazKey, kRegViews[v]);
         std::vector<KeyVersion> keys;
         for (size_t i = 0; i < subs.size(); ++i) {
-            if (!isBryceProgramKey(subs[i])) continue;
+            if (!isBryceProgramKey(subs[i], rule->keyPrefix)) continue;
             KeyVersion kv;
             kv.key = std::wstring(kDazKey) + L"\\" + subs[i];
             kv.version = narrow(regText(HKEY_LOCAL_MACHINE, kv.key, L"Version", kRegViews[v]));
             keys.push_back(kv);
         }
         std::sort(keys.begin(), keys.end(), newerFirst);
-        for (size_t i = 0; i < keys.size(); ++i)
-            if (consider(out, joinPath(regText(HKEY_LOCAL_MACHINE, keys[i].key, L"Location", kRegViews[v]), kBryceExe), keys[i].version,
-                         "registry " + regKeyText(HKEY_LOCAL_MACHINE, keys[i].key, kRegViews[v]) + "\\Location")) return true;
+        for (size_t i = 0; i < keys.size() && !s.done; ++i)
+            s.consider(joinPath(regText(HKEY_LOCAL_MACHINE, keys[i].key, L"Location", kRegViews[v]), kBryceExe), keys[i].version,
+                       "registry " + regKeyText(HKEY_LOCAL_MACHINE, keys[i].key, kRegViews[v]) + "\\Location");
     }
     // 2. The Add/Remove Programs entries.
-    for (int v = 0; v < 2; ++v) {
+    for (int v = 0; v < 2 && !s.done; ++v) {
         std::vector<std::wstring> subs = regSubKeys(HKEY_LOCAL_MACHINE, kUninstallKey, kRegViews[v]);
-        for (size_t i = 0; i < subs.size(); ++i) {
-            if (!isBryceProgramKey(subs[i])) continue;
+        for (size_t i = 0; i < subs.size() && !s.done; ++i) {
+            if (!isBryceProgramKey(subs[i], rule->keyPrefix)) continue;
             std::wstring key = std::wstring(kUninstallKey) + L"\\" + subs[i];
-            if (consider(out, joinPath(regText(HKEY_LOCAL_MACHINE, key, L"InstallLocation", kRegViews[v]), kBryceExe),
-                         narrow(regText(HKEY_LOCAL_MACHINE, key, L"DisplayVersion", kRegViews[v])),
-                         "uninstall entry " + regKeyText(HKEY_LOCAL_MACHINE, key, kRegViews[v]))) return true;
+            s.consider(joinPath(regText(HKEY_LOCAL_MACHINE, key, L"InstallLocation", kRegViews[v]), kBryceExe),
+                       narrow(regText(HKEY_LOCAL_MACHINE, key, L"DisplayVersion", kRegViews[v])),
+                       "uninstall entry " + regKeyText(HKEY_LOCAL_MACHINE, key, kRegViews[v]));
         }
     }
-    // 3. The Start menu shortcuts whose target is Bryce.exe (the Lightning and
-    //    documentation shortcuts under the same folder point elsewhere).
+    // 3. The Start menu shortcuts whose target is a Bryce.exe, told apart by the
+    //    file's version (the Lightning and documentation shortcuts point elsewhere).
     std::vector<ShortcutHit> hits = startMenuTargets(L"Bryce", kBryceExe);
-    for (size_t i = 0; i < hits.size(); ++i) if (consider(out, hits[i].path, std::string(), hits[i].how)) return true;
+    for (size_t i = 0; i < hits.size() && !s.done; ++i) s.consider(hits[i].path, std::string(), hits[i].how);
     // 4. The default folders.
-    if (consider(out, programFilesFile(L"DAZ 3D\\Bryce7\\Bryce.exe"), std::string(), "default folder")) return true;
-    if (consider(out, programFilesFile(L"DAZ 3D\\Bryce\\Bryce.exe"), std::string(), "default folder")) return true;
-    error = "Bryce 3D is not installed: no registry entry, Start menu shortcut or default folder names a Bryce.exe";
+    for (int i = 0; i < 3 && !s.done && rule->defaults[i]; ++i) s.consider(programFilesFile(rule->defaults[i]), std::string(), "default folder");
+    if (s.done) return true;
+    error = std::string(rule->label) + " is not installed: "
+          + (s.rejected.empty() ? std::string("no registry entry, Start menu shortcut or default folder names it") : s.rejected);
     return false;
 }
 
@@ -164,12 +221,12 @@ HWND bryceWindow()
     return s.best;
 }
 
-bool startBryce(const std::wstring& scene, BryceInstall& inst, std::string& error)
+bool startBryce(int gen, const std::wstring& scene, BryceInstall& inst, std::string& error)
 {
-    if (!findBryce(inst, error)) return false;
+    if (!findBryce(gen, inst, error)) return false;
     if (findBrycePid() != 0) {
         std::wstring running = runningBrycePath();
-        error = "already running" + (running.empty() ? std::string() : " (" + narrow(running) + ")");
+        error = "a Bryce is already running" + (running.empty() ? std::string() : " (" + narrow(running) + ")");
         return false;
     }
     std::wstring dir = inst.path.substr(0, inst.path.rfind(L'\\'));

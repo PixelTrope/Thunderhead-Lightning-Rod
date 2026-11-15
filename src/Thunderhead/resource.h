@@ -124,6 +124,9 @@
 #define IDC_JOB_OUTPUT          3207
 #define IDC_JOB_FIRST           3208
 #define IDC_JOB_LAST            3209
+#define IDC_JOB_GEN3            3210   // which Bryce opens the scene: 7 and 7 Pro, 6.x, 5.x (contiguous radios)
+#define IDC_JOB_GEN2            3211
+#define IDC_JOB_GEN1            3212
 
 // Settings dialog, sound scheme section
 #define IDC_SCHEME_DEFAULT      2801
