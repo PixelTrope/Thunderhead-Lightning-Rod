@@ -92,6 +92,8 @@ lightning2_version=
 relay=no
 relay_ip=
 render_host=no
+bryce_path=C:\Program Files (x86)\DAZ 3D\Bryce7\Bryce.exe
+bryce_version=7.1.0.109
 keyed=yes
 challenge=3a7e...the challenge token of the OFFER
 auth=7c02...64 hexadecimal digits
@@ -131,7 +133,11 @@ for that HELLO as for any other.
 
 Agents from 0.4.2 send `render_host=yes|no`, the node's Bryce 3D Network
 Render Host setting (see Bryce 3D Network Render Host), in HELLO and in every
-full REPORT, and in a later REPORT whenever it changes.
+full REPORT, and in a later REPORT whenever it changes. Agents from 0.4.3 send
+`bryce_path` and `bryce_version`, the installed full Bryce 3D as found at the
+agent's start (empty when none; see Bryce 3D on the host), and in every full
+REPORT `bryce=running|stopped` and `bryce_cpu_pct`, Bryce.exe's share of the
+whole machine since the previous report.
 
 Agents from 0.4.0 send `keyed=yes|no`, whether farm.key lies beside the
 agent, and, when it does, `challenge=`, the challenge token of the OFFER the
@@ -215,13 +221,14 @@ Thunderhead may send at any time:
 | AUDIO | action        | set the master mute of the default playback device: `mute` or `unmute`; reply ACK with the state read back (see Audio); agents from 0.2.16 |
 | TEAMVIEWER |          | start the installed TeamViewer, found through the registry or the Start menu, and bring its window to the front; reply ACK with where it was found (see TeamViewer); agents from 0.2.18 |
 | SOUND | action, file, logon, hello, logoff, report, badip | `action=play`: play `file`, a name in the agent's `sounds` folder, on the node's playback device; `action=scheme`: take the file names of the agent's own three sound events; reply ACK with `action=` and `file=` (see Audio); agents from 0.2.21 |
+| BRYCE | action, scene, output, first, last | the full Bryce 3D on the node: `action=start` starts the installed Bryce, with `scene=` (a path inside the agent's shared folder, empty for none) as its argument, and brings its window to the front; `output=`, `first=` and `last=` describe the render job and are kept in the agent's job.txt, the output folder being created when it lies inside the shared folder; `action=stop` ends Bryce.exe; `action=front` brings its window to the front; reply ACK with `action=`, `scene=`, `path=`, `version=` and `found=`, then a full REPORT (see Bryce 3D on the host); agents from 0.4.3 |
 | RENDERHOST | set     | `set=yes|no` becomes the node's Bryce 3D Network Render Host setting, saved for the next start; reply ACK with `render_host=` as now in force, then a full REPORT (see Bryce 3D Network Render Host); agents from 0.4.2 |
 | RELAYSET | relay, relay_ip | set the agent's SMB1 relay values as its Settings dialog would (`relay=yes|no`, `relay_ip=`), save them and send HELLO again when they changed; reply ACK with the values in force (see SMB1 relay); agents from 0.3.1 |
 | RELAY | op, job, dest, share, pattern | SMB1 relay work for the client at `dest`, each op on a thread so that an unreachable destination never stalls the agent's reports (probe on a thread from 0.3.2): `op=probe` answers whether `\\dest\share\` opens from the node; `op=push` copies what Thunderhead staged under `relay\<job>` in the node's own share to the root of that share; `op=pull` fetches the newest file matching `pattern` from it into `relay\<job>`; reply ACK with `op=`, `job=`, `dest=`, `files=`, `bytes=` and `file=` (see SMB1 relay); agents from 0.3.0 |
 | MESSAGE | title, text, sound, timeout | open a message window on the node's screen with `title` in its caption and `text` (hexadecimal digits of its UTF-8 bytes), play `sound`, a name in the agent's `sounds` folder (none when empty), and close the window by itself after `timeout` seconds (0: when dismissed); reply ACK when opened and again when closed (see Display Message); agents from 0.3.3 |
 
 The agent replies to START, STOP, PRIORITY, EXIT, RESTART, UPDATE, RENAME, REBOOT,
-SHUTDOWN, POWER, AUDIO, TEAMVIEWER, SOUND, RELAYSET, RENDERHOST, RELAY, MESSAGE and BATCH with (RENAME adds `name=` with the name that was applied;
+SHUTDOWN, POWER, AUDIO, TEAMVIEWER, SOUND, RELAYSET, RENDERHOST, BRYCE, RELAY, MESSAGE and BATCH with (RENAME adds `name=` with the name that was applied;
 START adds `gen=`, `path=`, `version=` and `found=` as described under Lightning lookup;
 PRIORITY adds `level=` as requested and `applied=` with the class Windows reports
 afterwards, and answers `ok=no` when the two differ, as when RealTime is
@@ -365,6 +372,56 @@ the latest report says the node is the render host; the tint ranks below
 offline, gate-closed and outdated and above the relay tint (see Inventory
 tints).
 
+## Bryce 3D on the host
+
+The full Bryce 3D is what a Bryce 3D Network Render Host runs. From 0.4.3
+the agent looks it up at its start as it looks Lightning up (see Lightning
+lookup), in the same order, and takes the first `Bryce.exe` that exists: the
+product key under `HKLM\SOFTWARE\DAZ 3D` whose name is `Bryce <version>`
+(`Bryce 7.1` on a 7.1.0.109 install, `Bryce 7.0` and `Bryce 6.3` on the
+Windows XP export; `Bryce 7.0 Content` is the preset library and `Bryce
+Lightning 7.0` the render client, and both are passed over), highest version
+first and in both registry views, `Location` naming the folder and `Version`
+the version; the Add/Remove Programs entry `Bryce <version> <version>`
+(`InstallLocation`, `DisplayVersion`); the Start menu shortcut whose target is
+a `Bryce.exe` (`DAZ 3D\Bryce7\Bryce 7.1.lnk`; the guide and wiki shortcuts in
+the same folder point elsewhere); and the default folders `DAZ 3D\Bryce7` and
+`DAZ 3D\Bryce` under each Program Files folder. The result goes into HELLO as
+`bryce_path` and `bryce_version`, and every full REPORT says whether
+Bryce.exe runs (`bryce=`) and its CPU share (`bryce_cpu_pct=`); Client
+details shows both as *Bryce 3D installed* and *Bryce 3D*.
+
+*Start Bryce on Host* and *Stop Bryce on Host* (Render Control) send `BRYCE
+action=start` and `action=stop` to every online client that is flagged as
+Bryce 3D Network Render Host or reports as one, whatever the check boxes say;
+with no such client the status bar says so. The agent starts Bryce from its
+own folder, with the scene named in `scene=` as its one argument when there is
+one (as a double-click on a .br7 does), looks for Bryce's window for up to 60
+s and brings it to the front as it does for TeamViewer; `stop` ends
+Bryce.exe; `front` brings the window to the front again. The ACK carries
+`path=`, `version=` and `found=` as START does for Lightning, and `error=`
+names the running file when Bryce is already running. The event log reads
+"BRYCE start ok on NAME: Bryce 7.1.0.109 at C:\...\Bryce.exe, found through
+...; scene jobs\x\x.br7".
+
+*Render Job on Host...* (Render Control) is the dialog for a render: the host
+(a list of the online render hosts), the scene file, an optional texture
+folder, the output folder on the host and the first and last frame. *Copy and
+Start Bryce* copies the scene and the texture folder to `jobs\<scene name>\`
+in the host's shared folder through the same copy machinery and progress
+window as *Copy Files or Folder to Client* (through the relay for an SMB1
+host), appends the job to `jobs.txt` beside Thunderhead.exe (time, host,
+scene, textures, where it was copied, output folder, frames), and, as soon as
+the copy has ended without a failure, sends the host `BRYCE action=start
+scene=jobs\<scene name>\<scene file> output= first= last=`. The agent keeps
+those values in `job.txt` beside itself and creates a relative output folder
+inside its own folder, so that the person at the host can point Bryce's
+render output at it; the network render itself is begun from Bryce's own
+Render menu on the host, by hand or through TeamViewer, because Bryce offers
+no outside way to start it. Bryce keeps texture paths as it saved them, so a
+scene whose textures came from another machine asks for them once; the
+texture folder copied beside the scene is where to point it.
+
 ## Report spacing
 
 An agent times each report from the one it has just sent, so the moment of its
@@ -442,6 +499,9 @@ through its share before it connects again.
 `sounds\` holds the sound files: the repository's `assets\sounds`, which the
 build copies beside the executable, plus any file *Sound Schemes* copies in.
 
+`jobs.txt` records every render job started with *Render Job on Host*, one
+line each (see Bryce 3D on the host).
+
 `nodes.txt`, one block per node, keyed by MAC; the user-edited fields are kept
 here and survive re-imaging of the node:
 
@@ -486,7 +546,9 @@ and writes `C:\LightningRod\LightningRod-YYYY-MM-DD.log`. Its sounds are in
 the file names of its own sound events as the last SOUND scheme message set
 them (see Audio). `settings.txt` beside it holds its Settings dialog
 (`relay=yes|no`, `relay_ip=`, and `render_host=yes|no`, the Bryce 3D Network
-Render Host switch), `farm.key` is the host's key as Thunderhead
+Render Host switch), `job.txt` holds the last render job the agent was
+given with BRYCE (scene, output, first, last, started), `jobs\` the scenes
+Thunderhead copied for render jobs, `farm.key` is the host's key as Thunderhead
 wrote it through the share (see Authentication), and `relay\` holds the
 staging folders of RELAY jobs while they run; it keeps no other state. The
 intended place for the folder is `X:\LightningRod` on any drive with room,

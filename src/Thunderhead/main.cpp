@@ -46,6 +46,7 @@ const UINT WM_NET = WM_APP + 1;
 const UINT WM_UPDATE_DONE = WM_APP + 2;   // lParam: UpdateResult*
 const UINT WM_THEME_CHANGED = WM_APP + 5; // to every other top-level window of this thread: dress for the current scheme
 const UINT WM_SHARE_CHECKED = WM_APP + 6; // lParam: ShareResult* from a share check thread
+const UINT WM_COPY_DONE = WM_APP + 7;     // lParam: CopyAfter* from the copy thread: the message to send once a copy job has ended
 const UINT_PTR kTimerId = 1;
 const UINT_PTR kNudgeTimerId = 2;   // 100 ms while a nudge SET is pending
 const UINT_PTR kFlashTimerId = 3;   // 100 ms while a row is painted in the ping color
@@ -171,6 +172,9 @@ const CommandDef kCommands[] = {
     { IDC_CMD_START71,         L"Run Lightning 3 (B7 & 7 Pro)",   NULL,      true,  GroupRender },
     { IDC_CMD_START63,         L"Run Lightning 2 (B6.x)",         NULL,      true,  GroupRender },
     { IDC_CMD_START50,         L"Run Lightning 1 (B5.x)",         NULL,      false, GroupRender },
+    { IDC_CMD_RENDER_JOB,      L"Render Job on Host...",          NULL,      true,  GroupRender },
+    { IDC_CMD_BRYCE_START,     L"Start Bryce on Host",            NULL,      true,  GroupRender },
+    { IDC_CMD_BRYCE_STOP,      L"Stop Bryce on Host",             NULL,      true,  GroupRender },
 };
 const int kCommandCount = sizeof(kCommands) / sizeof(kCommands[0]);
 
@@ -688,6 +692,8 @@ void showStaticPane(NodeRecord* n)
     add(L"VRAM MB", widen(h.get("vram_mb")));
     add(L"Lightning 3 (B7 & 7 Pro)", lightningInstallText(h, "lightning3"));
     add(L"Lightning 2 (B6.x)", lightningInstallText(h, "lightning2"));
+    add(L"Bryce 3D installed", lightningInstallText(h, "bryce"));
+    add(L"Bryce 3D", !r.has("bryce") ? std::wstring() : (r.get("bryce") == "running" ? L"Running, CPU " + widen(r.get("bryce_cpu_pct")) + L" %" : L"Stopped"));
     if (h.has("relay")) {
         add(L"Relay Node", isRelay(n) ? L"Yes" : L"No");
         if (isRelay(n)) {
@@ -715,9 +721,9 @@ void showStaticPane(NodeRecord* n)
     }
     static const char* const knownHello[] = { "agent", "os", "cpu", "cpu_mhz", "cores", "mem_mb", "mem_installed_mb", "mem_type", "disk_total_mb", "board",
                                               "chipset", "gpu", "vram_mb", "ip", "mac", "name", "lightning3_path", "lightning3_version",
-                                              "lightning2_path", "lightning2_version", "relay", "relay_ip", "render_host" };
+                                              "lightning2_path", "lightning2_version", "relay", "relay_ip", "render_host", "bryce_path", "bryce_version" };
     static const char* const knownReport[] = { "cpu_pct", "cpu_temp_c", "disk_free_mb", "lightning", "lightning_cpu_pct",
-                                               "mem_free_mb", "rendering", "uptime_s", "clock", "utc_ms", "render_host" };
+                                               "mem_free_mb", "rendering", "uptime_s", "clock", "utc_ms", "render_host", "bryce", "bryce_cpu_pct" };
     for (std::map<std::string, std::string>::const_iterator it = h.fields.begin(); it != h.fields.end(); ++it) {
         bool known = false;
         for (size_t k = 0; k < sizeof(knownHello) / sizeof(knownHello[0]); ++k) if (it->first == knownHello[k]) known = true;
@@ -3197,13 +3203,20 @@ struct CopyTarget {
     bool viaRelay;                      // an SMB1 share: staged under the relay's share, then RELAY op=push
     int relayConn;
     std::string relayName, relayIp, destIp;
+    std::wstring subdir;                // folder below the share to copy into, created first; empty for the share itself
     CopyTarget() : viaRelay(false), relayConn(-1) {}
 };
 
 struct CopyJob {
     std::vector<std::wstring> sources;  // files, or one folder
     std::vector<CopyTarget> targets;
+    // A message to send to one node when the whole job has ended without a
+    // failure (the render job's BRYCE start); empty verb for none.
+    std::string afterMac, afterLabel;
+    Message after;
 };
+
+struct CopyAfter { std::string mac, label; bool ok; Message after; };
 
 // The copy progress window: Thunderhead's own, because the Windows shell
 // dialogs (SHFileOperation, IFileOperation, IProgressDialog) all hold their
@@ -3421,6 +3434,7 @@ DWORD WINAPI copyToClientsThread(LPVOID param)
         if (tg.viaRelay) { relayJob = newRelayJob(); to = relayStageDir(tg.relayIp, tg.shareName, relayJob); }
         if (to.empty() || to[to.size() - 1] != L'\\') to += L'\\';
         probe = tg.viaRelay ? L"\\\\" + widen(tg.relayIp) + L"\\" + tg.shareName + L"\\" : to;
+        if (!tg.subdir.empty()) to += tg.subdir + L"\\";   // the share itself is probed; the folder below it is made after
         if (cp.wnd) {
             SetWindowTextW(cp.client, widen(format("Client %s (%u of %u): %s%s", name.c_str(), (unsigned)i + 1, (unsigned)job->targets.size(),
                                                    tg.viaRelay ? ("\\\\" + tg.destIp + "\\" + narrow(tg.shareName) + "\\ through relay " + tg.relayName).c_str() : narrow(to).c_str(), "")).c_str());
@@ -3441,7 +3455,7 @@ DWORD WINAPI copyToClientsThread(LPVOID param)
                 continue;
             }
         }
-        if (tg.viaRelay && !makeDirs(to)) {
+        if ((tg.viaRelay || !tg.subdir.empty()) && !makeDirs(to)) {
             lastError = format("staging folder %s could not be created (%s)", narrow(to).c_str(), lastErrorText((int)GetLastError()).c_str());
             logEvent(format("copy to %s failed: %s", name.c_str(), lastError.c_str()));
             ++clientsFailed;
@@ -3475,6 +3489,16 @@ DWORD WINAPI copyToClientsThread(LPVOID param)
         else if (ok) { logEvent(format("copied %u file(s), %s, to %s", files, byteText(cp.done - before).c_str(), name.c_str())); ++clientsDone; }
         else { lastError = err; logEvent(format("copy to %s failed after %u file(s): %s", name.c_str(), files, err.c_str())); ++clientsFailed; }
         if (!ok && !cp.cancelled) { cp.done = before + perClient; copyProgressShowBytes(cp, cp.done); }
+    }
+    if (!job->after.verb.empty()) {
+        // The follow-up goes out as soon as the copying has ended, not when the
+        // progress window is closed.
+        CopyAfter* ca = new CopyAfter();
+        ca->mac = job->afterMac;
+        ca->label = job->afterLabel;
+        ca->ok = !cp.cancelled && clientsFailed == 0;
+        ca->after = job->after;
+        if (!PostMessageW(g_main, WM_COPY_DONE, 0, (LPARAM)ca)) delete ca;
     }
     if (cp.wnd) {
         cp.finished = true;
@@ -3577,6 +3601,240 @@ void copyToClients()
     HANDLE t = CreateThread(NULL, 0, copyToClientsThread, job, 0, NULL);
     if (t) CloseHandle(t);
     else { logEvent("copy to clients: could not start a thread"); delete job; }
+}
+
+// ---------------------------------------------------------------- Bryce 3D on the host
+// Start Bryce on Host, Stop Bryce on Host and Render Job on Host act on the
+// Bryce 3D Network Render Hosts, every online client that is flagged as one or
+// reports as one, not on the checked rows. The agent finds the installed Bryce
+// as it finds Lightning (BRYCE, see docs/PROTOCOL.md under Bryce 3D on the
+// host); agents before kBryceAgent are passed over with a line in the log.
+const char* const kBryceAgent = "0.4.3";
+
+std::vector<NodeRecord*> renderHostsOnline()
+{
+    std::vector<NodeRecord*> out;
+    std::vector<NodeRecord*>& nodes = g_store->nodes();
+    for (size_t i = 0; i < nodes.size(); ++i) if (nodes[i]->online && isRenderHost(nodes[i])) out.push_back(nodes[i]);
+    return out;
+}
+
+// BRYCE to one host, version-checked; what the log and status bar say.
+bool sendBryce(NodeRecord* n, const Message& m, const std::string& label)
+{
+    if (compareVersions(n->hello.get("agent"), kBryceAgent) < 0) {
+        logEvent(format("%s not sent to %s: agent %s is older than %s, update it first", label.c_str(), n->name.c_str(),
+                        n->hello.get("agent").c_str(), kBryceAgent));
+        return false;
+    }
+    return sendToNode(n, m, label);
+}
+
+void bryceOnHosts(const char* action)
+{
+    std::vector<NodeRecord*> hosts = renderHostsOnline();
+    if (hosts.empty()) {
+        updateStatusBar(L"|  no online client is flagged as Bryce 3D Network Render Host (Toggle B3D Net Render Host)");
+        logEvent(format("BRYCE %s: no online client is a Bryce 3D Network Render Host", action));
+        return;
+    }
+    Message m("BRYCE");
+    m.set("action", std::string(action));
+    int sent = 0;
+    for (size_t i = 0; i < hosts.size(); ++i) if (sendBryce(hosts[i], m, m.oneLine())) ++sent;
+    updateStatusBar(widen(format("|  BRYCE %s sent to %d of %d render host(s)", action, sent, (int)hosts.size())).c_str());
+}
+
+void onCopyDone(CopyAfter* ca)
+{
+    NodeRecord* n = g_store->find(ca->mac);
+    if (!n) return;
+    if (!ca->ok) { logEvent(format("%s not sent to %s: the copy did not finish cleanly", ca->label.c_str(), n->name.c_str())); return; }
+    if (!n->online) { logEvent(format("%s not sent to %s: it went offline during the copy", ca->label.c_str(), n->name.c_str())); return; }
+    sendBryce(n, ca->after, ca->label);
+}
+
+// The Windows file dialog for one file or one folder; false when cancelled.
+bool pickPath(HWND owner, bool folder, const wchar_t* title, const wchar_t* filterName, const wchar_t* filterSpec, std::wstring& out)
+{
+    IFileOpenDialog* dlg = NULL;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg))) || !dlg) return false;
+    DWORD opts = 0;
+    dlg->GetOptions(&opts);
+    opts |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | (folder ? FOS_PICKFOLDERS : FOS_FILEMUSTEXIST);
+    dlg->SetOptions(opts);
+    dlg->SetTitle(title);
+    if (!folder && filterName) {
+        COMDLG_FILTERSPEC filters[2] = { { filterName, filterSpec }, { L"All files", L"*.*" } };
+        dlg->SetFileTypes(2, filters);
+    }
+    bool ok = false;
+    if (SUCCEEDED(dlg->Show(owner))) {
+        IShellItem* item = NULL;
+        if (SUCCEEDED(dlg->GetResult(&item)) && item) {
+            PWSTR path = NULL;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) { out = path; CoTaskMemFree(path); ok = true; }
+            item->Release();
+        }
+    }
+    dlg->Release();
+    return ok;
+}
+
+struct RenderJobData {
+    std::vector<NodeRecord*> hosts;
+    int host;
+    std::wstring scene, textures, output;
+    std::string first, last;
+};
+std::wstring g_jobScene, g_jobTextures;   // remembered while Thunderhead runs
+
+std::wstring fileTitle(const std::wstring& path)
+{
+    size_t slash = path.find_last_of(L"\\/");
+    std::wstring name = slash == std::wstring::npos ? path : path.substr(slash + 1);
+    size_t dot = name.rfind(L'.');
+    return dot == std::wstring::npos || dot == 0 ? name : name.substr(0, dot);
+}
+
+std::wstring fileName(const std::wstring& path)
+{
+    size_t slash = path.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? path : path.substr(slash + 1);
+}
+
+INT_PTR CALLBACK renderJobDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    RenderJobData* d = (RenderJobData*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
+    if (INT_PTR r = themeDialogMessage(dlg, msg, wp, lp)) return r;
+    switch (msg) {
+    case WM_INITDIALOG: {
+        d = (RenderJobData*)lp;
+        SetWindowLongPtrW(dlg, GWLP_USERDATA, (LONG_PTR)d);
+        SetDlgItemTextW(dlg, IDC_JOB_INFO, widen(format("%u online Bryce 3D Network Render Host(s). The scene is opened in Bryce on the host chosen below.",
+                                                        (unsigned)d->hosts.size())).c_str());
+        for (size_t i = 0; i < d->hosts.size(); ++i)
+            SendDlgItemMessageW(dlg, IDC_JOB_HOST, CB_ADDSTRING, 0, (LPARAM)widen(d->hosts[i]->name + "  (" + d->hosts[i]->ip + ")").c_str());
+        SendDlgItemMessageW(dlg, IDC_JOB_HOST, CB_SETCURSEL, 0, 0);
+        SetDlgItemTextW(dlg, IDC_JOB_SCENE, d->scene.c_str());
+        SetDlgItemTextW(dlg, IDC_JOB_TEXTURES, d->textures.c_str());
+        SetDlgItemTextW(dlg, IDC_JOB_OUTPUT, d->output.c_str());
+        return TRUE;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDC_JOB_SCENE_BROWSE) {
+            std::wstring path;
+            if (pickPath(dlg, false, L"Select the Bryce scene", L"Bryce scenes (*.br7;*.br6;*.br5)", L"*.br7;*.br6;*.br5", path)) {
+                SetDlgItemTextW(dlg, IDC_JOB_SCENE, path.c_str());
+                wchar_t out[512];
+                GetDlgItemTextW(dlg, IDC_JOB_OUTPUT, out, 512);
+                if (out[0] == L'\0') SetDlgItemTextW(dlg, IDC_JOB_OUTPUT, (L"renders\\" + fileTitle(path)).c_str());
+            }
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDC_JOB_TEXTURES_BROWSE) {
+            std::wstring path;
+            if (pickPath(dlg, true, L"Select the texture folder", NULL, NULL, path)) SetDlgItemTextW(dlg, IDC_JOB_TEXTURES, path.c_str());
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDOK && d) {
+            wchar_t buf[1024];
+            d->host = (int)SendDlgItemMessageW(dlg, IDC_JOB_HOST, CB_GETCURSEL, 0, 0);
+            GetDlgItemTextW(dlg, IDC_JOB_SCENE, buf, 1024);   d->scene = trim(std::wstring(buf));
+            GetDlgItemTextW(dlg, IDC_JOB_TEXTURES, buf, 1024); d->textures = trim(std::wstring(buf));
+            GetDlgItemTextW(dlg, IDC_JOB_OUTPUT, buf, 1024);  d->output = trim(std::wstring(buf));
+            GetDlgItemTextW(dlg, IDC_JOB_FIRST, buf, 1024);   d->first = trim(narrow(buf));
+            GetDlgItemTextW(dlg, IDC_JOB_LAST, buf, 1024);    d->last = trim(narrow(buf));
+            if (d->host < 0 || d->host >= (int)d->hosts.size()) { MessageBoxW(dlg, L"Choose the render host.", L"Render Job on Host", MB_OK | MB_ICONWARNING); return TRUE; }
+            DWORD a = d->scene.empty() ? INVALID_FILE_ATTRIBUTES : GetFileAttributesW(d->scene.c_str());
+            if (a == INVALID_FILE_ATTRIBUTES || (a & FILE_ATTRIBUTE_DIRECTORY)) { MessageBoxW(dlg, L"Enter or browse for the scene file.", L"Render Job on Host", MB_OK | MB_ICONWARNING); return TRUE; }
+            if (!d->textures.empty()) {
+                DWORD t = GetFileAttributesW(d->textures.c_str());
+                if (t == INVALID_FILE_ATTRIBUTES || !(t & FILE_ATTRIBUTE_DIRECTORY)) { MessageBoxW(dlg, L"The texture folder does not exist. Leave it empty or browse for a folder.", L"Render Job on Host", MB_OK | MB_ICONWARNING); return TRUE; }
+            }
+            if (d->output.empty()) d->output = L"renders\\" + fileTitle(d->scene);
+            if (d->first.empty() != d->last.empty() || (!d->first.empty() && atoi(d->last.c_str()) < atoi(d->first.c_str()))) {
+                MessageBoxW(dlg, L"Enter both the first and the last frame, the last not before the first, or leave both empty.", L"Render Job on Host", MB_OK | MB_ICONWARNING);
+                return TRUE;
+            }
+            EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDCANCEL) { EndDialog(dlg, IDCANCEL); return TRUE; }
+        break;
+    }
+    return FALSE;
+}
+
+void appendJobRecord(const std::string& line)
+{
+    FILE* f = _wfopen((g_dir + L"\\jobs.txt").c_str(), L"ab");
+    if (!f) { logEvent("jobs.txt could not be written"); return; }
+    fwrite(line.data(), 1, line.size(), f);
+    fwrite("\r\n", 1, 2, f);
+    fclose(f);
+}
+
+// Render Job on Host: the scene (and its texture folder) go to
+// jobs\<scene name>\ in the host's shared folder through the copy machinery,
+// the job is recorded in jobs.txt, and when the copy has ended cleanly the host
+// is sent BRYCE action=start with the scene, output folder and frame range.
+void renderJob()
+{
+    RenderJobData d;
+    d.hosts = renderHostsOnline();
+    if (d.hosts.empty()) {
+        MessageBoxW(g_main, L"No online client is flagged as Bryce 3D Network Render Host. Check the host and use Toggle B3D Net Render Host first.",
+                    L"Render Job on Host", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    d.host = 0;
+    d.scene = g_jobScene;
+    d.textures = g_jobTextures;
+    if (!d.scene.empty()) d.output = L"renders\\" + fileTitle(d.scene);
+    if (DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_RENDERJOB), g_main, renderJobDlgProc, (LPARAM)&d) != IDOK) return;
+    g_jobScene = d.scene;
+    g_jobTextures = d.textures;
+    NodeRecord* n = d.hosts[d.host];
+    if (!n->online) { logEvent(n->name + ": went offline before the render job started"); return; }
+    std::wstring base = fileTitle(d.scene);
+    std::wstring subdir = L"jobs\\" + base;
+    CopyJob* job = new CopyJob;
+    job->sources.push_back(d.scene);
+    if (!d.textures.empty()) job->sources.push_back(d.textures);
+    CopyTarget tg;
+    tg.name = n->name;
+    tg.shareName = widen(g_store->settings.shareName);
+    tg.share = L"\\\\" + widen(n->name) + L"\\" + tg.shareName;
+    tg.destIp = n->ip;
+    tg.subdir = subdir;
+    if (NodeRecord* relay = relayFor(n)) {
+        tg.viaRelay = true;
+        tg.relayConn = relay->conn;
+        tg.relayName = relay->name;
+        tg.relayIp = relay->ip;
+    }
+    job->targets.push_back(tg);
+    Message m("BRYCE");
+    m.set("action", std::string("start"));
+    m.set("scene", narrow(subdir + L"\\" + fileName(d.scene)));
+    m.set("output", narrow(d.output));
+    m.set("first", d.first);
+    m.set("last", d.last);
+    job->after = m;
+    job->afterMac = n->mac;
+    job->afterLabel = "BRYCE start (render job " + narrow(base) + ")";
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    std::string record = format("%04d-%02d-%02d %02d:%02d:%02d  host=%s (%s)  scene=%s  textures=%s  copied_to=\\\\%s\\%s\\%s  output=%s  frames=%s-%s",
+                                t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, n->name.c_str(), n->ip.c_str(), narrow(d.scene).c_str(),
+                                d.textures.empty() ? "(none)" : narrow(d.textures).c_str(), n->name.c_str(), g_store->settings.shareName.c_str(),
+                                narrow(subdir).c_str(), narrow(d.output).c_str(), d.first.empty() ? "?" : d.first.c_str(), d.last.empty() ? "?" : d.last.c_str());
+    appendJobRecord(record);
+    logEvent("render job: " + record);
+    HANDLE th = CreateThread(NULL, 0, copyToClientsThread, job, 0, NULL);
+    if (th) CloseHandle(th);
+    else { logEvent("render job: could not start the copy thread"); delete job; }
 }
 
 void renameChecked()
@@ -4513,6 +4771,14 @@ void onNet(NetEvent* e)
                                   e->msg.get("path").c_str(), e->msg.get("found").c_str(),
                                   parseBool(e->msg.get("running")) ? ", TeamViewer was already running" : "");
             else text = format("TEAMVIEWER failed on %s: %s", n->name.c_str(), e->msg.get("error").c_str());
+        } else if (cmd == "BRYCE") {
+            std::string action = e->msg.get("action"), scene = e->msg.get("scene"), ver = e->msg.get("version"), path = e->msg.get("path");
+            std::string what = "Bryce" + (ver.empty() ? "" : " " + ver) + (path.empty() ? "" : " at " + path);
+            if (ok) text = format("BRYCE %s ok on %s: %s%s%s%s%s", action.c_str(), n->name.c_str(), what.c_str(),
+                                  e->msg.get("found").empty() ? "" : ", found through ", e->msg.get("found").c_str(),
+                                  scene.empty() ? "" : "; scene ", scene.c_str());
+            else text = format("BRYCE %s failed on %s: %s%s%s", action.c_str(), n->name.c_str(), e->msg.get("error").c_str(),
+                               path.empty() ? "" : (" (" + what + ")").c_str(), "");
         } else if (cmd == "RENDERHOST") {
             if (ok) text = format("RENDERHOST ok on %s: Net Render Host %s", n->name.c_str(), parseBool(e->msg.get("render_host")) ? "on" : "off");
             else text = format("RENDERHOST failed on %s: %s", n->name.c_str(), e->msg.get("error").c_str());
@@ -5261,6 +5527,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CMD_REMOVE_OFFLINE: removeCheckedOffline(); return 0;
         case IDC_CMD_SET_RELAY: setRelayAddress(); return 0;
         case IDC_CMD_TOGGLE_RENDERHOST: toggleRenderHost(); return 0;
+        case IDC_CMD_RENDER_JOB: renderJob(); return 0;
+        case IDC_CMD_BRYCE_START: bryceOnHosts("start"); return 0;
+        case IDC_CMD_BRYCE_STOP: bryceOnHosts("stop"); return 0;
         case IDC_CMD_MESSAGE: displayMessage(); return 0;
         case IDC_CMD_SHUTDOWN_NODE: shutdownChecked(); return 0;
         case IDC_CMD_ABORT_SHUTDOWN: sendPower("abort"); return 0;
@@ -5281,6 +5550,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_NET: { NetEvent* e = (NetEvent*)lp; onNet(e); delete e; return 0; }
     case WM_UPDATE_DONE: { UpdateResult* r = (UpdateResult*)lp; onUpdateDone(r); delete r; return 0; }
     case WM_SHARE_CHECKED: { ShareResult* r = (ShareResult*)lp; onShareChecked(r); delete r; return 0; }
+    case WM_COPY_DONE: { CopyAfter* r = (CopyAfter*)lp; onCopyDone(r); delete r; return 0; }
     case WM_NOTIFY: {
         NMHDR* hdr = (NMHDR*)lp;
         if (hdr->hwndFrom == g_list) return onListNotify(hdr);

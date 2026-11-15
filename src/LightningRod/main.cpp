@@ -15,6 +15,7 @@
 #include "Thermal.h"
 #include "Audio.h"
 #include "TeamViewer.h"
+#include "Bryce.h"
 #include "Sound.h"
 #include "Auth.h"
 #include "resource.h"
@@ -767,6 +768,8 @@ public:
         hostAuthenticated_ = false;
         lastKeyPollMs_ = 0;
         lastRejectLogMs_ = 0;
+        bryceWindowWanted_ = false;
+        bryceStartMs_ = 0;
         InitializeCriticalSection(&lock_);
     }
     ~Agent() { DeleteCriticalSection(&lock_); }
@@ -790,6 +793,19 @@ public:
                     version = li.version;
                     logLine(format("%s: %s, version %s, found through %s", lightningLabel(gens[g]), path.c_str(),
                                    version.empty() ? "unknown" : version.c_str(), li.found.c_str()));
+                } else {
+                    logLine(err);
+                }
+            }
+            // The full Bryce 3D as well, for the Bryce 3D Network Render Host role.
+            {
+                BryceInstall bi;
+                std::string err;
+                if (findBryce(bi, err)) {
+                    info_.brycePath = narrow(bi.path);
+                    info_.bryceVersion = bi.version;
+                    logLine(format("Bryce 3D: %s, version %s, found through %s", info_.brycePath.c_str(),
+                                   bi.version.empty() ? "unknown" : bi.version.c_str(), bi.found.c_str()));
                 } else {
                     logLine(err);
                 }
@@ -1063,6 +1079,8 @@ private:
         m.set("lightning3_version", info_.lightning3Version);
         m.set("lightning2_path", info_.lightning2Path);
         m.set("lightning2_version", info_.lightning2Version);
+        m.set("bryce_path", info_.brycePath);
+        m.set("bryce_version", info_.bryceVersion);
         m.set("relay", boolText(relay));
         m.set("relay_ip", relay ? relayIp : std::string());
         m.set("render_host", boolText(renderHostSetting()));
@@ -1092,7 +1110,10 @@ private:
         full.set("lightning", l.running ? "running" : "stopped");
         full.set("lightning_cpu_pct", (long long)l.cpuPct);
         full.set("rendering", boolText(l.rendering));
-        full.set("render_host", boolText(renderHostSetting()));   // the B3NDHR mode, so that a change made here reaches Thunderhead within a report
+        full.set("render_host", boolText(renderHostSetting()));
+        BryceState b = bryce_.query();
+        full.set("bryce", b.running ? "running" : "stopped");
+        full.set("bryce_cpu_pct", (long long)b.cpuPct);   // the B3NDHR mode, so that a change made here reaches Thunderhead within a report
         // The node's clock: its local date and time as it shows them, and the
         // same instant in UTC milliseconds, from which Thunderhead works out how
         // far the clock is from its own.
@@ -1174,6 +1195,79 @@ private:
             LeaveCriticalSection(&lock_);
             notify();
             if (helloSoundPending_) { helloSoundPending_ = false; playEventSound(SoundLrHello); }
+        } else if (m.verb == "BRYCE") {
+            // The full Bryce 3D on this node (the Bryce 3D Network Render Host):
+            // action=start opens it, with scene= (a path inside this folder, the
+            // shared one) as a double-click on the file would, and brings its window
+            // to the front; output=, first= and last= describe the render job and
+            // are kept in job.txt beside the agent, the output folder created when
+            // it lies inside this folder; action=stop ends Bryce.exe; action=front
+            // brings its window to the front. The ACK carries what was found.
+            std::string action = trim(m.get("action")), scene = trim(m.get("scene")), err;
+            BryceInstall bi;
+            bool ok = false;
+            std::wstring scenePath;
+            if (action == "start") {
+                if (!scene.empty()) {
+                    if (scene.find(':') != std::string::npos || scene[0] == '\\' || scene[0] == '/' || scene.find("..") != std::string::npos) {
+                        err = "the scene must be a name or a relative path inside the shared folder";
+                    } else {
+                        std::wstring rel = widen(scene);
+                        for (size_t i = 0; i < rel.size(); ++i) if (rel[i] == L'/') rel[i] = L'\\';
+                        scenePath = exeDirectory() + L"\\" + rel;
+                        if (GetFileAttributesW(scenePath.c_str()) == INVALID_FILE_ATTRIBUTES) err = scene + " does not exist in " + narrow(exeDirectory());
+                    }
+                }
+                if (err.empty()) {
+                    std::string output = trim(m.get("output"));
+                    if (!output.empty() && output.find(':') == std::string::npos && output[0] != '\\' && output.find("..") == std::string::npos) {
+                        std::wstring dir = exeDirectory() + L"\\" + widen(output);
+                        if (!CreateDirectoryW(dir.c_str(), NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+                            logLine("BRYCE: output folder " + narrow(dir) + " could not be created: " + lastErrorText((int)GetLastError()));
+                        else logLine("BRYCE: output folder " + narrow(dir));
+                    }
+                    if (!scene.empty()) {
+                        SYSTEMTIME t;
+                        GetLocalTime(&t);
+                        std::string job = "scene=" + scene + "\r\noutput=" + output + "\r\nfirst=" + trim(m.get("first")) + "\r\nlast=" + trim(m.get("last")) +
+                                          format("\r\nstarted=%04d-%02d-%02d %02d:%02d:%02d\r\n", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+                        if (!writeTextFile(exeDirectory() + L"\\job.txt", job)) logLine("job.txt could not be written: " + lastErrorText((int)GetLastError()));
+                    }
+                    ok = startBryce(scenePath, bi, err);
+                    if (ok) { bryceWindowWanted_ = true; bryceStartMs_ = tickMs(); }
+                }
+            } else if (action == "stop") {
+                ok = stopBryce(err);
+                bryceWindowWanted_ = false;
+            } else if (action == "front") {
+                HWND w = bryceWindow();
+                if (w) { bringToFront(w); ok = true; } else err = findBrycePid() ? "Bryce has no visible window yet" : "Bryce is not running";
+            } else {
+                err = "unknown action \"" + action + "\"";
+            }
+            if (action != "start") { std::string ignore; findBryce(bi, ignore); }   // what the ACK names
+            std::string where = bi.path.empty() ? std::string()
+                : format(" [%s, version %s, found through %s]", narrow(bi.path).c_str(), bi.version.empty() ? "unknown" : bi.version.c_str(), bi.found.c_str());
+            logLine(format("BRYCE %s%s%s: %s%s%s%s", action.c_str(), scene.empty() ? "" : " scene ", scene.c_str(), ok ? "ok" : "failed",
+                           err.empty() ? "" : ": ", err.c_str(), where.c_str()));
+            Message ack("ACK");
+            ack.set("cmd", m.verb);
+            ack.set("ok", boolText(ok));
+            ack.set("error", err);
+            ack.set("action", action);
+            ack.set("scene", scene);
+            ack.set("path", narrow(bi.path));
+            ack.set("version", bi.version);
+            ack.set("found", bi.found);
+            sendMessage(ack);
+            if (ok && action == "start") {
+                for (int i = 0; i < 20 && bryceWindowWanted_; ++i) {
+                    tryBryceWindow();
+                    if (bryceWindowWanted_) Sleep(100);
+                }
+            }
+            sendReport();
+            nextReport_ = tickMs() + (unsigned long long)intervalSec_ * 1000;
         } else if (m.verb == "RENDERHOST") {
             // Toggle B3D Net Render Host in Thunderhead: set=yes|no becomes this
             // node's B3NDHR mode, saved for the next start; a report follows at once.
@@ -1604,6 +1698,22 @@ private:
         }
     }
 
+    // Looks for Bryce's window once BRYCE has started it, brings it to the
+    // front, and gives up 60 s after the start (Bryce takes a while to open).
+    void tryBryceWindow()
+    {
+        if (!bryceWindowWanted_) return;
+        HWND w = bryceWindow();
+        if (w) {
+            bringToFront(w);
+            bryceWindowWanted_ = false;
+            logLine("BRYCE: window found, brought to the front");
+        } else if (tickMs() - bryceStartMs_ > 60000) {
+            bryceWindowWanted_ = false;
+            logLine("BRYCE: window not found within 60 s, left as Windows opened it");
+        }
+    }
+
     // Looks for the TeamViewer window once TEAMVIEWER has started it, brings it
     // to the front, and gives up 30 s after the start.
     void tryTeamViewerWindow()
@@ -1702,6 +1812,7 @@ private:
     {
         while (tcp_ != INVALID_SOCKET) {
             tryTeamViewerWindow();
+            tryBryceWindow();
             if (!pollBatches()) { dropSession("batch result send failed"); return; }
             if (!pollMessages()) { dropSession("message result send failed"); return; }
             if (!pollRelays()) { dropSession("relay result send failed"); return; }
@@ -1754,6 +1865,9 @@ private:
     StaticInfo info_;
     CpuTracker cpu_;
     LightningMonitor lightning_;
+    BryceMonitor bryce_;
+    bool bryceWindowWanted_;              // BRYCE start: Bryce's window is still to be brought to the front
+    unsigned long long bryceStartMs_;
     ThermalReader thermal_;
     MessageParser parser_;
     Message sent_;                   // every report value as last sent to this host
@@ -1870,6 +1984,8 @@ void refreshAll()
     setRow(row++, L"Lightning",           s.haveReport ? (r.get("lightning") == "running" ? L"Running" : L"Stopped") : L"");
     setRow(row++, L"Lightning CPU %",     s.haveReport ? widen(r.get("lightning_cpu_pct")) : L"");
     setRow(row++, L"Rendering",           s.haveReport ? (parseBool(r.get("rendering")) ? L"Yes" : L"No") : L"");
+    setRow(row++, L"Bryce 3D",            s.haveReport ? (r.get("bryce") == "running" ? L"Running" : L"Stopped") : L"");
+    setRow(row++, L"Bryce 3D CPU %",      s.haveReport ? widen(r.get("bryce_cpu_pct")) : L"");
     setRow(row++, L"Clock",               s.haveReport ? widen(r.get("clock")) : L"");
     setRow(row++, L"UTC ms since 1970",   s.haveReport ? widen(r.get("utc_ms")) : L"");
     setRow(row++, L"Sent once at connect", L"");
@@ -1893,6 +2009,8 @@ void refreshAll()
                                                : widen(i.lightning3Version.empty() ? i.lightning3Path : i.lightning3Version + " at " + i.lightning3Path));
     setRow(row++, L"Lightning 2 (B6.x)", i.lightning2Path.empty() ? std::wstring(L"not installed")
                                         : widen(i.lightning2Version.empty() ? i.lightning2Path : i.lightning2Version + " at " + i.lightning2Path));
+    setRow(row++, L"Bryce 3D installed",  i.brycePath.empty() ? std::wstring(L"not installed")
+                                        : widen(i.bryceVersion.empty() ? i.brycePath : i.bryceVersion + " at " + i.brycePath));
     setRow(row++, L"Sounds",              widen(format("%u file(s) in ", (unsigned)soundFilesIn(soundDir()).size())) + soundDir());
     setRow(row++, L"SMB1 relay",          widen(relayText()));
     setRow(row++, L"Net Render Host",     renderHostSetting() ? L"On: this node is the Bryce 3D Network Render Host (B3NDHR)" : L"Off");

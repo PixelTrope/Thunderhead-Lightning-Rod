@@ -6,6 +6,7 @@ add_executable(LightningRod WIN32
     Audio.cpp
     TeamViewer.cpp
     Installed.cpp
+    Bryce.cpp
     LightningRod.rc
     LightningRod.ico
 )

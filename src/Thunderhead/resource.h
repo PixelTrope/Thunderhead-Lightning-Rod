@@ -9,6 +9,7 @@
 #define IDD_SOUND               107
 #define IDD_RELAY               108
 #define IDD_MESSAGE             109
+#define IDD_RENDERJOB           110
 
 #define IDM_FILE_EXIT           1001
 #define IDM_HELP_ABOUT          1301
@@ -67,7 +68,10 @@
 #define IDC_CMD_SETTINGS        3031
 #define IDC_CMD_SET_RELAY       3032
 #define IDC_CMD_TOGGLE_RENDERHOST 3033
-#define IDC_CMD_LAST            3033
+#define IDC_CMD_BRYCE_START     3034
+#define IDC_CMD_BRYCE_STOP      3035
+#define IDC_CMD_RENDER_JOB      3036
+#define IDC_CMD_LAST            3036
 
 // rename dialog
 #define IDC_RENAME_INFO         2301
@@ -109,6 +113,17 @@
 #define IDC_MSG_TIMED_STATE     3104
 #define IDC_MSG_SECONDS         3105
 #define IDC_MSG_RADIO_FIRST     3110   // one radio per sound category, in kSoundCategories order, then Silent message
+
+// Render Job on Host dialog
+#define IDC_JOB_INFO            3201
+#define IDC_JOB_HOST            3202   // the online render hosts
+#define IDC_JOB_SCENE           3203
+#define IDC_JOB_SCENE_BROWSE    3204
+#define IDC_JOB_TEXTURES        3205
+#define IDC_JOB_TEXTURES_BROWSE 3206
+#define IDC_JOB_OUTPUT          3207
+#define IDC_JOB_FIRST           3208
+#define IDC_JOB_LAST            3209
 
 // Settings dialog, sound scheme section
 #define IDC_SCHEME_DEFAULT      2801

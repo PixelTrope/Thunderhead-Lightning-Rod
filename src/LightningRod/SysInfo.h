@@ -22,6 +22,8 @@ struct StaticInfo {
     std::string lightning3Version;  // its version, from the installer's registry entry or the file
     std::string lightning2Path;     // the installed Bryce 6.x Lightning.exe, likewise; empty when none
     std::string lightning2Version;
+    std::string brycePath;          // the installed full Bryce 3D (Bryce.exe), filled by main from Bryce.cpp; empty when none
+    std::string bryceVersion;
     int diskTotalMb;        // size of C:
     std::string board;      // baseboard manufacturer and product
     std::string chipset;    // host bridge description

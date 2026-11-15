@@ -61,6 +61,9 @@ BEGIN
             MENUITEM "Run Lightning 3 (B7 && 7 Pro)", IDC_CMD_START71
             MENUITEM "Run Lightning 2 (B6.x)", IDC_CMD_START63
             MENUITEM "Run Lightning 1 (B5.x)", IDC_CMD_START50, GRAYED
+            MENUITEM "Render Job on Host...", IDC_CMD_RENDER_JOB
+            MENUITEM "Start Bryce on Host", IDC_CMD_BRYCE_START
+            MENUITEM "Stop Bryce on Host", IDC_CMD_BRYCE_STOP
         END
     END
     POPUP "&Help"
@@ -188,6 +191,32 @@ BEGIN
     AUTOCHECKBOX    "Bring to front", IDC_BATCH_FRONT, 178, 258, 72, 10
     PUSHBUTTON      "Execute Remote File", IDC_BATCH_EXECUTE, 264, 256, 110, 14
     PUSHBUTTON      "Cancel", IDCANCEL, 380, 256, 50, 14
+END
+
+IDD_RENDERJOB DIALOGEX 0, 0, 440, 208
+STYLE DS_MODALFRAME | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Render Job on Host"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT           "", IDC_JOB_INFO, 10, 8, 420, 20
+    LTEXT           "Render host:", -1, 10, 34, 74, 10
+    COMBOBOX        IDC_JOB_HOST, 84, 32, 200, 90, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Scene file (.br7):", -1, 10, 54, 74, 10
+    EDITTEXT        IDC_JOB_SCENE, 84, 52, 290, 13, ES_AUTOHSCROLL
+    PUSHBUTTON      "Browse...", IDC_JOB_SCENE_BROWSE, 380, 51, 50, 14
+    LTEXT           "Texture folder:", -1, 10, 74, 74, 10
+    EDITTEXT        IDC_JOB_TEXTURES, 84, 72, 290, 13, ES_AUTOHSCROLL
+    PUSHBUTTON      "Browse...", IDC_JOB_TEXTURES_BROWSE, 380, 71, 50, 14
+    LTEXT           "(optional; copied beside the scene)", -1, 84, 87, 290, 10
+    LTEXT           "Output folder on host:", -1, 10, 102, 74, 10
+    EDITTEXT        IDC_JOB_OUTPUT, 84, 100, 290, 13, ES_AUTOHSCROLL
+    LTEXT           "Frames, first and last:", -1, 10, 122, 74, 10
+    EDITTEXT        IDC_JOB_FIRST, 84, 120, 40, 13, ES_AUTOHSCROLL | ES_NUMBER
+    EDITTEXT        IDC_JOB_LAST, 130, 120, 40, 13, ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT           "(optional; recorded with the job and handed to the agent)", -1, 176, 122, 254, 10
+    LTEXT           "The scene and the texture folder are copied to jobs\<scene name>\ in the host's shared folder, the job is recorded in jobs.txt beside Thunderhead, and Bryce is started on the host with the scene. The network render itself is begun from Bryce's own Render menu on the host; a relative output folder lies inside the host's shared folder and is created there.", -1, 10, 140, 420, 40
+    DEFPUSHBUTTON   "Copy and Start Bryce", IDOK, 270, 186, 104, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 380, 186, 50, 14
 END
 
 VS_VERSION_INFO VERSIONINFO
