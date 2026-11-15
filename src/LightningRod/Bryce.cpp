@@ -221,13 +221,20 @@ HWND bryceWindow()
     return s.best;
 }
 
-bool startBryce(int gen, const std::wstring& scene, BryceInstall& inst, std::string& error)
+bool startBryce(int gen, const std::wstring& scene, bool restart, BryceInstall& inst, std::string& error, bool& restarted)
 {
+    restarted = false;
     if (!findBryce(gen, inst, error)) return false;
     if (findBrycePid() != 0) {
         std::wstring running = runningBrycePath();
-        error = "a Bryce is already running" + (running.empty() ? std::string() : " (" + narrow(running) + ")");
-        return false;
+        if (!restart) {
+            error = "a Bryce is already running" + (running.empty() ? std::string() : " (" + narrow(running) + ")");
+            return false;
+        }
+        std::string stopErr;
+        if (!stopBryce(stopErr)) { error = "the running Bryce" + (running.empty() ? std::string() : " (" + narrow(running) + ")") + " could not be ended: " + stopErr; return false; }
+        for (int i = 0; i < 50 && findBrycePid() != 0; ++i) Sleep(100);   // the process entry goes a moment after the terminate
+        restarted = true;
     }
     std::wstring dir = inst.path.substr(0, inst.path.rfind(L'\\'));
     std::wstring cmd = L"\"" + inst.path + L"\"";

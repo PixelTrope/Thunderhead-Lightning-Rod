@@ -82,6 +82,16 @@ bool nodeOutdated(const NodeRecord* n);
 bool commandAllowed(NodeRecord* n, const std::string& label);
 bool sendToNode(NodeRecord* n, const Message& m, const std::string& label);
 void createRemoteShare(const std::vector<NodeRecord*>& nodes);
+std::wstring shareRootOf(const NodeRecord* n);
+
+// The one gate in front of every message Thunderhead sends to a client: nothing
+// but SET, the report schedule, leaves this host for a node whose shared folder
+// it has not read (see the shared-folder gate). Every send site goes through here.
+bool sendGated(NodeRecord* n, const Message& m)
+{
+    if (m.verb != "SET" && !commandAllowed(n, m.oneLine())) return false;
+    return g_server->send(n->conn, m);
+}
 int shadeKey(const NodeRecord* n);
 COLORREF rowShade(const NodeRecord* n, int row, COLORREF* textColor);
 bool isRenderHost(const NodeRecord* n);
@@ -1190,6 +1200,7 @@ struct UpdateJob {
     std::string name; std::string ip; std::wstring source; std::wstring share; std::wstring dir; std::wstring sounds;
     bool viaRelay; int relayConn; std::string relayName, relayIp;   // the client's share is reached through a relay
     std::string key;                                                 // farm.key to place beside the agent
+    std::wstring root;                                               // the share root the gate verified (see shareRootOf); empty when none
 };
 struct UpdateResult {
     std::string name; int phase; bool ok; std::string text; std::wstring dir;
@@ -1329,8 +1340,11 @@ DWORD WINAPI updateStageThread(LPVOID p)
         return 0;
     }
     std::vector<std::wstring> dirs;
-    dirs.push_back(L"\\\\" + widen(job->ip) + L"\\" + job->share + L"\\");
-    if (nameResolvesTo(job->name, job->ip)) dirs.push_back(L"\\\\" + widen(job->name) + L"\\" + job->share + L"\\");
+    if (!job->root.empty()) dirs.push_back(job->root);   // the path the gate verified, and nothing else
+    else {
+        dirs.push_back(L"\\\\" + widen(job->ip) + L"\\" + job->share + L"\\");
+        if (nameResolvesTo(job->name, job->ip)) dirs.push_back(L"\\\\" + widen(job->name) + L"\\" + job->share + L"\\");
+    }
     std::string errors;
     for (size_t i = 0; i < dirs.size() && !res->ok; ++i) {
         if (CopyFileW(job->source.c_str(), (dirs[i] + L"LightningRod.new").c_str(), FALSE)) {
@@ -1399,6 +1413,7 @@ void startUpdateThread(NodeRecord* n, LPTHREAD_START_ROUTINE fn, const char* wha
     job->dir = n->updateDir;
     job->sounds = soundDir();
     job->key = g_farmKey;
+    job->root = n->shareState == 1 ? shareRootOf(n) : std::wstring();
     NodeRecord* relay = relayFor(n);
     job->viaRelay = relay != NULL;
     job->relayConn = relay ? relay->conn : -1;
@@ -1457,18 +1472,11 @@ void onUpdateDone(UpdateResult* r)
         runCredQueue();
         return;
     }
-    if (r->phase == 1 && r->ok) {
-        // The staging wrote the share, which proves it readable from here.
-        n->shareState = 1;
-        n->shareError.clear();
-        n->sharePath = r->dir;
-        n->shareNextMs = tickMs() + 10 * 60 * 1000;
-    }
     if (r->phase == 1 && r->ok && n->online) {
         n->updateDir = r->dir;
         n->updateStaged = true;
         Message m("UPDATE");
-        if (g_server->send(n->conn, m)) {
+        if (sendGated(n, m)) {
             logEvent(format("UPDATE -> %s (agent %s)", n->name.c_str(), n->hello.get("agent").c_str()));
             logNode(*n, "-> " + m.oneLine());
             return;
@@ -1498,6 +1506,8 @@ void updateChecked()
     for (size_t i = 0; i < targets.size(); ++i) {
         NodeRecord* n = targets[i];
         if (!n->online || n->updating) continue;
+        if (!commandAllowed(n, "UPDATE")) continue;   // the agent file goes into its share: no share, no update
+        if (NodeRecord* relay = relayFor(n)) { if (!commandAllowed(relay, "UPDATE (as relay for " + n->name + ")")) continue; }
         ++sent;
         n->updating = true;
         n->updateStaged = false;
@@ -1523,7 +1533,7 @@ void sendCommandMessage(const Message& m)
         NodeRecord* n = targets[i];
         if (!n->online) continue;
         if (!commandAllowed(n, m.oneLine())) { ++blocked; continue; }
-        if (g_server->send(n->conn, m)) {
+        if (sendGated(n, m)) {
             ++sent;
             logEvent(format("%s -> %s", m.oneLine().c_str(), n->name.c_str()));
             logNode(*n, std::string("-> ") + m.oneLine());
@@ -1568,7 +1578,7 @@ void pingChecked()
             continue;
         }
         Message m("PING");
-        if (!commandAllowed(n, "PING") || !g_server->send(n->conn, m)) {
+        if (!sendGated(n, m)) {
             ++g_pingNoReply;
             logEvent("PING not sent to " + n->name);
             continue;
@@ -1830,7 +1840,7 @@ void sendVersioned(const Message& m, const std::string& label, const char* minAg
             continue;
         }
         if (!commandAllowed(n, label)) { ++blocked; continue; }
-        if (g_server->send(n->conn, m)) {
+        if (sendGated(n, m)) {
             ++sent;
             logEvent(format("%s -> %s", label.c_str(), n->name.c_str()));
             logNode(*n, "-> " + label);
@@ -1864,7 +1874,7 @@ void sendAudio(const char* action)
 // One message to one online client, logged as the others are.
 bool sendToNode(NodeRecord* n, const Message& m, const std::string& label)
 {
-    if (!n->online || !commandAllowed(n, label) || !g_server->send(n->conn, m)) return false;
+    if (!n->online || !sendGated(n, m)) return false;
     logEvent(format("%s -> %s", label.c_str(), n->name.c_str()));
     logNode(*n, "-> " + label);
     return true;
@@ -2570,7 +2580,7 @@ void runRemoteFile()
             continue;
         }
         if (!relayFor(n) && !n->ip.empty()) {
-            std::wstring path = L"\\\\" + widen(n->ip) + L"\\" + widen(g_store->settings.shareName) + L"\\" + g_batchExe;
+            std::wstring path = shareRootOf(n) + g_batchExe;
             if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
                 ++missing;
                 logEvent(format("%s not sent to %s: %s does not exist", label.c_str(), n->name.c_str(), narrow(path).c_str()));
@@ -2900,8 +2910,10 @@ void viewRemoteLogs()
     for (size_t i = 0; i < targets.size(); ++i) {
         NodeRecord* n = targets[i];
         if (n->ip.empty() && n->name.empty()) { logEvent(n->mac + " has no name or address yet; log not opened"); continue; }
+        if (!commandAllowed(n, "View Remote Log")) continue;
+        if (NodeRecord* relay = relayFor(n)) { if (!commandAllowed(relay, "View Remote Log (as relay for " + n->name + ")")) continue; }
         LogSource src;
-        if (!n->ip.empty()) src.dirs.push_back(L"\\\\" + widen(n->ip) + L"\\" + widen(g_store->settings.shareName) + L"\\");
+        src.dirs.push_back(shareRootOf(n));
         src.name = n->name;
         src.ip = n->ip;
         src.share = widen(g_store->settings.shareName);
@@ -3252,7 +3264,7 @@ void openSharedFolders()
             logEvent(format("%s: its share is SMB1, reached through relay %s; it cannot be opened from this host", n->name.c_str(), relay->name.c_str()));
             continue;
         }
-        paths->push_back("\\\\" + n->name + "\\" + g_store->settings.shareName + "\\");
+        paths->push_back(narrow(shareRootOf(n)));
         // The folder opening in Explorer is where the credentials get typed; the
         // share is checked again every few seconds for a while so that the row
         // clears as soon as they are in.
@@ -3742,10 +3754,12 @@ void copyToClients()
     for (size_t i = 0; i < nodes.size(); ++i) {
         NodeRecord* n = nodes[i];
         if (n->name.empty()) { logEvent(format("%s has no name yet; nothing copied to it", n->mac.c_str())); continue; }
+        if (!commandAllowed(n, "copy")) continue;   // writing into its share is control of the node
+        if (NodeRecord* relay = relayFor(n)) { if (!commandAllowed(relay, "copy (as relay for " + n->name + ")")) continue; }
         CopyTarget tg;
         tg.name = n->name;
         tg.shareName = widen(g_store->settings.shareName);
-        tg.share = L"\\\\" + widen(n->name) + L"\\" + tg.shareName;
+        tg.share = shareRootOf(n);
         tg.destIp = n->ip;
         if (NodeRecord* relay = relayFor(n)) {
             tg.viaRelay = true;
@@ -3804,7 +3818,13 @@ std::vector<NodeRecord*> renderHostsOnline()
 {
     std::vector<NodeRecord*> out;
     std::vector<NodeRecord*>& nodes = g_store->nodes();
-    for (size_t i = 0; i < nodes.size(); ++i) if (nodes[i]->online && isRenderHost(nodes[i])) out.push_back(nodes[i]);
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        NodeRecord* n = nodes[i];
+        if (!n->online || !isRenderHost(n)) continue;
+        if (!commandAllowed(n, "Bryce host control")) continue;   // an unverified host is not controlled
+        if (NodeRecord* relay = relayFor(n)) { if (!commandAllowed(relay, "Bryce host control (as relay for " + n->name + ")")) continue; }
+        out.push_back(n);
+    }
     return out;
 }
 
@@ -4015,7 +4035,7 @@ void renderJob()
     CopyTarget tg;
     tg.name = n->name;
     tg.shareName = widen(g_store->settings.shareName);
-    tg.share = L"\\\\" + widen(n->name) + L"\\" + tg.shareName;
+    tg.share = shareRootOf(n);
     tg.destIp = n->ip;
     tg.subdir = subdir;
     if (NodeRecord* relay = relayFor(n)) {
@@ -4069,7 +4089,7 @@ void renameChecked()
         if (!n->online) continue;          // went offline while the dialog was up
         Message m("RENAME");
         m.set("name", narrow(req.name));
-        if (commandAllowed(n, "RENAME") && g_server->send(n->conn, m)) {
+        if (sendGated(n, m)) {
             ++sent;
             n->rebootAfterRename = req.reboot;
             logEvent(format("RENAME -> %s (%s): new name %s%s", n->name.c_str(), n->mac.c_str(), narrow(req.name).c_str(),
@@ -4586,7 +4606,7 @@ INT_PTR CALLBACK intervalDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 // the agent (see Authentication). A node reached through an SMB1 relay is
 // checked by the relay's RELAY op=probe instead and paired by a push through it.
 
-struct ShareJob { std::string mac, name, ip; std::wstring share; std::string key; bool viaRelay; int relayConn; std::string relayName, relayIp; };
+struct ShareJob { std::string mac, name, ip; std::wstring share; std::string key; bool viaRelay; int relayConn; std::string relayName, relayIp; bool fresh; };
 struct ShareResult { std::string mac; bool viaRelay; bool ok; std::wstring dir; std::string error; bool credential; bool keyWritten; std::string keyError; };
 
 DWORD WINAPI shareCheckThread(LPVOID p)
@@ -4619,9 +4639,20 @@ DWORD WINAPI shareCheckThread(LPVOID p)
         if (!PostMessageW(g_main, WM_SHARE_CHECKED, 0, (LPARAM)res)) delete res;
         return 0;
     }
+    // One path only, the one the file transfers use: \\NAME\share when the name
+    // resolves to the node's address, \\IP\share otherwise (freshly cloned nodes
+    // share a name). No falling back from one to the other: a folder that opens
+    // by address but not by name would still fail every copy, which goes by name.
     std::vector<std::wstring> dirs;
-    dirs.push_back(L"\\\\" + widen(job->ip) + L"\\" + job->share + L"\\");
     if (!job->name.empty() && nameResolvesTo(job->name, job->ip)) dirs.push_back(L"\\\\" + widen(job->name) + L"\\" + job->share + L"\\");
+    else dirs.push_back(L"\\\\" + widen(job->ip) + L"\\" + job->share + L"\\");
+    if (job->fresh) {
+        // A connection left from before (a credential since removed, or Explorer's
+        // session) would answer in place of a fresh logon; it is dropped first so
+        // that the check authenticates anew with what Windows holds now.
+        std::wstring remote = dirs[0].substr(0, dirs[0].size() - 1);
+        WNetCancelConnection2W(remote.c_str(), 0, TRUE);
+    }
     std::string errors;
     for (size_t i = 0; i < dirs.size() && !res->ok; ++i) {
         WIN32_FIND_DATAW fd;
@@ -4640,6 +4671,16 @@ DWORD WINAPI shareCheckThread(LPVOID p)
     delete job;
     if (!PostMessageW(g_main, WM_SHARE_CHECKED, 0, (LPARAM)res)) delete res;
     return 0;
+}
+
+// The UNC root of a client's shared folder, ending with a backslash: the path
+// the gate verified while it stands, otherwise the name path, which is where
+// Explorer asks for the credentials. Every file operation goes through this,
+// so that what the gate checked is what the transfers use.
+std::wstring shareRootOf(const NodeRecord* n)
+{
+    if (n->shareState == 1 && !n->sharePath.empty() && n->sharePath[n->sharePath.size() - 1] == L'\\') return n->sharePath;
+    return L"\\\\" + widen(n->name.empty() ? n->ip : n->name) + L"\\" + widen(g_store->settings.shareName) + L"\\";
 }
 
 std::string shareStateText(const NodeRecord* n)
@@ -4700,12 +4741,13 @@ void startShareCheck(NodeRecord* n, const char* why)
     job->key = g_farmKey;
     job->viaRelay = false;
     job->relayConn = -1;
+    job->fresh = strcmp(why, "HELLO") == 0 || strcmp(why, "announce") == 0;   // a connecting node is checked with a fresh logon
     HANDLE t = CreateThread(NULL, 0, shareCheckThread, job, 0, NULL);
     if (!t) { delete job; n->shareNextMs = now + 60000; return; }
     CloseHandle(t);
     n->shareChecking = true;
     n->shareNextMs = now + 60000;
-    logNode(*n, format("share check (%s): \\\\%s\\%s\\", why, n->ip.c_str(), g_store->settings.shareName.c_str()));
+    logNode(*n, format("share check (%s%s) of %s's shared folder", why, job->fresh ? ", fresh logon" : "", n->name.c_str()));
 }
 
 // farm.key to a node behind an SMB1 relay, on a thread, through the relay.
@@ -4722,6 +4764,7 @@ void pairThroughRelay(NodeRecord* target, NodeRecord* relay)
     job->relayConn = relay->conn;
     job->relayName = relay->name;
     job->relayIp = relay->ip;
+    job->fresh = false;
     HANDLE t = CreateThread(NULL, 0, shareCheckThread, job, 0, NULL);
     if (!t) { delete job; return; }
     CloseHandle(t);
@@ -5004,9 +5047,10 @@ void onNet(NetEvent* e)
         } else if (cmd == "BRYCE") {
             std::string action = e->msg.get("action"), scene = e->msg.get("scene"), ver = e->msg.get("version"), path = e->msg.get("path");
             std::string what = std::string(bryceGenLabel(e->msg.getInt("gen", 3))) + (ver.empty() ? "" : " " + ver) + (path.empty() ? "" : " at " + path);
-            if (ok) text = format("BRYCE %s ok on %s: %s%s%s%s%s", action.c_str(), n->name.c_str(), what.c_str(),
+            if (ok) text = format("BRYCE %s ok on %s: %s%s%s%s%s%s", action.c_str(), n->name.c_str(), what.c_str(),
                                   e->msg.get("found").empty() ? "" : ", found through ", e->msg.get("found").c_str(),
-                                  scene.empty() ? "" : "; scene ", scene.c_str());
+                                  scene.empty() ? "" : "; scene ", scene.c_str(),
+                                  parseBool(e->msg.get("restarted")) ? " (the Bryce that was open was ended first)" : "");
             else text = format("BRYCE %s failed on %s: %s%s%s", action.c_str(), n->name.c_str(), e->msg.get("error").c_str(),
                                path.empty() ? "" : (" (" + what + ")").c_str(), "");
         } else if (cmd == "SHARE") {
@@ -5034,7 +5078,7 @@ void onNet(NetEvent* e)
                 // inside the agent's folder, otherwise it cannot be reached from here.
                 if (!inShare.empty() && exists) {
                     std::vector<std::string>* paths = new std::vector<std::string>();
-                    paths->push_back("\\\\" + n->name + "\\" + g_store->settings.shareName + "\\" + inShare + "\\");
+                    paths->push_back(narrow(shareRootOf(n)) + inShare + "\\");
                     HANDLE t = CreateThread(NULL, 0, openSharedFoldersThread, paths, 0, NULL);
                     if (t) CloseHandle(t); else delete paths;
                 } else if (!exists) {
@@ -5110,7 +5154,7 @@ void onNet(NetEvent* e)
                 }
                 if (n->rebootAfterRename) {
                     Message reboot("REBOOT");
-                    if (commandAllowed(n, "REBOOT") && g_server->send(n->conn, reboot)) {
+                    if (sendGated(n, reboot)) {
                         logEvent("REBOOT -> " + n->name + " (after rename)");
                         logNode(*n, "-> " + reboot.oneLine());
                     }

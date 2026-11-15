@@ -27,9 +27,11 @@ const char* bryceLabel(int gen);
 bool findBryce(int gen, BryceInstall& out, std::string& error);
 // Finds and starts the installed Bryce of one generation from its own folder,
 // with scene (a full path, may be empty) as its one argument, as a
-// double-click on a .br7 would. inst receives what was found even when the
-// start fails, as when a Bryce already runs.
-bool startBryce(int gen, const std::wstring& scene, BryceInstall& inst, std::string& error);
+// double-click on a .br7 would. A Bryce already running is ended first when
+// restart is set (a render job replaces whatever is open), otherwise it is an
+// error. inst receives what was found even when the start fails; restarted
+// says whether a running Bryce was ended.
+bool startBryce(int gen, const std::wstring& scene, bool restart, BryceInstall& inst, std::string& error, bool& restarted);
 // Ends the running Bryce.exe, whatever its generation.
 bool stopBryce(std::string& error);
 DWORD findBrycePid();

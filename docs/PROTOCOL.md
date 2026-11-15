@@ -305,17 +305,33 @@ authenticated: commands refused until farm.key arrives") and in the
 Authentication row of its table.
 
 **The shared-folder gate.** Thunderhead sends no command to a node whose
-shared folder it has not read, and takes nothing from it either: from 0.4.6 a
+shared folder it has not read: one gate sits in front of every message it can
+send, and in front of every operation on the node's share as well, since
+writing into the share is control of the node too: *Update Checked* (the
+agent file is staged in the share), *Copy Files or Folder to Client*, the
+render job, *View Remote Log* and the Bryce host controls; a node reached
+through an SMB1 relay needs its relay verified as well, since the relay does
+the writing. A staging or copy that happens to succeed does not open the gate;
+only the check does. Thunderhead takes nothing from such a node either: from 0.4.6 a
 REPORT from such a node keeps its session alive and is otherwise discarded,
 with one line in the event log, its live columns stay blank (what was shown
 is dropped when a check fails), and the Client details pane says that
 commands and reports are refused; the next report after the folder passes is
 taken as usual, and the event log says so. The one message outside the gate
 is SET, the report schedule, which instructs nothing. When a HELLO arrives Thunderhead
-answers it with SET and starts a worker thread that lists
-`\\<ip>\<share_name>\` (and `\\<name>\<share_name>\` when the name resolves
-to that address, because some nodes accept the host's credentials only under
-their name). While the check is pending or has failed, the row is tinted
+answers it with SET and starts a worker thread that lists the one path the
+file transfers use: `\\<name>\<share_name>\` when the name resolves to the
+node's address, `\\<ip>\<share_name>\` otherwise (freshly cloned nodes share a
+name); there is no falling back from one to the other, since a folder that
+opens by address but not by name would still fail every copy, which goes by
+name. The check made for a connecting node (its HELLO, or its announcements
+when it does not connect) first drops any connection this host still holds to
+that share, so that a credential removed from Credential Manager, or a
+session Explorer left open, cannot answer in place of a fresh logon; the
+checks that follow reuse the connection. Every file operation of Thunderhead
+(Copy Files or Folder, the render job, the agent update, the remote log, the
+executable check of Run Remote File, Open Client's Shared Folder and the
+RENDER.BIN check) goes through the path the gate verified. While the check is pending or has failed, the row is tinted
 orange, the Client details pane says so under *Shared folder*, and every
 command to the node is refused with a line in the event log ("... not sent
 to NAME: its shared folder is not readable from this host (...). Use Open
@@ -448,12 +464,15 @@ Network Render Host or reports as one, whatever the check boxes say; *Stop
 Bryce 3D* sends `action=stop`, which ends whichever Bryce.exe runs on each
 host. With no such client the status bar says so. The agent starts the
 generation's Bryce from its own folder, with the scene named in `scene=` as
-its one argument when there is one (as a double-click on a .br7 does), looks
-for Bryce's window for up to 60 s and brings it to the front as it does for
-TeamViewer; `front` brings the window to the front again. The ACK carries
-`gen=`, `path=`, `version=` and `found=` as START does for Lightning, and
-`error=` names the running file when a Bryce is already running or says that
-the generation is not installed. The event log reads "BRYCE start ok on
+its one argument when there is one (as a double-click on a .br7 does; the
+line is `"<Bryce.exe>" "<agent folder>\<scene>"`, verified by hand on the
+host), looks for Bryce's window for up to 60 s and brings it to the front as
+it does for TeamViewer; `front` brings the window to the front again. A start
+with a scene replaces whatever Bryce is open: a running Bryce is ended first
+and the ACK says `restarted=yes`; a start without a scene while a Bryce runs
+is refused with `error=` naming the running file. The ACK carries `gen=`,
+`restarted=`, `path=`, `version=` and `found=` as START does for Lightning,
+and `error=` says when the generation is not installed. The event log reads "BRYCE start ok on
 NAME: Bryce 7 & 7 Pro 7.1.0.109 at C:\...\Bryce.exe, found through ...;
 scene jobs\x\x.br7".
 

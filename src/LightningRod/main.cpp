@@ -1279,6 +1279,7 @@ private:
             // carries what was found.
             std::string action = trim(m.get("action")), scene = trim(m.get("scene")), err;
             int gen = m.getInt("gen", 3);
+            bool restarted = false;
             BryceInstall bi;
             bool ok = false;
             std::wstring scenePath;
@@ -1308,7 +1309,8 @@ private:
                                           format("\r\nstarted=%04d-%02d-%02d %02d:%02d:%02d\r\n", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
                         if (!writeTextFile(exeDirectory() + L"\\job.txt", job)) logLine("job.txt could not be written: " + lastErrorText((int)GetLastError()));
                     }
-                    ok = startBryce(gen, scenePath, bi, err);
+                    // A job replaces whatever Bryce has open: with a scene, a running Bryce is ended first.
+                    ok = startBryce(gen, scenePath, !scenePath.empty(), bi, err, restarted);
                     if (ok) { bryceWindowWanted_ = true; bryceStartMs_ = tickMs(); }
                 }
             } else if (action == "stop") {
@@ -1323,14 +1325,15 @@ private:
             if (action != "start") { std::string ignore; findBryce(gen, bi, ignore); }   // what the ACK names
             std::string where = bi.path.empty() ? std::string()
                 : format(" [%s, version %s, found through %s]", narrow(bi.path).c_str(), bi.version.empty() ? "unknown" : bi.version.c_str(), bi.found.c_str());
-            logLine(format("BRYCE %s %s%s%s: %s%s%s%s", action.c_str(), bryceLabel(gen), scene.empty() ? "" : " scene ", scene.c_str(), ok ? "ok" : "failed",
-                           err.empty() ? "" : ": ", err.c_str(), where.c_str()));
+            logLine(format("BRYCE %s %s%s%s: %s%s%s%s%s", action.c_str(), bryceLabel(gen), scene.empty() ? "" : " scene ", scene.c_str(), ok ? "ok" : "failed",
+                           restarted ? " (the running Bryce was ended first)" : "", err.empty() ? "" : ": ", err.c_str(), where.c_str()));
             Message ack("ACK");
             ack.set("cmd", m.verb);
             ack.set("ok", boolText(ok));
             ack.set("error", err);
             ack.set("action", action);
             ack.set("gen", (long long)gen);
+            ack.set("restarted", boolText(restarted));
             ack.set("scene", scene);
             ack.set("path", narrow(bi.path));
             ack.set("version", bi.version);
