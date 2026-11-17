@@ -38,21 +38,19 @@
 
 // command pane buttons
 #define IDC_CMD_FIRST           3000
-#define IDC_CMD_START71         3000
+#define IDC_CMD_RUN_LIGHTNING   3000
 #define IDC_CMD_STOP            3001
 #define IDC_CMD_PING            3002
 #define IDC_CMD_RESTART_LR      3003
 #define IDC_CMD_EXIT_LR         3004
 #define IDC_CMD_CHECK_ALL       3005
 #define IDC_CMD_CHECK_NONE      3006
-#define IDC_CMD_START63         3008
 #define IDC_CMD_SHUTDOWN_NODE   3010
 #define IDC_CMD_START_TV        3011
 #define IDC_CMD_MESSAGE         3012
 #define IDC_CMD_SOUND           3013
 #define IDC_CMD_BATCH           3014
 #define IDC_CMD_WOL             3015
-#define IDC_CMD_CHECK_OUTDATED  3016
 #define IDC_CMD_UPDATE          3017
 #define IDC_CMD_RENAME          3018
 #define IDC_CMD_OPEN_SHARE      3019
@@ -66,14 +64,24 @@
 #define IDC_CMD_MUTE            3027
 #define IDC_CMD_UNMUTE          3028
 #define IDC_CMD_REMOVE_OFFLINE  3029
-#define IDC_CMD_START50         3030
 #define IDC_CMD_SETTINGS        3031
 #define IDC_CMD_SET_RELAY       3032
 #define IDC_CMD_TOGGLE_RENDERHOST 3033
 #define IDC_CMD_BRYCE_START     3034
 #define IDC_CMD_BRYCE_STOP      3035
 #define IDC_CMD_RENDER_JOB      3036
-#define IDC_CMD_LAST            3036
+#define IDC_CMD_INVERT          3037
+#define IDC_CMD_SELECT_GROUP    3038
+#define IDC_CMD_SEL_OFFLINE     3039
+#define IDC_CMD_SEL_UNAUTH      3040
+#define IDC_CMD_SEL_OUTDATED    3041
+#define IDC_CMD_SEL_RELAY       3042
+#define IDC_CMD_SEL_HOST        3043
+#define IDC_CMD_COMMAND_FILE    3044
+#define IDC_CMD_UTILITIES       3045
+#define IDC_CMD_CONFIGURE       3046
+#define IDC_CMD_BRYCE3D         3047
+#define IDC_CMD_LAST            3047
 
 // rename dialog
 #define IDC_RENAME_INFO         2301

@@ -95,6 +95,8 @@ bool sendGated(NodeRecord* n, const Message& m)
 }
 int shadeKey(const NodeRecord* n);
 COLORREF rowShade(const NodeRecord* n, int row, COLORREF* textColor);
+enum RowTint { TintNone, TintOffline, TintUnauthenticated, TintOutdated, TintRenderHost, TintRelay };
+int rowTint(const NodeRecord* n);
 bool isRenderHost(const NodeRecord* n);
 bool clearAutoShutdownOfHost(NodeRecord* n);
 std::wstring renderHostText(const NodeRecord* n);
@@ -138,59 +140,83 @@ const ColumnDef kColumns[ColCount] = {
 
 // The buttons sit in groups that mirror the Control menu, in the same order,
 // each group on its own rows with a tint of its own on the buttons and the
-// band behind them, so that the groups read without captions.
+// band behind them, so that the groups read without captions. A command with
+// a parent is a nested one: the menu shows it in the parent's submenu, and the
+// pane shows the parent as one button that opens a pop-up window holding the
+// nested buttons (see commandPopup). Run Lightning has no nested commands; it
+// asks the generation in a radio dialog, as Start B3D does.
 struct CommandGroup { const wchar_t* name; COLORREF band; COLORREF face; };
 
 const CommandGroup kGroups[] = {
-    { L"Thunderhead Control",  RGB(230, 233, 238), RGB(204, 212, 224) },
-    { L"List Control",         RGB(228, 240, 228), RGB(196, 224, 196) },
-    { L"Node Control",         RGB(226, 234, 246), RGB(190, 212, 240) },
-    { L"LightningRod Control", RGB(246, 238, 222), RGB(238, 220, 180) },
-    { L"Audio Control",        RGB(238, 230, 244), RGB(220, 204, 236) },
-    { L"Render Control",       RGB(246, 228, 226), RGB(238, 200, 194) },
+    { L"Thunderhead Control",  RGB(196, 204, 220), RGB(170, 184, 210) },
+    { L"List Control",         RGB(184, 226, 184), RGB(150, 208, 150) },
+    { L"Node Control",         RGB(180, 206, 242), RGB(140, 180, 232) },
+    { L"LightningRod Control", RGB(242, 216, 160), RGB(234, 196, 116) },
+    { L"Comms",                RGB(220, 198, 238), RGB(200, 168, 228) },
+    { L"Render Control",       RGB(242, 192, 186), RGB(232, 160, 150) },
 };
-enum { GroupThunderhead, GroupList, GroupNode, GroupRod, GroupAudio, GroupRender, kGroupCount };
+enum { GroupThunderhead, GroupList, GroupNode, GroupRod, GroupComms, GroupRender, kGroupCount };
 
-struct CommandDef { int id; const wchar_t* label; const char* verb; bool live; int group; };
+struct CommandDef { int id; const wchar_t* label; const char* verb; bool live; int group; int parent; };
 
 const CommandDef kCommands[] = {
-    { IDC_CMD_VIEW_LOCAL_LOG,  L"View Local Log",                 NULL,      true,  GroupThunderhead },
-    { IDC_CMD_SETTINGS,        L"Settings",                       NULL,      true,  GroupThunderhead },
-    { IDC_CMD_CHECK_ALL,       L"Check All (Ctrl-A)",             NULL,      true,  GroupList },
-    { IDC_CMD_CHECK_NONE,      L"Check None (Ctrl-D)",            NULL,      true,  GroupList },
-    { IDC_CMD_CHECK_OUTDATED,  L"Check Outdated",                 NULL,      true,  GroupList },
-    { IDC_CMD_OPEN_SHARE,      L"Open Client's Shared Folder",    NULL,      true,  GroupNode },
-    { IDC_CMD_COPY,            L"Copy Files or Folder to Client", NULL,      true,  GroupNode },
-    { IDC_CMD_BATCH,           L"Run Remote File",                NULL,      true,  GroupNode },
-    { IDC_CMD_NETPING,         L"Network Ping",                   NULL,      true,  GroupNode },
-    { IDC_CMD_WOL,             L"Send Wake On LAN Magic Packet",  NULL,      true,  GroupNode },
-    { IDC_CMD_SET_TIME,        L"Set Client Date and Time",       NULL,      true,  GroupNode },
-    { IDC_CMD_START_TV,        L"Start TeamViewer",               NULL,      true,  GroupNode },
-    { IDC_CMD_RENAME,          L"Rename Node",                    NULL,      true,  GroupNode },
-    { IDC_CMD_SHUTDOWN_NODE,   L"Shutdown Node",                  NULL,      true,  GroupNode },
-    { IDC_CMD_ABORT_SHUTDOWN,  L"Abort Shutdown",                 NULL,      true,  GroupNode },
-    { IDC_CMD_UPDATE,          L"Update Checked",                 NULL,      true,  GroupRod },
-    { IDC_CMD_MESSAGE,         L"Display Message",                NULL,      true,  GroupRod },
-    { IDC_CMD_VIEW_REMOTE_LOG, L"View Remote Log",                NULL,      true,  GroupRod },
-    { IDC_CMD_PING,            L"Lightning Rod Ping",             NULL,      true,  GroupRod },
-    { IDC_CMD_REMOVE_OFFLINE,  L"Remove Checked Offline Clients", NULL,      true,  GroupRod },
-    { IDC_CMD_SET_RELAY,       L"Set Relay Address",              NULL,      true,  GroupRod },
-    { IDC_CMD_TOGGLE_RENDERHOST, L"Toggle B3D Net Render Host",   NULL,      true,  GroupRod },
-    { IDC_CMD_RESTART_LR,      L"Restart LR",                     "RESTART", true,  GroupRod },
-    { IDC_CMD_EXIT_LR,         L"Exit LR",                        "EXIT",    true,  GroupRod },
-    { IDC_CMD_MUTE,            L"Mute Checked Clients",           NULL,      true,  GroupAudio },
-    { IDC_CMD_UNMUTE,          L"Unmute Checked Clients",         NULL,      true,  GroupAudio },
-    { IDC_CMD_SOUND,           L"Play Sound",                     NULL,      true,  GroupAudio },
-    { IDC_CMD_PRIORITY,        L"Change Render Priority",         NULL,      true,  GroupRender },
-    { IDC_CMD_STOP,            L"Stop Lightning",                 "STOP",    true,  GroupRender },
-    { IDC_CMD_START71,         L"Run Lightning 3 (B7 & 7 Pro)",   NULL,      true,  GroupRender },
-    { IDC_CMD_START63,         L"Run Lightning 2 (B6.x)",         NULL,      true,  GroupRender },
-    { IDC_CMD_START50,         L"Run Lightning 1 (B5.x)",         NULL,      false, GroupRender },
-    { IDC_CMD_RENDER_JOB,      L"Render Job on Host...",          NULL,      true,  GroupRender },
-    { IDC_CMD_BRYCE_START,     L"Start Bryce 3D",                 NULL,      true,  GroupRender },
-    { IDC_CMD_BRYCE_STOP,      L"Stop Bryce 3D",                  NULL,      true,  GroupRender },
+    { IDC_CMD_VIEW_LOCAL_LOG,  L"View Local Log",                 NULL,      true,  GroupThunderhead, 0 },
+    { IDC_CMD_SETTINGS,        L"Settings",                       NULL,      true,  GroupThunderhead, 0 },
+    { IDC_CMD_CHECK_ALL,       L"Check All (Ctrl-A)",             NULL,      true,  GroupList, 0 },
+    { IDC_CMD_CHECK_NONE,      L"Check None (Ctrl-D)",            NULL,      true,  GroupList, 0 },
+    { IDC_CMD_INVERT,          L"Invert Selections",              NULL,      true,  GroupList, 0 },
+    { IDC_CMD_SELECT_GROUP,    L"Select Group",                   NULL,      true,  GroupList, 0 },
+    { IDC_CMD_SEL_OFFLINE,     L"Offline (Red)",                  NULL,      true,  GroupList, IDC_CMD_SELECT_GROUP },
+    { IDC_CMD_SEL_UNAUTH,      L"Unauthenticated (Orange)",       NULL,      true,  GroupList, IDC_CMD_SELECT_GROUP },
+    { IDC_CMD_SEL_OUTDATED,    L"Outdated LR (Yellow)",           NULL,      true,  GroupList, IDC_CMD_SELECT_GROUP },
+    { IDC_CMD_SEL_RELAY,       L"W7 Relay (SMB1><SMB2><SMB3) (Cyan)", NULL,  true,  GroupList, IDC_CMD_SELECT_GROUP },
+    { IDC_CMD_SEL_HOST,        L"Bryce 3D Net Render Host (Blue)", NULL,     true,  GroupList, IDC_CMD_SELECT_GROUP },
+    { IDC_CMD_WOL,             L"Send Wake On LAN Magic Packet",  NULL,      true,  GroupNode, 0 },
+    { IDC_CMD_SHUTDOWN_NODE,   L"Shutdown Node",                  NULL,      true,  GroupNode, 0 },
+    { IDC_CMD_ABORT_SHUTDOWN,  L"Abort Shutdown",                 NULL,      true,  GroupNode, 0 },
+    { IDC_CMD_COMMAND_FILE,    L"Command File",                   NULL,      true,  GroupNode, 0 },
+    { IDC_CMD_BATCH,           L"Run Remote File",                NULL,      true,  GroupNode, IDC_CMD_COMMAND_FILE },
+    { IDC_CMD_OPEN_SHARE,      L"Open Client's Shared Folder",    NULL,      true,  GroupNode, IDC_CMD_COMMAND_FILE },
+    { IDC_CMD_COPY,            L"Copy Files or Folder to Client", NULL,      true,  GroupNode, IDC_CMD_COMMAND_FILE },
+    { IDC_CMD_UTILITIES,       L"Utilities",                      NULL,      true,  GroupNode, 0 },
+    { IDC_CMD_NETPING,         L"Network Ping",                   NULL,      true,  GroupNode, IDC_CMD_UTILITIES },
+    { IDC_CMD_RENAME,          L"Rename Node",                    NULL,      true,  GroupNode, IDC_CMD_UTILITIES },
+    { IDC_CMD_SET_TIME,        L"Set Client Date and Time",       NULL,      true,  GroupNode, IDC_CMD_UTILITIES },
+    { IDC_CMD_START_TV,        L"Start TeamViewer",               NULL,      true,  GroupNode, IDC_CMD_UTILITIES },
+    { IDC_CMD_PING,            L"Ping LR",                        NULL,      true,  GroupRod, 0 },
+    { IDC_CMD_RESTART_LR,      L"Restart LR",                     "RESTART", true,  GroupRod, 0 },
+    { IDC_CMD_UPDATE,          L"Update LR",                      NULL,      true,  GroupRod, 0 },
+    { IDC_CMD_EXIT_LR,         L"Exit LR",                        "EXIT",    true,  GroupRod, 0 },
+    { IDC_CMD_CONFIGURE,       L"Configure Client",               NULL,      true,  GroupRod, 0 },
+    { IDC_CMD_TOGGLE_RENDERHOST, L"Bryce 3D Net Render Host Toggle", NULL,   true,  GroupRod, IDC_CMD_CONFIGURE },
+    { IDC_CMD_SET_RELAY,       L"Relay Settings",                 NULL,      true,  GroupRod, IDC_CMD_CONFIGURE },
+    { IDC_CMD_VIEW_REMOTE_LOG, L"View Remote Log",                NULL,      true,  GroupRod, IDC_CMD_CONFIGURE },
+    { IDC_CMD_REMOVE_OFFLINE,  L"Delist Offline Clients",         NULL,      true,  GroupRod, IDC_CMD_CONFIGURE },
+    { IDC_CMD_MESSAGE,         L"Display Message",                NULL,      true,  GroupComms, 0 },
+    { IDC_CMD_SOUND,           L"Play Sound",                     NULL,      true,  GroupComms, 0 },
+    { IDC_CMD_MUTE,            L"Mute Checked Clients",           NULL,      true,  GroupComms, 0 },
+    { IDC_CMD_UNMUTE,          L"Unmute Checked Clients",         NULL,      true,  GroupComms, 0 },
+    { IDC_CMD_BRYCE3D,         L"Bryce 3D",                       NULL,      true,  GroupRender, 0 },
+    { IDC_CMD_BRYCE_START,     L"Start B3D",                      NULL,      true,  GroupRender, IDC_CMD_BRYCE3D },
+    { IDC_CMD_RENDER_JOB,      L"Render Job on Host",             NULL,      true,  GroupRender, IDC_CMD_BRYCE3D },
+    { IDC_CMD_BRYCE_STOP,      L"Stop B3D",                       NULL,      true,  GroupRender, IDC_CMD_BRYCE3D },
+    { IDC_CMD_PRIORITY,        L"Change Render Priority",         NULL,      true,  GroupRender, 0 },
+    { IDC_CMD_RUN_LIGHTNING,   L"Run Lightning",                  NULL,      true,  GroupRender, 0 },
+    { IDC_CMD_STOP,            L"Stop Lightning",                 "STOP",    true,  GroupRender, 0 },
 };
 const int kCommandCount = sizeof(kCommands) / sizeof(kCommands[0]);
+
+const CommandDef* commandDef(int id)
+{
+    for (int i = 0; i < kCommandCount; ++i) if (kCommands[i].id == id) return &kCommands[i];
+    return NULL;
+}
+// Whether the command opens a pop-up of nested commands (drawn with a double border).
+bool hasNested(int id)
+{
+    for (int i = 0; i < kCommandCount; ++i) if (kCommands[i].parent == id) return true;
+    return false;
+}
 
 // ---------------------------------------------------------------- helpers
 
@@ -1049,7 +1075,9 @@ int compareVersions(const std::string& a, const std::string& b)
     return 0;
 }
 
-void checkOutdated()
+// Rereads the version of the agent file to push, which Outdated is measured
+// against, so that a Select Group of Outdated LR sees a file put there since start.
+bool refreshPushVersion()
 {
     std::wstring file = pushFilePath();
     std::string version = fileVersion(file);
@@ -1057,19 +1085,10 @@ void checkOutdated()
         MessageBoxW(g_main, (L"No agent file with a version resource at\n" + file +
                     L"\n\nPut the LightningRod.exe to push beside Thunderhead.exe, or set agent_file in settings.txt.").c_str(),
                     L"Thunderhead", MB_OK | MB_ICONWARNING);
-        return;
+        return false;
     }
     g_pushVersion = version;
-    int outdated = 0, online = 0;
-    int count = (int)SendMessageW(g_list, LVM_GETITEMCOUNT, 0, 0);
-    for (int row = 0; row < count; ++row) {
-        NodeRecord* n = nodeAt(row);
-        bool old = n && n->online && !n->updating && compareVersions(n->hello.get("agent"), version) < 0;
-        if (n && n->online) ++online;
-        if (old) ++outdated;
-        setChecked(row, old);
-    }
-    updateStatusBar(widen(format("|  %d of %d online clients are older than %s", outdated, online, version.c_str())).c_str());
+    return true;
 }
 
 // ---------------------------------------------------------------- SMB1 relay
@@ -1987,6 +2006,37 @@ void runLightning(int gen)
     m.set("gen", (long long)gen);
     if (gen == 3) sendCommandMessage(m);
     else sendVersioned(m, m.oneLine(), kLightning2Agent);
+}
+
+// Run Lightning: asks which generation with one radio per Lightning, numbered
+// as the agent numbers them (3 = Bryce 7 and 7 Pro, 2 = Bryce 6.x, 1 = Bryce
+// 5.x, the last not yet supported and disabled), then START gen= to every
+// checked online client.
+HRESULT CALLBACK lightningDialogProc(HWND dlg, UINT msg, WPARAM, LPARAM, LONG_PTR)
+{
+    if (msg == TDN_CREATED) SendMessageW(dlg, TDM_ENABLE_RADIO_BUTTON, 601, FALSE);
+    return S_OK;
+}
+
+void runLightningAsked()
+{
+    TASKDIALOG_BUTTON radios[3] = { { 603, L"3 (B7 && 7 Pro)" }, { 602, L"2 (B6.x)" }, { 601, L"1 (B5.x)" } };
+    TASKDIALOGCONFIG tc;
+    memset(&tc, 0, sizeof(tc));
+    tc.cbSize = sizeof(tc);
+    tc.hwndParent = g_main;
+    tc.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+    tc.dwCommonButtons = TDCBF_OK_BUTTON | TDCBF_CANCEL_BUTTON;
+    tc.pszWindowTitle = L"Run Lightning";
+    tc.pszMainInstruction = L"Which Lightning is to be started on the checked clients?";
+    tc.pszContent = L"The agent finds that generation's installed Lightning.exe and starts it; a generation that is not installed is reported in the event log.";
+    tc.pRadioButtons = radios;
+    tc.cRadioButtons = 3;
+    tc.nDefaultRadioButton = 603;
+    tc.pfCallback = lightningDialogProc;
+    int pressed = 0, radio = 0;
+    if (FAILED(TaskDialogIndirect(&tc, &pressed, &radio, NULL)) || pressed != IDOK) return;
+    runLightning(radio - 600);
 }
 
 // Set Client Date and Time: every checked online client gets this host's clock
@@ -3828,7 +3878,7 @@ int askBryceGeneration()
     tc.hwndParent = g_main;
     tc.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
     tc.dwCommonButtons = TDCBF_OK_BUTTON | TDCBF_CANCEL_BUTTON;
-    tc.pszWindowTitle = L"Start Bryce 3D";
+    tc.pszWindowTitle = L"Start B3D";
     tc.pszMainInstruction = L"Which Bryce 3D is to be started on the render host(s)?";
     tc.pszContent = L"The agent finds that version's installed Bryce.exe and starts it; a version that is not installed is reported in the event log.";
     tc.pRadioButtons = radios;
@@ -3868,7 +3918,7 @@ void bryceOnHosts(const char* action)
 {
     std::vector<NodeRecord*> hosts = renderHostsOnline();
     if (hosts.empty()) {
-        updateStatusBar(L"|  no online client is flagged as Bryce 3D Network Render Host (Toggle B3D Net Render Host)");
+        updateStatusBar(L"|  no online client is flagged as Bryce 3D Network Render Host (Bryce 3D Net Render Host Toggle)");
         logEvent(format("BRYCE %s: no online client is a Bryce 3D Network Render Host", action));
         return;
     }
@@ -4130,7 +4180,7 @@ void renderJob()
     RenderJobData d;
     d.hosts = renderHostsOnline();
     if (d.hosts.empty()) {
-        MessageBoxW(g_main, L"No online client is flagged as Bryce 3D Network Render Host. Check the host and use Toggle B3D Net Render Host first.",
+        MessageBoxW(g_main, L"No online client is flagged as Bryce 3D Network Render Host. Check the host and use Bryce 3D Net Render Host Toggle first.",
                     L"Render Job on Host", MB_OK | MB_ICONINFORMATION);
         return;
     }
@@ -4294,6 +4344,32 @@ void checkAll(bool on)
     int count = (int)SendMessageW(g_list, LVM_GETITEMCOUNT, 0, 0);
     for (int row = 0; row < count; ++row) setChecked(row, on);
     updateStatusBar();
+}
+
+// Invert Selections: every row's check box is flipped.
+void invertChecked()
+{
+    int count = (int)SendMessageW(g_list, LVM_GETITEMCOUNT, 0, 0);
+    for (int row = 0; row < count; ++row) setChecked(row, !isChecked(row));
+    updateStatusBar();
+}
+
+// Select Group: the check boxes are set from scratch, on for the rows painted
+// in the chosen tint and off for every other, whatever was checked before. The
+// tint is the one the row shows (rowTint, with its precedence), so the group
+// selected is the group seen: a render host that is offline is in Offline,
+// not in Bryce 3D Net Render Host.
+void selectGroup(int tint, const wchar_t* label)
+{
+    if (tint == TintOutdated && !refreshPushVersion()) return;
+    int chosen = 0;
+    int count = (int)SendMessageW(g_list, LVM_GETITEMCOUNT, 0, 0);
+    for (int row = 0; row < count; ++row) {
+        bool in = rowTint(nodeAt(row)) == tint;
+        setChecked(row, in);
+        if (in) ++chosen;
+    }
+    updateStatusBar(widen(format("|  Select Group: %d client(s) in %s", chosen, narrow(label).c_str())).c_str());
 }
 
 void setOffline(NodeRecord* n, const std::string& reason)
@@ -5468,6 +5544,8 @@ void layoutStaticPane()
 // comes from commandPaneHeight() so that every row is visible; the details
 // pane above it takes what is left.
 const int kCmdMargin = 6, kCmdBandPad = 4, kCmdGap = 4, kCmdGroupGap = 4, kCmdMinWidth = 200, kCmdHeight = 26;
+bool drawCommandButton(const DRAWITEMSTRUCT* di);
+void fillRect(HDC dc, const RECT& rc, COLORREF color);
 
 struct CommandLayout {
     RECT buttons[kCommandCount];
@@ -5494,7 +5572,7 @@ CommandLayout commandLayout(int width)
         int n = 0;
         RECT band = { kCmdMargin, y - kCmdBandPad, width - kCmdMargin, 0 };
         for (int i = 0; i < kCommandCount; ++i) {
-            if (kCommands[i].group != g) continue;
+            if (kCommands[i].group != g || kCommands[i].parent) continue;   // nested commands live in their parent's pop-up
             RECT r = { x0 + (n % cols) * (bw + kCmdGap), y + (n / cols) * (kCmdHeight + kCmdGap), 0, 0 };
             r.right = r.left + bw;
             r.bottom = r.top + kCmdHeight;
@@ -5522,6 +5600,7 @@ void layoutCommandPane()
     GetClientRect(g_commandPane, &rc);
     CommandLayout cl = commandLayout(rc.right);
     for (int i = 0; i < kCommandCount; ++i) {
+        if (kCommands[i].parent) continue;
         const RECT& r = cl.buttons[i];
         MoveWindow(GetDlgItem(g_commandPane, kCommands[i].id), r.left, r.top, r.right - r.left, r.bottom - r.top, TRUE);
     }
@@ -5551,14 +5630,123 @@ void paintCommandPaneBackground(HDC dc)
     }
 }
 
+// ---------------------------------------------------------------- nested command pop-ups
+// A parent button (Select Group, Command File, Utilities, Configure Client,
+// Bryce 3D) opens a small pop-up window under itself holding its nested
+// commands as buttons of the same colour, one per row. A click on one posts
+// the command to the main window and closes the pop-up; so does a click
+// anywhere else (the pop-up closes when it is deactivated). One pop-up at a
+// time.
+HWND g_commandPopup = NULL;
+int g_commandPopupParent = 0;
+const wchar_t* const kCommandPopupClass = L"ThunderheadCommandPopup";
+const int kPopupPad = 4;
+
+void closeCommandPopup()
+{
+    if (g_commandPopup) DestroyWindow(g_commandPopup);
+}
+
+LRESULT CALLBACK commandPopupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_COMMAND: {
+        int id = LOWORD(wp);
+        if (id >= IDC_CMD_FIRST && id <= IDC_CMD_LAST) {
+            PostMessageW(g_main, WM_COMMAND, (WPARAM)id, 0);
+            DestroyWindow(hwnd);
+        }
+        return 0;
+    }
+    case WM_ACTIVATE:
+        if (LOWORD(wp) == WA_INACTIVE) DestroyWindow(hwnd);
+        return 0;
+    case WM_CTLCOLORBTN:
+        if (HBRUSH b = themeCtlColor(msg, (HDC)wp, (HWND)lp)) return (LRESULT)b;
+        break;
+    case WM_ERASEBKGND: {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        const CommandDef* def = commandDef(g_commandPopupParent);
+        const Theme& t = theme();
+        COLORREF band = def ? mixColor(kGroups[def->group].band, t.bandMix, t.bandPct) : t.paneBack;
+        fillRect((HDC)wp, rc, band);
+        HBRUSH edge = CreateSolidBrush(mixColor(band, t.dark ? RGB(255, 255, 255) : RGB(0, 0, 0), 60));
+        FrameRect((HDC)wp, &rc, edge);
+        DeleteObject(edge);
+        return 1;
+    }
+    case WM_DRAWITEM: {
+        const DRAWITEMSTRUCT* di = (const DRAWITEMSTRUCT*)lp;
+        if (di->CtlType == ODT_BUTTON && drawCommandButton(di)) return TRUE;
+        break;
+    }
+    case WM_DESTROY:
+        g_commandPopup = NULL;
+        g_commandPopupParent = 0;
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+void openCommandPopup(int parentId)
+{
+    if (g_commandPopup && g_commandPopupParent == parentId) { closeCommandPopup(); return; }
+    closeCommandPopup();
+    HWND parentButton = GetDlgItem(g_commandPane, parentId);
+    if (!parentButton) return;
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSW wc;
+        memset(&wc, 0, sizeof(wc));
+        wc.lpfnWndProc = commandPopupProc;
+        wc.hInstance = g_inst;
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.lpszClassName = kCommandPopupClass;
+        RegisterClassW(&wc);
+        registered = true;
+    }
+    std::vector<const CommandDef*> items;
+    for (int i = 0; i < kCommandCount; ++i) if (kCommands[i].parent == parentId) items.push_back(&kCommands[i]);
+    if (items.empty()) return;
+    RECT pr;
+    GetWindowRect(parentButton, &pr);
+    int bw = pr.right - pr.left;
+    if (bw < kCmdMinWidth) bw = kCmdMinWidth;
+    int w = bw + 2 * kPopupPad, h = (int)items.size() * (kCmdHeight + kCmdGap) - kCmdGap + 2 * kPopupPad;
+    // Under the parent button, raised above it when the screen ends first.
+    HMONITOR mon = MonitorFromRect(&pr, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi;
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfoW(mon, &mi);
+    int x = pr.left, y = pr.bottom + 1;
+    if (y + h > mi.rcWork.bottom) y = pr.top - 1 - h;
+    if (x + w > mi.rcWork.right) x = mi.rcWork.right - w;
+    g_commandPopupParent = parentId;
+    g_commandPopup = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, kCommandPopupClass, L"", WS_POPUP | WS_BORDER,
+                                     x, y, w, h, g_main, NULL, g_inst, NULL);
+    if (!g_commandPopup) { g_commandPopupParent = 0; return; }
+    for (size_t i = 0; i < items.size(); ++i) {
+        HWND b = CreateWindowExW(0, L"BUTTON", items[i]->label, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                                 kPopupPad, kPopupPad + (int)i * (kCmdHeight + kCmdGap), bw, kCmdHeight,
+                                 g_commandPopup, (HMENU)(INT_PTR)items[i]->id, g_inst, NULL);
+        SendMessageW(b, WM_SETFONT, (WPARAM)g_font, TRUE);
+        EnableWindow(b, items[i]->live);
+    }
+    ShowWindow(g_commandPopup, SW_SHOWNA);
+    SetActiveWindow(g_commandPopup);
+    SetFocus(GetDlgItem(g_commandPopup, items[0]->id));
+}
+
 // An owner-drawn command button: the group's tint on the face, a darker edge
 // of the same hue, the face pressed darker and disabled paler with grey text.
 // In Dark Mode the tints are mixed towards near-black and the edge and the
-// pressed face go lighter instead.
+// pressed face go lighter instead. A button that opens a pop-up of nested
+// commands gets a second, inner frame two pixels inside the edge: the double
+// border says that more options lie behind it.
 bool drawCommandButton(const DRAWITEMSTRUCT* di)
 {
-    const CommandDef* def = NULL;
-    for (int i = 0; i < kCommandCount && !def; ++i) if (kCommands[i].id == (int)di->CtlID) def = &kCommands[i];
+    const CommandDef* def = commandDef((int)di->CtlID);
     if (!def) return false;
     const CommandGroup& g = kGroups[def->group];
     const Theme& t = theme();
@@ -5573,6 +5761,12 @@ bool drawCommandButton(const DRAWITEMSTRUCT* di)
     DeleteObject(b);
     b = CreateSolidBrush(edge);
     FrameRect(di->hDC, &rc, b);
+    bool nested = hasNested(def->id);
+    if (nested) {
+        RECT inner = rc;
+        InflateRect(&inner, -3, -3);
+        FrameRect(di->hDC, &inner, b);
+    }
     DeleteObject(b);
     wchar_t text[128];
     GetWindowTextW(di->hwndItem, text, 128);
@@ -5585,7 +5779,7 @@ bool drawCommandButton(const DRAWITEMSTRUCT* di)
     SelectObject(di->hDC, oldFont);
     if (di->itemState & ODS_FOCUS) {
         RECT fr = rc;
-        InflateRect(&fr, -3, -3);
+        InflateRect(&fr, nested ? -5 : -3, nested ? -5 : -3);
         DrawFocusRect(di->hDC, &fr);
     }
     return true;
@@ -5743,6 +5937,19 @@ int shadeKey(const NodeRecord* n)
            ((n->pingFlashUntilMs && tickMs() < n->pingFlashUntilMs) ? 16 : 0) | (isRenderHost(n) ? 32 : 0);
 }
 
+// The condition a row's tint states, strongest first; the ping flash is a
+// momentary overlay, not a condition. Select Group selects by this.
+int rowTint(const NodeRecord* n)
+{
+    if (!n) return TintNone;
+    if (!n->online) return TintOffline;
+    if (n->shareState != 1) return TintUnauthenticated;
+    if (nodeOutdated(n)) return TintOutdated;
+    if (isRenderHost(n)) return TintRenderHost;
+    if (isRelay(n)) return TintRelay;
+    return TintNone;
+}
+
 COLORREF rowShade(const NodeRecord* n, int row, COLORREF* textColor)
 {
     const Theme& t = theme();
@@ -5754,11 +5961,13 @@ COLORREF rowShade(const NodeRecord* n, int row, COLORREF* textColor)
         return RGB(128, 0, 168);   // R 50 %, G 0 %, B 66 %
     }
     int pct = t.dark ? 30 : 22;
-    if (!n->online) return mixColor(RGB(255, 0, 0), base, pct);
-    if (n->shareState != 1) return mixColor(RGB(255, 140, 0), base, pct);
-    if (nodeOutdated(n)) return mixColor(RGB(255, 220, 0), base, pct);
-    if (isRenderHost(n)) return mixColor(RGB(50, 82, 123), base, pct + 10);   // metallic blue: the Bryce 3D Network Render Host
-    if (isRelay(n)) return mixColor(RGB(64, 224, 208), base, pct);
+    switch (rowTint(n)) {
+    case TintOffline:         return mixColor(RGB(255, 0, 0), base, pct);
+    case TintUnauthenticated: return mixColor(RGB(255, 140, 0), base, pct);
+    case TintOutdated:        return mixColor(RGB(255, 220, 0), base, pct);
+    case TintRenderHost:      return mixColor(RGB(50, 82, 123), base, pct + 10);   // metallic blue: the Bryce 3D Network Render Host
+    case TintRelay:           return mixColor(RGB(64, 224, 208), base, pct);
+    }
     return base;
 }
 
@@ -6002,7 +6211,16 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         case IDC_CMD_CHECK_ALL: checkAll(true); return 0;
         case IDC_CMD_CHECK_NONE: checkAll(false); return 0;
-        case IDC_CMD_CHECK_OUTDATED: checkOutdated(); return 0;
+        case IDC_CMD_INVERT: invertChecked(); return 0;
+        case IDC_CMD_SEL_OFFLINE: selectGroup(TintOffline, L"Offline (Red)"); return 0;
+        case IDC_CMD_SEL_UNAUTH: selectGroup(TintUnauthenticated, L"Unauthenticated (Orange)"); return 0;
+        case IDC_CMD_SEL_OUTDATED: selectGroup(TintOutdated, L"Outdated LR (Yellow)"); return 0;
+        case IDC_CMD_SEL_RELAY: selectGroup(TintRelay, L"W7 Relay (Cyan)"); return 0;
+        case IDC_CMD_SEL_HOST: selectGroup(TintRenderHost, L"Bryce 3D Net Render Host (Blue)"); return 0;
+        case IDC_CMD_SELECT_GROUP: case IDC_CMD_COMMAND_FILE: case IDC_CMD_UTILITIES: case IDC_CMD_CONFIGURE: case IDC_CMD_BRYCE3D:
+            // From the menu these are submenus and never arrive; from the pane the parent button opens its pop-up.
+            openCommandPopup(id);
+            return 0;
         case IDC_CMD_UPDATE: updateChecked(); return 0;
         case IDC_CMD_RENAME: renameChecked(); return 0;
         case IDC_CMD_OPEN_SHARE: openSharedFolders(); return 0;
@@ -6015,9 +6233,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CMD_VIEW_LOCAL_LOG: viewLocalLog(); return 0;
         case IDC_CMD_VIEW_REMOTE_LOG: viewRemoteLogs(); return 0;
         case IDC_CMD_SET_TIME: setClientTime(); return 0;
-        case IDC_CMD_START71: runLightning(3); return 0;
-        case IDC_CMD_START63: runLightning(2); return 0;
-        case IDC_CMD_START50: runLightning(1); return 0;
+        case IDC_CMD_RUN_LIGHTNING: runLightningAsked(); return 0;
         case IDC_CMD_START_TV: startTeamViewer(); return 0;
         case IDC_CMD_MUTE: sendAudio("mute"); return 0;
         case IDC_CMD_UNMUTE: sendAudio("unmute"); return 0;
@@ -6220,8 +6436,9 @@ void createChildren(HINSTANCE inst)
     g_staticList = createKeyValueList(g_staticPane, IDC_STATIC_LIST);
     ShowWindow(g_staticPane, SW_HIDE);
 
-    // command pane
+    // command pane: the top-level commands; nested ones appear in their parent's pop-up
     for (int i = 0; i < kCommandCount; ++i) {
+        if (kCommands[i].parent) continue;
         HWND b = CreateWindowExW(0, L"BUTTON", kCommands[i].label, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                                  0, 0, 10, 10, g_commandPane, (HMENU)(INT_PTR)kCommands[i].id, inst, NULL);
         SendMessageW(b, WM_SETFONT, (WPARAM)g_font, TRUE);

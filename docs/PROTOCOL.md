@@ -307,7 +307,7 @@ Authentication row of its table.
 **The shared-folder gate.** Thunderhead sends no command to a node whose
 shared folder it has not read: one gate sits in front of every message it can
 send, and in front of every operation on the node's share as well, since
-writing into the share is control of the node too: *Update Checked* (the
+writing into the share is control of the node too: *Update LR* (the
 agent file is staged in the share), *Copy Files or Folder to Client*, the
 render job, *View Remote Log* and the Bryce host controls; a node reached
 through an SMB1 relay needs its relay verified as well, since the relay does
@@ -365,10 +365,16 @@ that is offline; orange for an online node whose shared folder the host has
 not read (gate closed); yellow for an online node whose agent is older than
 the agent file Thunderhead would push; metallic blue for the Bryce 3D Network
 Render Host (flag or report); turquoise for a Windows 7 client set to act as
-SMB1 relay. For one second after a node answers *Lightning Rod
-Ping* its row is painted solid blue-biased purple (R 50 %, G 0 %, B 66 %)
+SMB1 relay. For one second after a node answers *Ping LR* its row is
+painted solid blue-biased purple (R 50 %, G 0 %, B 66 %)
 with white text, so that the answer is seen beyond the Last report column
-going to 0 s. The Last report column itself is rewritten only when its text
+going to 0 s. *Select Group* (List Control) selects by these tints: the
+chosen entry, *Offline (Red)*, *Unauthenticated (Orange)*, *Outdated LR
+(Yellow)*, *W7 Relay (Cyan)* or *Bryce 3D Net Render Host (Blue)*, checks
+exactly the rows painted in that tint and clears every other check box,
+whatever was checked before; the tint a row shows is the one it is selected
+by, so an offline render host belongs to Offline. *Invert Selections* flips
+every check box. The Last report column itself is rewritten only when its text
 changes, and the list erases each visible row in its own shade rather than in
 the background color, so the per-second update no longer flashes the cell
 white; the column rules are drawn from the list's own column layout, not the
@@ -389,7 +395,7 @@ every full REPORT, and in a later REPORT when it changes, and Thunderhead
 shows it in Client details as *Net Render Host: Yes* or *No*, adding "(the
 Info Flag here says ...)" when the flag and the report disagree.
 
-*Toggle B3D Net Render Host* (LightningRod Control) flips the flag of every
+*Bryce 3D Net Render Host Toggle* (LightningRod Control, Configure Client) flips the flag of every
 checked client, saves it, and sends `RENDERHOST set=yes|no` with the new value
 to each checked online client whose agent is 0.4.2 or later (older agents are
 passed over with a line in the event log; the shared-folder gate applies as to
@@ -417,7 +423,7 @@ agent sends `render_bin` and `render_bin_exists` in HELLO and in every full
 REPORT, Client details shows them as *RENDER.BIN*, and its own window shows
 them too.
 
-When *Toggle B3D Net Render Host* switches a client on, a dialog shows that
+When *Bryce 3D Net Render Host Toggle* switches a client on, a dialog shows that
 client's RENDER.BIN as the agent reports it (or `C:\LightningRod\RENDER.BIN`
 when the agent has not reported one), to confirm or change; *Skip* leaves the
 client untouched. OK sends `RENDERHOST set=yes render_bin=<path>`: the agent
@@ -427,7 +433,7 @@ its shared folder when the folder lies inside it. Thunderhead then checks
 the folder by opening `\\node\<share_name>\<render_bin_in_share>\` in
 Windows Explorer; a folder outside the shared folder cannot be reached from
 the host and the event log says so, as it does when the folder could not be
-created. Switching a client off asks nothing. *Render Job on Host...* offers
+created. Switching a client off asks nothing. *Render Job on Host* offers
 the chosen host's RENDER.BIN as the output folder, following the host chosen
 in its list.
 
@@ -457,7 +463,7 @@ full REPORT says whether a Bryce.exe runs (`bryce=`) and its CPU share
 (`bryce_cpu_pct=`); Client details shows them as *Bryce 7 & 7 Pro*, *Bryce
 6.x*, *Bryce 5.x* and *Bryce 3D*.
 
-*Start Bryce 3D* (Render Control) first asks which Bryce, with one radio
+*Start B3D* (Render Control, Bryce 3D) first asks which Bryce, with one radio
 button per generation (Bryce 7 & 7 Pro, Bryce 6.x, Bryce 5.x), then sends
 `BRYCE action=start gen=` to every online client that is flagged as Bryce 3D
 Network Render Host or reports as one, whatever the check boxes say; *Stop
@@ -490,7 +496,7 @@ and `error=` says when the generation is not installed. The event log reads "BRY
 NAME: Bryce 7 & 7 Pro 7.1.0.109 at C:\...\Bryce.exe, found through ...;
 scene jobs\x\x.br7".
 
-*Render Job on Host...* (Render Control) is the dialog for a render: the host
+*Render Job on Host* (Render Control, Bryce 3D) is the dialog for a render: the host
 (a list of the online render hosts), the scene source, the scene file, an
 optional texture folder, the output folder on the host (its RENDER.BIN, as
 reported), the first and last frame, and which Bryce opens the scene (the
@@ -641,7 +647,7 @@ function)* at the top of Client details: *Wake On LAN*, *Boot on Alarm*, *Auto
 Login*, *Auto start Lightning Rod* and *Auto start Lightning*. They record what
 the operator knows about the node and change nothing on it. `render_host` is
 the sixth, *Bryce 3D Network Render Host (B3NDHR)*, on a row of its own; it is
-likewise only a record when ticked by hand, but *Toggle B3D Net Render Host*
+likewise only a record when ticked by hand, but *Bryce 3D Net Render Host Toggle*
 sets it and the agent's own setting together (see Bryce 3D Network Render
 Host). `boot_alarm` is
 the time of day in the picker beside *Boot on Alarm*, kept in 24-hour form and
@@ -650,11 +656,20 @@ picker shows 06:00 AM, and is likewise only stored. `auto_shutdown` is the
 *Auto Shutdown* check box column of the Client Inventory. It is only stored for
 now; the shutdown daemon that will act on it is not designed yet. A Bryce 3D
 Network Render Host is never shut down automatically: the flag is cleared the
-moment a node becomes a Render Host by any route (the Info Flag, *Toggle B3D
-Net Render Host*, the agent's own setting in HELLO or REPORT, or a nodes.txt
+moment a node becomes a Render Host by any route (the Info Flag, *Bryce 3D
+Net Render Host Toggle*, the agent's own setting in HELLO or REPORT, or a nodes.txt
 that says both when it is loaded), its Auto Shutdown cell is painted empty and
 refuses the click, and Client details shows *No (never for a Net Render
 Host)*.
+
+From 0.5.0 the Control menu and the button pane share one layout: six
+sections (Thunderhead Control, List Control, Node Control, LightningRod
+Control, Comms, Render Control), each with its commands in the order of the
+menu, and nested groups (Select Group, Command File, Utilities, Configure
+Client, Bryce 3D) that are submenus in the menu and, in the pane, one button
+of the section's colour, drawn with a double border to say that options lie
+behind it, that opens a pop-up window of the nested buttons under itself; the pop-up closes on a choice or when anything else is clicked. Run Lightning is one item and one button that asks the generation in
+a radio dialog, as Start B3D does.
 
 `logs\thunderhead-YYYY-MM-DD.log` holds every event with a timestamp.
 `logs\nodes\NAME-YYYY-MM-DD.log` holds every message to and from that node.
@@ -713,9 +728,11 @@ Windows Explorer, which is also where credentials for it get typed.
 ## Agent update
 
 Thunderhead reads the version resource of the agent file it has to push.
-*Check Outdated* checks every online client whose reported `agent` version is
-lower. *Update Checked* updates each checked online client; the client is
-shown as Updating until its new agent connects.
+*Select Group*, *Outdated LR (Yellow)* (List Control) checks every client
+whose row is painted yellow, that is online, verified and with a reported
+`agent` version lower, and nothing else. *Update LR* (LightningRod Control)
+updates each checked online client; the client is shown as Updating until its
+new agent connects.
 
 Thunderhead first copies the agent file to
 `\\<node IP>\<share_name>\LightningRod.new` while the old agent is still
@@ -781,7 +798,7 @@ The relay node must be able to open `\\ADDRESS\<share_name>\` with its own
 logon (the same local account name and password on both machines passes
 through); no credentials travel in a message.
 
-*Set Relay Address* (LightningRod Control) sets the same values from
+*Relay Settings* (LightningRod Control, Configure Client) sets the same values from
 Thunderhead: one dialog per checked online Windows 7 client, in list order,
 showing its name and address, a Relay On/Off switch with its current state and
 the destination address, which is enabled only while the switch is on. OK
@@ -795,7 +812,7 @@ log; the status bar counts dialogs, sent, skipped and passed over.
 
 The operations and their messages:
 
-* *Update Checked*: Thunderhead writes `LightningRod.new` and the `sounds`
+* *Update LR*: Thunderhead writes `LightningRod.new` and the `sounds`
   folder to `\\RELAY\<share_name>\relay\<job>\`, then sends the relay
 
 ```
@@ -993,7 +1010,7 @@ shutdown.
 
 ## Ping
 
-*Lightning Rod Ping* tells every checked client to report at once. Thunderhead sends PING
+*Ping LR* (LightningRod Control) tells every checked client to report at once. Thunderhead sends PING
 to each checked client it holds as online and writes "NAME is offline, not
 pinged" for the others. An agent from 0.2.11 answers with a REPORT that
 carries every value, not only the changed ones, and restarts its report timer
@@ -1141,11 +1158,11 @@ separator, or the device refused it. The event log reads "SOUND play ok on
 NAME: file" or "SOUND play failed on NAME: ...". Agents older than 0.2.21 do
 not know SOUND; Thunderhead skips them with a line in the event log, as for
 the other versioned commands, and a node whose agent came by an older update
-has no `sounds` folder until *Update Checked* copies it.
+has no `sounds` folder until *Update LR* copies it.
 
 ## Display Message
 
-*Display Message* (LightningRod Control) opens one dialog per checked online
+*Display Message* (Comms) opens one dialog per checked online
 client, in list order, naming the client. Its radio buttons are the 38 sound
 categories and, last, *Silent message*; the text box takes the message text,
 which may be left empty; the *Display* switch chooses *Until Dismissed* or
@@ -1222,8 +1239,10 @@ log, as for the other versioned commands.
 
 ## Lightning lookup
 
-*Run Lightning 3 (B7 & 7 Pro)*, *Run Lightning 2 (B6.x)* and *Run Lightning 1
-(B5.x)* send `START gen=3`, `gen=2` or `gen=1` to every checked online client.
+*Run Lightning* (Render Control) asks the generation with one radio per
+Lightning, *3 (B7 & 7 Pro)*, *2 (B6.x)* and *1 (B5.x)* (the last disabled until
+Bryce 5 is supported), and sends `START gen=3`, `gen=2` or `gen=1` to every
+checked online client.
 The agent does not assume a folder: it looks the installed Lightning of that
 generation up, in this order, and takes the first `Lightning.exe` that exists:
 

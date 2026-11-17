@@ -21,49 +21,67 @@ BEGIN
         BEGIN
             MENUITEM "Check All (Ctrl-A)", IDC_CMD_CHECK_ALL
             MENUITEM "Check None (Ctrl-D)", IDC_CMD_CHECK_NONE
-            MENUITEM "Check Outdated", IDC_CMD_CHECK_OUTDATED
+            MENUITEM "Invert Selections", IDC_CMD_INVERT
+            POPUP "Select Group"
+            BEGIN
+                MENUITEM "Offline (Red)", IDC_CMD_SEL_OFFLINE
+                MENUITEM "Unauthenticated (Orange)", IDC_CMD_SEL_UNAUTH
+                MENUITEM "Outdated LR (Yellow)", IDC_CMD_SEL_OUTDATED
+                MENUITEM "W7 Relay (SMB1><SMB2><SMB3) (Cyan)", IDC_CMD_SEL_RELAY
+                MENUITEM "Bryce 3D Net Render Host (Blue)", IDC_CMD_SEL_HOST
+            END
         END
         POPUP "&Node Control"
         BEGIN
-            MENUITEM "Open Client's Shared Folder", IDC_CMD_OPEN_SHARE
-            MENUITEM "Copy Files or Folder to Client", IDC_CMD_COPY
-            MENUITEM "Run Remote File", IDC_CMD_BATCH
-            MENUITEM "Network Ping", IDC_CMD_NETPING
             MENUITEM "Send Wake On LAN Magic Packet", IDC_CMD_WOL
-            MENUITEM "Set Client Date and Time", IDC_CMD_SET_TIME
-            MENUITEM "Start TeamViewer", IDC_CMD_START_TV
-            MENUITEM "Rename Node", IDC_CMD_RENAME
             MENUITEM "Shutdown Node", IDC_CMD_SHUTDOWN_NODE
             MENUITEM "Abort Shutdown", IDC_CMD_ABORT_SHUTDOWN
+            POPUP "Command File"
+            BEGIN
+                MENUITEM "Run Remote File", IDC_CMD_BATCH
+                MENUITEM "Open Client's Shared Folder", IDC_CMD_OPEN_SHARE
+                MENUITEM "Copy Files or Folder to Client", IDC_CMD_COPY
+            END
+            POPUP "Utilities"
+            BEGIN
+                MENUITEM "Network Ping", IDC_CMD_NETPING
+                MENUITEM "Rename Node", IDC_CMD_RENAME
+                MENUITEM "Set Client Date and Time", IDC_CMD_SET_TIME
+                MENUITEM "Start TeamViewer", IDC_CMD_START_TV
+            END
         END
         POPUP "Lightning&Rod Control"
         BEGIN
-            MENUITEM "Update Checked", IDC_CMD_UPDATE
-            MENUITEM "Display Message", IDC_CMD_MESSAGE
-            MENUITEM "View Remote Log", IDC_CMD_VIEW_REMOTE_LOG
-            MENUITEM "Lightning Rod Ping", IDC_CMD_PING
-            MENUITEM "Remove Checked Offline Clients", IDC_CMD_REMOVE_OFFLINE
-            MENUITEM "Set Relay Address", IDC_CMD_SET_RELAY
-            MENUITEM "Toggle B3D Net Render Host", IDC_CMD_TOGGLE_RENDERHOST
+            MENUITEM "Ping LR", IDC_CMD_PING
             MENUITEM "Restart LR", IDC_CMD_RESTART_LR
+            MENUITEM "Update LR", IDC_CMD_UPDATE
             MENUITEM "Exit LR", IDC_CMD_EXIT_LR
+            POPUP "Configure Client"
+            BEGIN
+                MENUITEM "Bryce 3D Net Render Host Toggle", IDC_CMD_TOGGLE_RENDERHOST
+                MENUITEM "Relay Settings", IDC_CMD_SET_RELAY
+                MENUITEM "View Remote Log", IDC_CMD_VIEW_REMOTE_LOG
+                MENUITEM "Delist Offline Clients", IDC_CMD_REMOVE_OFFLINE
+            END
         END
-        POPUP "&Audio Control"
+        POPUP "Co&mms"
         BEGIN
+            MENUITEM "Display Message", IDC_CMD_MESSAGE
+            MENUITEM "Play Sound", IDC_CMD_SOUND
             MENUITEM "Mute Checked Clients", IDC_CMD_MUTE
             MENUITEM "Unmute Checked Clients", IDC_CMD_UNMUTE
-            MENUITEM "Play Sound", IDC_CMD_SOUND
         END
         POPUP "Rende&r Control"
         BEGIN
+            POPUP "Bryce 3D"
+            BEGIN
+                MENUITEM "Start B3D", IDC_CMD_BRYCE_START
+                MENUITEM "Render Job on Host", IDC_CMD_RENDER_JOB
+                MENUITEM "Stop B3D", IDC_CMD_BRYCE_STOP
+            END
             MENUITEM "Change Render Priority", IDC_CMD_PRIORITY
+            MENUITEM "Run Lightning", IDC_CMD_RUN_LIGHTNING
             MENUITEM "Stop Lightning", IDC_CMD_STOP
-            MENUITEM "Run Lightning 3 (B7 && 7 Pro)", IDC_CMD_START71
-            MENUITEM "Run Lightning 2 (B6.x)", IDC_CMD_START63
-            MENUITEM "Run Lightning 1 (B5.x)", IDC_CMD_START50, GRAYED
-            MENUITEM "Render Job on Host...", IDC_CMD_RENDER_JOB
-            MENUITEM "Start Bryce 3D", IDC_CMD_BRYCE_START
-            MENUITEM "Stop Bryce 3D", IDC_CMD_BRYCE_STOP
         END
     END
     POPUP "&Help"

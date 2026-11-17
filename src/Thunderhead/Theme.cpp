@@ -70,8 +70,8 @@ void setDark(Theme& t)
     t.switchOn = RGB(0, 120, 215);
     t.switchKnob = RGB(240, 240, 240);
     t.bandMix = RGB(24, 24, 24);
-    t.bandPct = 28;
-    t.facePct = 40;
+    t.bandPct = 46;
+    t.facePct = 58;
 }
 
 std::wstring className(HWND h)
