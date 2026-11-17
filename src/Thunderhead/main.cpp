@@ -186,7 +186,7 @@ const CommandDef kCommands[] = {
     { IDC_CMD_PING,            L"Ping LR",                        NULL,      true,  GroupRod, 0 },
     { IDC_CMD_RESTART_LR,      L"Restart LR",                     "RESTART", true,  GroupRod, 0 },
     { IDC_CMD_UPDATE,          L"Update LR",                      NULL,      true,  GroupRod, 0 },
-    { IDC_CMD_EXIT_LR,         L"Exit LR",                        "EXIT",    true,  GroupRod, 0 },
+    { IDC_CMD_EXIT_LR,         L"Exit LR",                        NULL,      true,  GroupRod, 0 },   // confirmed per client by exitChecked
     { IDC_CMD_CONFIGURE,       L"Configure Client",               NULL,      true,  GroupRod, 0 },
     { IDC_CMD_TOGGLE_RENDERHOST, L"Bryce 3D Net Render Host Toggle", NULL,   true,  GroupRod, IDC_CMD_CONFIGURE },
     { IDC_CMD_SET_RELAY,       L"Relay Settings",                 NULL,      true,  GroupRod, IDC_CMD_CONFIGURE },
@@ -1591,6 +1591,54 @@ void sendCommandMessage(const Message& m)
 void sendCommand(const char* verb)
 {
     sendCommandMessage(Message(verb));
+}
+
+// Exit LR: one warning per checked online client before its EXIT, naming the
+// client and its address, since an agent that has exited cannot be reached
+// again from here. "Yes, really End LR" sends it, "Skip this Client" goes on
+// to the next, "Cancel All" (or closing the dialog) stops the round.
+void exitChecked()
+{
+    std::vector<NodeRecord*> targets = checkedNodes();
+    int online = 0;
+    for (size_t i = 0; i < targets.size(); ++i) if (targets[i]->online) ++online;
+    if (online == 0) { updateStatusBar(L"|  no online clients checked"); return; }
+    int sent = 0, skipped = 0, blocked = 0, left = online;
+    bool cancelled = false;
+    for (size_t i = 0; i < targets.size() && !cancelled; ++i) {
+        NodeRecord* n = targets[i];
+        if (!n->online) continue;
+        --left;
+        std::wstring instruction = L"End Lightning Rod on " + widen(n->name) + L" (" + widen(n->ip) + L")?";
+        std::wstring content = L"Closing Lightning Rod cannot be undone from here. " + widen(n->name) +
+                               L" will stop responding to Thunderhead: no reports, no commands, no update. "
+                               L"To regain control, Lightning Rod has to be started again at the client, through a remote desktop "
+                               L"session, or by restarting the client manually.";
+        if (left) content += widen(format("\n\n%d more checked online client(s) follow this one.", left));
+        TASKDIALOG_BUTTON buttons[3] = { { 901, L"Yes, really End LR" }, { 902, L"Skip this Client" }, { 903, L"Cancel All" } };
+        TASKDIALOGCONFIG tc;
+        memset(&tc, 0, sizeof(tc));
+        tc.cbSize = sizeof(tc);
+        tc.hwndParent = g_main;
+        tc.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+        tc.pszWindowTitle = L"Exit LR";
+        tc.pszMainIcon = TD_WARNING_ICON;
+        tc.pszMainInstruction = instruction.c_str();
+        tc.pszContent = content.c_str();
+        tc.pButtons = buttons;
+        tc.cButtons = 3;
+        tc.nDefaultButton = 902;   // Skip this Client
+        int pressed = 0;
+        if (FAILED(TaskDialogIndirect(&tc, &pressed, NULL, NULL)) || pressed == 903 || pressed == IDCANCEL) { cancelled = true; break; }
+        if (pressed != 901) { ++skipped; logEvent(format("Exit LR: %s skipped", n->name.c_str())); continue; }
+        if (!n->online) { logEvent(format("Exit LR: %s went offline before EXIT was sent", n->name.c_str())); continue; }
+        Message m("EXIT");
+        if (sendToNode(n, m, m.oneLine())) ++sent; else ++blocked;
+    }
+    std::string status = format("|  Exit LR: %d sent, %d skipped", sent, skipped);
+    if (blocked) status += format(", %d not sent (shared folder not readable)", blocked);
+    if (cancelled) status += format(", cancelled with %d not asked", left);
+    updateStatusBar(widen(status).c_str());
 }
 
 // Lightning Rod Ping: every checked client is told to report at once. An agent from 0.2.11
@@ -6234,6 +6282,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CMD_VIEW_REMOTE_LOG: viewRemoteLogs(); return 0;
         case IDC_CMD_SET_TIME: setClientTime(); return 0;
         case IDC_CMD_RUN_LIGHTNING: runLightningAsked(); return 0;
+        case IDC_CMD_EXIT_LR: exitChecked(); return 0;
         case IDC_CMD_START_TV: startTeamViewer(); return 0;
         case IDC_CMD_MUTE: sendAudio("mute"); return 0;
         case IDC_CMD_UNMUTE: sendAudio("unmute"); return 0;

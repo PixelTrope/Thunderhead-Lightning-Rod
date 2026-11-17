@@ -238,6 +238,14 @@ Thunderhead may send at any time:
 | RELAY | op, job, dest, share, pattern | SMB1 relay work for the client at `dest`, each op on a thread so that an unreachable destination never stalls the agent's reports (probe on a thread from 0.3.2): `op=probe` answers whether `\\dest\share\` opens from the node; `op=push` copies what Thunderhead staged under `relay\<job>` in the node's own share to the root of that share; `op=pull` fetches the newest file matching `pattern` from it into `relay\<job>`; reply ACK with `op=`, `job=`, `dest=`, `files=`, `bytes=` and `file=` (see SMB1 relay); agents from 0.3.0 |
 | MESSAGE | title, text, sound, timeout | open a message window on the node's screen with `title` in its caption and `text` (hexadecimal digits of its UTF-8 bytes), play `sound`, a name in the agent's `sounds` folder (none when empty), and close the window by itself after `timeout` seconds (0: when dismissed); reply ACK when opened and again when closed (see Display Message); agents from 0.3.3 |
 
+*Exit LR* (LightningRod Control) warns once per checked online client before
+its EXIT, naming the client and its address: closing Lightning Rod cannot be
+undone from Thunderhead, the client stops responding, and control returns only
+when Lightning Rod is started again at the client, through a remote desktop
+session, or by restarting the client. *Yes, really End LR* sends the EXIT,
+*Skip this Client* passes to the next checked client, *Cancel All* ends the
+round; the status bar counts sent, skipped and not asked.
+
 The agent replies to START, STOP, PRIORITY, EXIT, RESTART, UPDATE, RENAME, REBOOT,
 SHUTDOWN, POWER, AUDIO, TEAMVIEWER, SOUND, RELAYSET, RENDERHOST, BRYCE, SHARE, RELAY, MESSAGE and BATCH with (RENAME adds `name=` with the name that was applied;
 START adds `gen=`, `path=`, `version=` and `found=` as described under Lightning lookup;
