@@ -96,6 +96,7 @@ bool sendGated(NodeRecord* n, const Message& m)
 int shadeKey(const NodeRecord* n);
 COLORREF rowShade(const NodeRecord* n, int row, COLORREF* textColor);
 bool isRenderHost(const NodeRecord* n);
+bool clearAutoShutdownOfHost(NodeRecord* n);
 std::wstring renderHostText(const NodeRecord* n);
 std::wstring renderBinText(const NodeRecord* n);
 NodeRecord* nodeAt(int row);
@@ -685,7 +686,7 @@ void showStaticPane(NodeRecord* n)
     add(L"Last report", columnText(*n, ColLastReport));
     add(L"Group", widen(n->group));
     add(L"Comment", widen(n->comment));
-    add(L"Auto Shutdown", n->autoShutdown ? L"Yes" : L"No");
+    add(L"Auto Shutdown", n->autoShutdown ? L"Yes" : isRenderHost(n) ? L"No (never for a Net Render Host)" : L"No");
     add(L"Boot on Alarm time", n->bootAlarm.empty() ? std::wstring(L"not set") : bootAlarmText(n->bootAlarm));
     add(L"Agent", widen(h.get("agent")));
     add(L"Shared folder", widen(shareStateText(n)));
@@ -786,7 +787,10 @@ void flagClicked(int id)
     }
     g_store->save();
     logEvent(format("%s %s=%s", n->name.c_str(), name, boolText(on)));
-    if (id == IDC_FLAG_RENDERHOST) refreshRow(n);   // the row's tint follows the flag
+    if (id == IDC_FLAG_RENDERHOST) {
+        if (clearAutoShutdownOfHost(n)) showStaticPane(n);
+        refreshRow(n);   // the row's tint and its Auto Shutdown cell follow the flag
+    }
 }
 
 // ---------------------------------------------------------------- Bryce 3D Network Render Host (B3NDHR)
@@ -806,6 +810,21 @@ bool isRenderHost(const NodeRecord* n)
     if (n->renderHost) return true;
     const std::string& v = n->report.has("render_host") ? n->report.get("render_host") : n->hello.get("render_host");
     return parseBool(v);
+}
+
+// A Render Host is never shut down automatically: it holds RENDER.BIN and the
+// clients' frames land there until the last one. Whatever makes a node a
+// Render Host (the Info Flag, Toggle B3D Net Render Host, or the agent's own
+// setting as HELLO or REPORT brings it) clears its Auto Shutdown flag, and the
+// Auto Shutdown cell of a Render Host refuses the click (toggleAutoShutdown).
+// Returns true when the flag was set and has been cleared.
+bool clearAutoShutdownOfHost(NodeRecord* n)
+{
+    if (!n || !n->autoShutdown || !isRenderHost(n)) return false;
+    n->autoShutdown = false;
+    g_store->save();
+    logEvent(format("%s auto_shutdown=no (cleared: a Net Render Host is never shut down automatically)", n->name.c_str()));
+    return true;
 }
 
 // The RENDER.BIN folder the agent reports (REPORT first, then HELLO); empty from agents before 0.4.5.
@@ -893,7 +912,7 @@ void toggleRenderHost()
         }
         n->renderHost = !n->renderHost;
         logEvent(format("%s render_host=%s (Info Flag)%s%s", n->name.c_str(), boolText(n->renderHost), bin.empty() ? "" : ", RENDER.BIN ", narrow(bin).c_str()));
-        if (n->renderHost) ++flagged;
+        if (n->renderHost) { ++flagged; clearAutoShutdownOfHost(n); }
         if (n->online) {
             if (compareVersions(n->hello.get("agent"), kRenderHostAgent) < 0) {
                 ++old;
@@ -921,6 +940,11 @@ void toggleAutoShutdown(int row)
 {
     NodeRecord* n = nodeAt(row);
     if (!n) return;
+    if (!n->autoShutdown && isRenderHost(n)) {
+        updateStatusBar((L"|  " + widen(n->name) + L" is a Net Render Host: it is never shut down automatically").c_str());
+        logEvent(n->name + ": Auto Shutdown refused, a Net Render Host is never shut down automatically");
+        return;
+    }
     n->autoShutdown = !n->autoShutdown;
     g_store->save();
     logEvent(format("%s auto_shutdown=%s", n->name.c_str(), boolText(n->autoShutdown)));
@@ -5084,6 +5108,7 @@ void onNet(NetEvent* e)
         n->ip = e->ip;
         n->hello = e->msg;
         if (!again) n->report = Message();
+        clearAutoShutdownOfHost(n);   // the agent's own Render Host setting counts
         n->lastReportMs = now;
         if (!again) { n->nextReportMs = 0; n->nudgeDueMs = 0; }
         n->arrivalSec = utcNowMs() / 1000;   // a HELLO occupies its clock second like a report
@@ -5155,6 +5180,7 @@ void onNet(NetEvent* e)
         n->report.verb = e->msg.verb;
         for (std::map<std::string, std::string>::const_iterator it = e->msg.fields.begin(); it != e->msg.fields.end(); ++it)
             n->report.fields[it->first] = it->second;
+        if (e->msg.has("render_host")) clearAutoShutdownOfHost(n);
         n->lastReportMs = now;
         n->nextReportMs = now + (unsigned long long)g_store->settings.intervalSec * 1000;
         // Report spacing: the place of this report among those that arrived in
@@ -5758,7 +5784,7 @@ LRESULT onListCustomDraw(NMLVCUSTOMDRAW* cd)
         int row = (int)cd->nmcd.dwItemSpec;
         const NodeRecord* n = (const NodeRecord*)cd->nmcd.lItemlParam;
         drawCheckBoxCell(cd->nmcd.hdc, row, rowShade(n, row, NULL));
-        if (n) drawAutoShutdownCell(cd->nmcd.hdc, row, n->autoShutdown);
+        if (n && !isRenderHost(n)) drawAutoShutdownCell(cd->nmcd.hdc, row, n->autoShutdown);   // a Render Host has no Auto Shutdown
         RECT rc;
         rc.left = LVIR_BOUNDS;
         if (SendMessageW(g_list, LVM_GETITEMRECT, (WPARAM)row, (LPARAM)&rc)) drawColumnRules(cd->nmcd.hdc, rc.top, rc.bottom);

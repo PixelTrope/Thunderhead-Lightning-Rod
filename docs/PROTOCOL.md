@@ -648,7 +648,13 @@ the time of day in the picker beside *Boot on Alarm*, kept in 24-hour form and
 shown with AM or PM; it is empty until the picker is first changed, when the
 picker shows 06:00 AM, and is likewise only stored. `auto_shutdown` is the
 *Auto Shutdown* check box column of the Client Inventory. It is only stored for
-now; the shutdown daemon that will act on it is not designed yet.
+now; the shutdown daemon that will act on it is not designed yet. A Bryce 3D
+Network Render Host is never shut down automatically: the flag is cleared the
+moment a node becomes a Render Host by any route (the Info Flag, *Toggle B3D
+Net Render Host*, the agent's own setting in HELLO or REPORT, or a nodes.txt
+that says both when it is loaded), its Auto Shutdown cell is painted empty and
+refuses the click, and Client details shows *No (never for a Net Render
+Host)*.
 
 `logs\thunderhead-YYYY-MM-DD.log` holds every event with a timestamp.
 `logs\nodes\NAME-YYYY-MM-DD.log` holds every message to and from that node.

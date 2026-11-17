@@ -86,6 +86,10 @@ void NodeStore::load()
         else if (key == "auto_shutdown") cur->autoShutdown = parseBool(value);
         else if (key == "comment") cur->comment = value;
     }
+    // A Render Host is never shut down automatically: a nodes.txt that says
+    // both (edited by hand, or written before the rule) loses the Auto Shutdown.
+    for (size_t i = 0; i < nodes_.size(); ++i)
+        if (nodes_[i]->renderHost) nodes_[i]->autoShutdown = false;
 }
 
 void NodeStore::save()
