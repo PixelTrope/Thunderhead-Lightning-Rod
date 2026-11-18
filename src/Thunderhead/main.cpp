@@ -6019,6 +6019,27 @@ COLORREF rowShade(const NodeRecord* n, int row, COLORREF* textColor)
     return base;
 }
 
+// The part of the list's client area below its last row (or below the header
+// when the list is empty); false when there is none.
+bool blankBelowRows(RECT& rc)
+{
+    GetClientRect(g_list, &rc);
+    HWND header = listHeader();
+    if (header) {
+        RECT hr;
+        GetWindowRect(header, &hr);
+        MapWindowPoints(NULL, g_list, (POINT*)&hr, 2);
+        if (hr.bottom > rc.top) rc.top = hr.bottom;
+    }
+    int count = (int)SendMessageW(g_list, LVM_GETITEMCOUNT, 0, 0);
+    if (count > 0) {
+        RECT last;
+        last.left = LVIR_BOUNDS;
+        if (SendMessageW(g_list, LVM_GETITEMRECT, (WPARAM)(count - 1), (LPARAM)&last) && last.bottom > rc.top) rc.top = last.bottom;
+    }
+    return rc.top < rc.bottom;
+}
+
 LRESULT onListCustomDraw(NMLVCUSTOMDRAW* cd)
 {
     switch (cd->nmcd.dwDrawStage) {
@@ -6050,22 +6071,7 @@ LRESULT onListCustomDraw(NMLVCUSTOMDRAW* cd)
     case CDDS_POSTPAINT: {
         // The stretch below the last row, which no item paints.
         RECT rc;
-        GetClientRect(g_list, &rc);
-        int top = 0;
-        HWND header = listHeader();
-        if (header) {
-            RECT hr;
-            GetWindowRect(header, &hr);
-            MapWindowPoints(NULL, g_list, (POINT*)&hr, 2);
-            top = hr.bottom;
-        }
-        int count = (int)SendMessageW(g_list, LVM_GETITEMCOUNT, 0, 0);
-        if (count > 0) {
-            RECT last;
-            last.left = LVIR_BOUNDS;
-            if (SendMessageW(g_list, LVM_GETITEMRECT, (WPARAM)(count - 1), (LPARAM)&last) && last.bottom > top) top = last.bottom;
-        }
-        if (top < rc.bottom) drawColumnRules(cd->nmcd.hdc, top, rc.bottom);
+        if (blankBelowRows(rc)) drawColumnRules(cd->nmcd.hdc, rc.top, rc.bottom);
         return CDRF_DODEFAULT;
     }
     }
@@ -6365,6 +6371,20 @@ LRESULT CALLBACK listColorSubclass(HWND w, UINT msg, WPARAM wp, LPARAM lp, UINT_
 {
     if (msg == WM_CTLCOLOREDIT) {
         if (HBRUSH b = themeCtlColor(msg, (HDC)wp, (HWND)lp)) return (LRESULT)b;
+    }
+    if (msg == WM_NOTIFY) {
+        // A column width or order change: the list repaints its rows, but not
+        // the blank stretch below them, where the rules of the old column
+        // edges would otherwise stay beside the new ones.
+        const NMHDR* n = (const NMHDR*)lp;
+        if (n->hwndFrom == headerOf(w) &&
+            (n->code == HDN_ITEMCHANGEDW || n->code == HDN_ITEMCHANGEDA || n->code == HDN_ENDTRACKW || n->code == HDN_ENDTRACKA ||
+             n->code == HDN_ENDDRAG || n->code == HDN_DIVIDERDBLCLICKW || n->code == HDN_DIVIDERDBLCLICKA)) {
+            LRESULT r = DefSubclassProc(w, msg, wp, lp);
+            RECT rc;
+            if (blankBelowRows(rc)) InvalidateRect(w, &rc, TRUE);
+            return r;
+        }
     }
     if (msg == WM_ERASEBKGND) {
         // The list erased the invalid area to its background color and painted
