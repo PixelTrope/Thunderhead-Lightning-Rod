@@ -2139,8 +2139,11 @@ void shutdownChecked()
     sendPower(kActions[radio - 400]);
 }
 
-// Asks for a priority class, confirms the two that carry a cost, and sends
-// PRIORITY to every checked client, which applies it to its Lightning.exe.
+// Asks for a priority class and sends PRIORITY to every checked client, which
+// applies it to its Lightning.exe. RealTime and High carry a cost, so each
+// checked online client is confirmed on its own: "Yes, Proceed" sends it,
+// "Skip This Client" goes on to the next, "Cancel All" (or closing the
+// dialog) stops the round and leaves the clients not yet asked unchanged.
 void changeRenderPriority()
 {
     std::vector<NodeRecord*> nodes = checkedNodes();
@@ -2176,8 +2179,23 @@ void changeRenderPriority()
     const wchar_t* warning = NULL;
     if (radio == 200) warning = L"Setting priority to Realtime may cause the render client to stop responding, Lightning Rod to stop reporting, or cause issues with Windows itself.  Are you ABSOLUTELY sure you want to proceed?";
     else if (radio == 201) warning = L"Setting priority to High may cause CPU temperatures to rise. Are you sure you want to proceed?";
-    if (warning) {
-        TASKDIALOG_BUTTON buttons[2] = { { 300, L"Yes, Proceed" }, { 301, L"No, Cancel" } };
+    Message m("PRIORITY");
+    m.set("level", std::string(level));
+    if (!warning) { sendCommandMessage(m); return; }
+
+    int online = 0;
+    for (size_t i = 0; i < nodes.size(); ++i) if (nodes[i]->online) ++online;
+    if (online == 0) { updateStatusBar(L"|  no online clients checked"); return; }
+    int sent = 0, skipped = 0, blocked = 0, left = online;
+    bool cancelled = false;
+    for (size_t i = 0; i < nodes.size() && !cancelled; ++i) {
+        NodeRecord* n = nodes[i];
+        if (!n->online) continue;
+        --left;
+        std::wstring instruction = L"Set Lightning to " + labels[radio - 200] + L" on " + widen(n->name) + L" (" + widen(n->ip) + L")?";
+        std::wstring content = warning;
+        if (left) content += widen(format("\n\n%d more checked online client(s) follow this one.", left));
+        TASKDIALOG_BUTTON buttons[3] = { { 300, L"Yes, Proceed" }, { 301, L"Skip This Client" }, { 302, L"Cancel All" } };
         TASKDIALOGCONFIG cc;
         memset(&cc, 0, sizeof(cc));
         cc.cbSize = sizeof(cc);
@@ -2185,17 +2203,22 @@ void changeRenderPriority()
         cc.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
         cc.pszWindowTitle = L"Change Render Priority";
         cc.pszMainIcon = TD_WARNING_ICON;
-        cc.pszMainInstruction = L"Confirm the priority change";
-        cc.pszContent = warning;
+        cc.pszMainInstruction = instruction.c_str();
+        cc.pszContent = content.c_str();
         cc.pButtons = buttons;
-        cc.cButtons = 2;
-        cc.nDefaultButton = 301;
+        cc.cButtons = 3;
+        cc.nDefaultButton = 301;   // Skip This Client
         int answer = 0;
-        if (FAILED(TaskDialogIndirect(&cc, &answer, NULL, NULL)) || answer != 300) return;
+        if (FAILED(TaskDialogIndirect(&cc, &answer, NULL, NULL)) || answer == 302 || answer == IDCANCEL) { cancelled = true; break; }
+        if (answer != 300) { ++skipped; logEvent(format("PRIORITY %s: %s skipped", level, n->name.c_str())); continue; }
+        if (!n->online) { logEvent(format("PRIORITY %s: %s went offline before it was sent", level, n->name.c_str())); continue; }
+        if (!commandAllowed(n, m.oneLine())) { ++blocked; continue; }
+        if (sendToNode(n, m, m.oneLine())) ++sent;
     }
-    Message m("PRIORITY");
-    m.set("level", std::string(level));
-    sendCommandMessage(m);
+    std::string status = format("|  PRIORITY %s: %d sent, %d skipped", level, sent, skipped);
+    if (blocked) status += format(", %d blocked: shared folder not readable", blocked);
+    if (cancelled) status += format(", cancelled with %d not asked", left);
+    updateStatusBar(widen(status).c_str());
 }
 
 // ---------------------------------------------------------------- wake on LAN
