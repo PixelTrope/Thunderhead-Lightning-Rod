@@ -30,8 +30,9 @@ mem_free_mb=2900
 
 ## Discovery (UDP)
 
-While the agent has no TCP connection it broadcasts every 5 seconds, to
-255.255.255.255 and to the directed broadcast address of each adapter:
+While the agent has no TCP connection it broadcasts every 5 seconds to the
+directed broadcast address of each adapter it announces on (agents before
+0.5.5: of every adapter, and to 255.255.255.255 as well):
 
 ```
 ANNOUNCE
@@ -62,6 +63,37 @@ agents before 0.4.0 do, which ignore the two fields.
 
 The agent connects by TCP to the address the OFFER came from, at the port it
 names.
+
+### Networks (agents from 0.5.5)
+
+The agent reads every adapter that holds a working address (not 0.0.0.0, not
+loopback, not an APIPA 169.254 address) as soon as its start-up address check
+passes, and again whenever its Settings change them. Its Settings dialog lists
+them as a stack: a check mark per adapter says whether the agent announces on
+that sub-net, and one adapter can be marked preferred. Both are kept in
+settings.txt beside the agent (`net_preferred=` holds the adapter's GUID,
+empty for automatic; `net_off=` the GUIDs of the adapters not announced on)
+and apply at the next start as well.
+
+The preferred adapter's address and MAC are the ones the node reports in
+ANNOUNCE and HELLO, so Thunderhead identifies the node by them; changing the
+preferred adapter therefore makes the node appear as a new client in the
+inventory, and the old row goes offline. Without a preference the best
+adapter is taken: Ethernet before wireless, an adapter with a default gateway
+before one without, as agents before 0.5.5 always did.
+
+An OFFER is taken only from a host whose address lies within one of the
+announced sub-nets; any other OFFER is ignored and logged (once a minute at
+most). An OFFER from the preferred adapter's sub-net is connected to at once.
+One from another announced sub-net is held for 1.5 seconds, so that a host on
+the preferred sub-net answering the same ANNOUNCE wins; after that it is
+connected to. This is what keeps a node from reporting to a Thunderhead on a
+neighbouring sub-net while one on its own sub-net is running.
+
+When the Settings change the networks while a session is open, the agent
+sends HELLO again with the new list; when they change the preferred adapter,
+or exclude the sub-net the current host is on, the session is closed and the
+agent announces again.
 
 ## Session (TCP)
 
@@ -104,6 +136,19 @@ keyed=yes
 challenge=3a7e...the challenge token of the OFFER
 auth=7c02...64 hexadecimal digits
 ```
+
+Agents from 0.5.5 send `net_count` and `net1`, `net2`, ... one per adapter
+with a working address, each a readable line: `address/prefix, category,
+announcing|not announced, adapter description, MAC`, followed by
+`, preferred` for the adapter marked preferred in the agent's Settings and
+`, identity` for the adapter whose address and MAC the node reports (the
+preferred one when it holds an address, else the best adapter). The category
+is the Windows network profile of the connection, `Private`, `Public` or
+`Domain`, read from the Network List Manager; `n/a` on Windows XP, which has
+no network profiles, and `Unknown` where Windows reports none. Thunderhead
+shows the lines as the rows Network 1, Network 2, ... of the client details,
+and the agent's own window shows the same; the inventory list keeps showing
+only the address the node connected from. See Networks under Discovery.
 
 `mem_mb` is the physical memory the node's Windows can address, the figure
 Windows calls usable. `mem_installed_mb` is what the firmware's SMBIOS tables

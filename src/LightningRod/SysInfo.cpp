@@ -5,7 +5,9 @@
 
 #include <iphlpapi.h>
 #include <objbase.h>
+#include <netlistmgr.h>
 #include <wbemidl.h>
+#include <map>
 #include <oleauto.h>
 #include <cstdio>
 #include <cstring>
@@ -79,43 +81,93 @@ static std::vector<std::wstring> subKeys(HKEY root, const wchar_t* path)
 
 // ---------------------------------------------------------------- network
 
-struct AdapterPick {
-    std::string mac, ip;
-    std::vector<unsigned long> broadcasts;
-};
-
-static AdapterPick pickAdapter()
+int NetAdapter::prefix() const
 {
-    AdapterPick pick;
-    ULONG size = 0;
-    if (GetAdaptersInfo(NULL, &size) != ERROR_BUFFER_OVERFLOW || size == 0) return pick;
-    std::vector<BYTE> buf(size);
-    IP_ADAPTER_INFO* info = (IP_ADAPTER_INFO*)&buf[0];
-    if (GetAdaptersInfo(info, &size) != NO_ERROR) return pick;
-
-    int bestScore = -1;
-    for (IP_ADAPTER_INFO* a = info; a; a = a->Next) {
-        unsigned long ip = inet_addr(a->IpAddressList.IpAddress.String);
-        unsigned long mask = inet_addr(a->IpAddressList.IpMask.String);
-        if (ip == 0 || ip == INADDR_NONE || a->AddressLength != 6) continue;
-        pick.broadcasts.push_back(ip | ~mask);
-        int score = 0;
-        if (a->Type == MIB_IF_TYPE_ETHERNET) score = 2;
-        else if (a->Type == 71 /* IEEE 802.11 */) score = 1;
-        if (a->GatewayList.IpAddress.String[0] && strcmp(a->GatewayList.IpAddress.String, "0.0.0.0") != 0) score += 4;
-        if (score > bestScore) {
-            bestScore = score;
-            pick.mac = format("%02X-%02X-%02X-%02X-%02X-%02X", a->Address[0], a->Address[1], a->Address[2],
-                              a->Address[3], a->Address[4], a->Address[5]);
-            pick.ip = a->IpAddressList.IpAddress.String;
-        }
-    }
-    return pick;
+    unsigned long m = ntohl(maskN);
+    int bits = 0;
+    while (m & 0x80000000UL) { ++bits; m <<= 1; }
+    return bits;
 }
 
-std::vector<unsigned long> broadcastAddresses()
+// The Windows network category of each connected adapter, by adapter GUID,
+// from the Network List Manager (Vista and later). Empty on XP, where the
+// class is not registered, and when COM is not initialised on this thread.
+static std::map<std::string, std::string> networkCategories()
 {
-    return pickAdapter().broadcasts;
+    std::map<std::string, std::string> out;
+    INetworkListManager* nlm = NULL;
+    if (FAILED(CoCreateInstance(__uuidof(NetworkListManager), NULL, CLSCTX_ALL, __uuidof(INetworkListManager), (void**)&nlm)) || !nlm) return out;
+    IEnumNetworkConnections* conns = NULL;
+    if (SUCCEEDED(nlm->GetNetworkConnections(&conns)) && conns) {
+        INetworkConnection* c = NULL;
+        ULONG got = 0;
+        while (conns->Next(1, &c, &got) == S_OK && got == 1 && c) {
+            GUID adapter;
+            INetwork* net = NULL;
+            if (SUCCEEDED(c->GetAdapterId(&adapter)) && SUCCEEDED(c->GetNetwork(&net)) && net) {
+                NLM_NETWORK_CATEGORY cat;
+                if (SUCCEEDED(net->GetCategory(&cat))) {
+                    wchar_t id[64];
+                    StringFromGUID2(adapter, id, 64);
+                    out[toLower(narrow(id))] = cat == NLM_NETWORK_CATEGORY_PUBLIC ? "Public"
+                                             : cat == NLM_NETWORK_CATEGORY_PRIVATE ? "Private"
+                                             : cat == NLM_NETWORK_CATEGORY_DOMAIN_AUTHENTICATED ? "Domain" : "Unknown";
+                }
+            }
+            if (net) net->Release();
+            c->Release();
+            c = NULL;
+        }
+        conns->Release();
+    }
+    nlm->Release();
+    return out;
+}
+
+std::vector<NetAdapter> listAdapters()
+{
+    std::vector<NetAdapter> out;
+    ULONG size = 0;
+    if (GetAdaptersInfo(NULL, &size) != ERROR_BUFFER_OVERFLOW || size == 0) return out;
+    std::vector<BYTE> buf(size);
+    IP_ADAPTER_INFO* info = (IP_ADAPTER_INFO*)&buf[0];
+    if (GetAdaptersInfo(info, &size) != NO_ERROR) return out;
+    std::map<std::string, std::string> categories = networkCategories();
+    for (IP_ADAPTER_INFO* a = info; a; a = a->Next) {
+        if (a->AddressLength != 6) continue;
+        for (IP_ADDR_STRING* addr = &a->IpAddressList; addr; addr = addr->Next) {
+            unsigned long ip = inet_addr(addr->IpAddress.String);
+            unsigned long mask = inet_addr(addr->IpMask.String);
+            if (ip == 0 || ip == INADDR_NONE || mask == INADDR_NONE) continue;
+            if ((ntohl(ip) >> 24) == 127 || (ntohl(ip) >> 16) == 0xA9FE) continue;   // loopback, APIPA
+            NetAdapter n;
+            n.id = toLower(a->AdapterName);
+            n.desc = trim(std::string(a->Description));
+            n.mac = format("%02X-%02X-%02X-%02X-%02X-%02X", a->Address[0], a->Address[1], a->Address[2], a->Address[3], a->Address[4], a->Address[5]);
+            n.ip = addr->IpAddress.String;
+            n.mask = addr->IpMask.String;
+            n.ipN = ip;
+            n.maskN = mask;
+            n.gateway = a->GatewayList.IpAddress.String[0] && strcmp(a->GatewayList.IpAddress.String, "0.0.0.0") != 0;
+            n.type = a->Type == MIB_IF_TYPE_ETHERNET ? 2 : a->Type == 71 /* IEEE 802.11 */ ? 1 : 0;
+            std::map<std::string, std::string>::const_iterator it = categories.find(n.id);
+            n.category = it == categories.end() ? "n/a" : it->second;
+            out.push_back(n);
+        }
+    }
+    return out;
+}
+
+const NetAdapter* pickAdapter(const std::vector<NetAdapter>& nets, const std::string& preferredId)
+{
+    const NetAdapter* best = NULL;
+    int bestScore = -1;
+    for (size_t i = 0; i < nets.size(); ++i) {
+        if (!preferredId.empty() && nets[i].id == preferredId) return &nets[i];
+        int score = nets[i].type + (nets[i].gateway ? 4 : 0);
+        if (score > bestScore) { bestScore = score; best = &nets[i]; }
+    }
+    return best;
 }
 
 // ---------------------------------------------------------------- OS and CPU
@@ -381,17 +433,29 @@ static void displayAdapter(std::string& gpu, int& vramMb)
 
 // ---------------------------------------------------------------- collection
 
-void collectAddress(StaticInfo& s)
+void collectAddress(StaticInfo& s, const std::string& preferredId, std::vector<NetAdapter>& nets)
 {
-    AdapterPick a = pickAdapter();
-    s.mac = a.mac;
-    s.ip = a.ip;
+    nets = listAdapters();
+    const NetAdapter* a = pickAdapter(nets, preferredId);
+    s.mac = a ? a->mac : std::string();
+    s.ip = a ? a->ip : std::string();
+    if (!a) {
+        // No working address: the first adapter's reading, for the start-up wait's message.
+        ULONG size = 0;
+        if (GetAdaptersInfo(NULL, &size) == ERROR_BUFFER_OVERFLOW && size) {
+            std::vector<BYTE> buf(size);
+            IP_ADAPTER_INFO* info = (IP_ADAPTER_INFO*)&buf[0];
+            if (GetAdaptersInfo(info, &size) == NO_ERROR)
+                for (IP_ADAPTER_INFO* x = info; x; x = x->Next)
+                    if (x->AddressLength == 6) { s.ip = x->IpAddressList.IpAddress.String; break; }
+        }
+    }
 }
 
-StaticInfo collectStatic()
+StaticInfo collectStatic(const std::string& preferredId, std::vector<NetAdapter>& nets)
 {
     StaticInfo s;
-    collectAddress(s);
+    collectAddress(s, preferredId, nets);
 
     wchar_t name[MAX_COMPUTERNAME_LENGTH + 1];
     DWORD len = MAX_COMPUTERNAME_LENGTH + 1;

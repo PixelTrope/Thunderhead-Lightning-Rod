@@ -18,3 +18,6 @@
 #define IDC_RENDERBIN_LABEL     2007  // "RENDER.BIN folder"
 #define IDC_RENDERBIN_PATH      2008  // where the host writes the frames
 #define IDC_RENDERBIN_NOTE      2009  // exists / is created note
+#define IDC_NET_INFO            2010  // the networks explanation
+#define IDC_NET_LIST            2011  // every adapter with a working address; checked = announced on
+#define IDC_NET_PREFERRED       2012  // the preferred adapter (combo box; first entry = automatic)

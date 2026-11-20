@@ -95,6 +95,15 @@ std::string g_relayIp;
 bool g_renderHost = false;       // Bryce 3D Network Render Host (B3NDHR) mode: render_host= in settings.txt, reported in HELLO and REPORT
 std::wstring g_renderBin;        // RENDER.BIN, the folder the host writes the frames to: render_bin= in settings.txt; empty = <this folder>\RENDER.BIN
 volatile long g_rehello = 0;     // set by the window thread: send HELLO again with the new values
+// The network stack of the Settings dialog: every adapter with a working
+// address, which sub-nets the agent announces on, and the preferred adapter,
+// whose address and MAC identify the node and whose sub-net's host is chosen
+// first. net_preferred= holds that adapter's GUID (empty: the best adapter by
+// type and gateway), net_off= the GUIDs of the adapters not announced on.
+std::string g_netPreferred;
+std::vector<std::string> g_netOff;
+volatile long g_renet = 0;       // set by the window thread: the network settings changed
+const unsigned long long kOfferHoldMs = 1500;   // an OFFER from another announced sub-net waits this long for one from the preferred sub-net
 
 std::wstring settingsFile() { return exeDirectory() + L"\\settings.txt"; }
 std::wstring relayDir() { return exeDirectory() + L"\\relay"; }   // staging folders of RELAY jobs, relay\<job>
@@ -110,15 +119,72 @@ void loadSettings()
         else if (key == "relay_ip") g_relayIp = value;
         else if (key == "render_host") g_renderHost = parseBool(value);
         else if (key == "render_bin") g_renderBin = widen(value);
+        else if (key == "net_preferred") g_netPreferred = toLower(value);
+        else if (key == "net_off") {
+            std::vector<std::string> ids = split(value, ',');
+            for (size_t k = 0; k < ids.size(); ++k) if (!trim(ids[k]).empty()) g_netOff.push_back(toLower(trim(ids[k])));
+        }
     }
     if (g_relayIp.empty()) g_relay = false;
+}
+
+std::string joinIds(const std::vector<std::string>& ids)
+{
+    std::string out;
+    for (size_t i = 0; i < ids.size(); ++i) out += (i ? "," : "") + ids[i];
+    return out;
 }
 
 void saveSettings()
 {
     std::string text = std::string("relay=") + boolText(g_relay) + "\r\nrelay_ip=" + g_relayIp + "\r\n" +
-                       "render_host=" + boolText(g_renderHost) + "\r\n" + "render_bin=" + narrow(g_renderBin) + "\r\n";
+                       "render_host=" + boolText(g_renderHost) + "\r\n" + "render_bin=" + narrow(g_renderBin) + "\r\n" +
+                       "net_preferred=" + g_netPreferred + "\r\n" + "net_off=" + joinIds(g_netOff) + "\r\n";
     if (!writeTextFile(settingsFile(), text)) logLine("settings.txt could not be written: " + lastErrorText((int)GetLastError()));
+}
+
+void netSnapshot(std::string& preferred, std::vector<std::string>& off)
+{
+    EnterCriticalSection(&g_settingsLock);
+    preferred = g_netPreferred;
+    off = g_netOff;
+    LeaveCriticalSection(&g_settingsLock);
+}
+
+bool netIsOff(const std::vector<std::string>& off, const std::string& id)
+{
+    for (size_t i = 0; i < off.size(); ++i) if (off[i] == id) return true;
+    return false;
+}
+
+// The Settings dialog's network values: saved, and the agent thread told to
+// re-read the adapters, announce again where needed and send HELLO again.
+void applyNetSettings(const std::string& preferred, const std::vector<std::string>& off)
+{
+    EnterCriticalSection(&g_settingsLock);
+    bool changed = preferred != g_netPreferred || off != g_netOff;
+    g_netPreferred = preferred;
+    g_netOff = off;
+    if (changed) saveSettings();
+    LeaveCriticalSection(&g_settingsLock);
+    if (changed) {
+        logLine("network settings changed: preferred adapter " + (preferred.empty() ? std::string("automatic") : preferred) +
+                ", not announced on " + (off.empty() ? std::string("none") : joinIds(off)));
+        InterlockedExchange(&g_renet, 1);
+    }
+}
+
+// One adapter as the Details windows of both programs show it and as HELLO
+// carries it: address/prefix, Windows network category, whether the agent
+// announces on it, the adapter's description and MAC, and which of them is
+// the preferred one and the identity (the address and MAC the node reports).
+std::string netText(const NetAdapter& n, const std::string& identityIp, const std::string& preferred, const std::vector<std::string>& off)
+{
+    std::string s = format("%s/%d, %s, %s, %s, %s", n.ip.c_str(), n.prefix(), n.category.c_str(),
+                           netIsOff(off, n.id) ? "not announced" : "announcing", n.desc.c_str(), n.mac.c_str());
+    if (n.id == preferred) s += ", preferred";
+    if (n.ip == identityIp) s += ", identity";
+    return s;
 }
 
 void relaySnapshot(bool& relay, std::string& ip)
@@ -459,6 +525,7 @@ struct AgentStatus {
     SYSTEMTIME lastReportTime;
     bool haveReport;
     StaticInfo info;
+    std::vector<NetAdapter> nets;    // every adapter with a working address, as last read
     Message report;
     AgentStatus() : connected(false), waitingIp(false), ipTry(0), keyed(false), hostAuthenticated(false), intervalSec(kDefaultReportInterval), haveReport(false) { memset(&lastReportTime, 0, sizeof(lastReportTime)); }
 };
@@ -854,18 +921,23 @@ public:
         lastRejectLogMs_ = 0;
         bryceWindowWanted_ = false;
         bryceStartMs_ = 0;
+        hostAddrN_ = 0;
         InitializeCriticalSection(&lock_);
     }
     ~Agent() { DeleteCriticalSection(&lock_); }
 
     bool init()
     {
-        info_ = collectStatic();
         // The installed Lightning of each generation goes into HELLO, so that
         // Thunderhead shows where Run Lightning would land. IShellLink, for the
-        // Start menu fallback, wants COM on this thread.
+        // Start menu fallback, wants COM on this thread, as does the Network
+        // List Manager that names each adapter's network category.
         {
             HRESULT co = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+            std::string pref;
+            std::vector<std::string> off;
+            netSnapshot(pref, off);
+            info_ = collectStatic(pref, nets_);
             const int gens[] = { 3, 2 };
             for (int g = 0; g < 2; ++g) {
                 LightningInstall li;
@@ -897,11 +969,13 @@ public:
             if (SUCCEEDED(co)) CoUninitialize();
         }
         status_.info = info_;
+        status_.nets = nets_;
         loadKey();
         logLine(format("Lightning Rod %s starting: %s mac=%s ip=%s, SMB1 relay %s, farm.key %s, render host %s", TLR_VERSION_STRING,
                        info_.name.c_str(), info_.mac.c_str(), info_.ip.c_str(), relayText().c_str(),
                        key_.empty() ? "absent (Thunderhead writes it into this folder through the share)" : "present",
                        renderHostSetting() ? "on" : "off"));
+        logNetworks();
         logLine(format("os=%s cpu=%s %d MHz cores=%d mem=%d MB usable, %d MB installed, type %s disk=%d MB board=%s chipset=%s gpu=%s vram=%d MB",
                        info_.os.c_str(), info_.cpu.c_str(), info_.cpuMhz, info_.cores, info_.memMb, info_.memInstalledMb,
                        info_.memType.empty() ? "n/a" : info_.memType.c_str(), info_.diskTotalMb,
@@ -922,6 +996,7 @@ public:
     void run()
     {
         if (!acquireAddress()) return;   // the window thread shows the error and relaunches
+        logNetworks();
         for (;;) {
             if (tcp_ == INVALID_SOCKET) announcePhase();
             else sessionPhase();
@@ -939,6 +1014,48 @@ private:
     void notify()
     {
         if (g_window) PostMessageW(g_window, WM_AGENT_UPDATE, 0, 0);
+    }
+
+    // ---- networks --------------------------------------------------------
+    // Re-reads the adapters and the identity address under the Settings in
+    // force. COM is needed for the network categories; the agent thread holds
+    // none between calls.
+    void rereadNetworks()
+    {
+        std::string pref;
+        std::vector<std::string> off;
+        netSnapshot(pref, off);
+        HRESULT co = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+        collectAddress(info_, pref, nets_);
+        if (SUCCEEDED(co)) CoUninitialize();
+        EnterCriticalSection(&lock_);
+        status_.info = info_;
+        status_.nets = nets_;
+        LeaveCriticalSection(&lock_);
+        notify();
+    }
+
+    void logNetworks()
+    {
+        std::string pref;
+        std::vector<std::string> off;
+        netSnapshot(pref, off);
+        if (nets_.empty()) { logLine("networks: no adapter holds a working address"); return; }
+        for (size_t i = 0; i < nets_.size(); ++i) logLine(format("network %u: ", (unsigned)i + 1) + netText(nets_[i], info_.ip, pref, off));
+        const NetAdapter* p = pickAdapter(nets_, pref);
+        if (!pref.empty() && p && p->id != pref)
+            logLine("the preferred adapter " + pref + " holds no working address; the best adapter identifies the node instead");
+    }
+
+    // The announced adapter whose sub-net holds the address; NULL when none does.
+    const NetAdapter* announcedSubnetOf(unsigned long addrN) const
+    {
+        std::string pref;
+        std::vector<std::string> off;
+        netSnapshot(pref, off);
+        for (size_t i = 0; i < nets_.size(); ++i)
+            if (!netIsOff(off, nets_[i].id) && nets_[i].sameSubnet(addrN)) return &nets_[i];
+        return NULL;
     }
 
     // ---- address ---------------------------------------------------------
@@ -979,7 +1096,7 @@ private:
             LeaveCriticalSection(&lock_);
             notify();
             Sleep(kIpWaitMs);
-            collectAddress(info_);
+            rereadNetworks();
         }
         if (tries == 0) return true;
         logLine(format("valid IP address %s (mac %s) after %d re-read(s)", info_.ip.c_str(), info_.mac.c_str(), tries));
@@ -1044,8 +1161,15 @@ private:
         announceChallenge_ = randomHex(kChallengeBytes);
         m.set("challenge", announceChallenge_);
         std::string wire = m.encode();
-        std::vector<unsigned long> targets = broadcastAddresses();
-        targets.push_back(INADDR_BROADCAST);
+        // The directed broadcast of every announced sub-net; the limited
+        // broadcast only when no adapter is announced on, so that the node can
+        // still be found.
+        std::string pref;
+        std::vector<std::string> off;
+        netSnapshot(pref, off);
+        std::vector<unsigned long> targets;
+        for (size_t i = 0; i < nets_.size(); ++i) if (!netIsOff(off, nets_[i].id)) targets.push_back(nets_[i].broadcast());
+        if (targets.empty()) targets.push_back(INADDR_BROADCAST);
         for (size_t i = 0; i < targets.size(); ++i) {
             sockaddr_in to;
             memset(&to, 0, sizeof(to));
@@ -1056,13 +1180,34 @@ private:
         }
     }
 
+    // An OFFER is taken from a host on an announced sub-net only. One from the
+    // preferred adapter's sub-net (the identity address) is connected to at
+    // once; one from another announced sub-net is held for kOfferHoldMs so that
+    // a host on the preferred sub-net, answering the same ANNOUNCE, wins.
     void announcePhase()
     {
         unsigned long long nextAnnounce = 0;
         bool logged = false;
+        bool havePending = false;
+        Message pending;
+        sockaddr_in pendingFrom;
+        memset(&pendingFrom, 0, sizeof(pendingFrom));
+        unsigned long long pendingSinceMs = 0;
+        std::string pendingVia;
         while (tcp_ == INVALID_SOCKET) {
             unsigned long long now = tickMs();
             pollKey();
+            if (InterlockedExchange(&g_renet, 0)) {
+                rereadNetworks();
+                logNetworks();
+                havePending = false;
+                nextAnnounce = 0;
+            }
+            if (havePending && now - pendingSinceMs >= kOfferHoldMs) {
+                havePending = false;
+                connectOffer(pending, pendingFrom, "sub-net of " + pendingVia + ", no OFFER from the preferred sub-net within " + format("%u", (unsigned)kOfferHoldMs) + " ms");
+                continue;
+            }
             if (now >= nextAnnounce) {
                 sendAnnounce();
                 nextAnnounce = now + (unsigned long long)kAnnounceIntervalSec * 1000;
@@ -1083,15 +1228,20 @@ private:
                 Message m;
                 if (!parseMessage(std::string(buf, (size_t)n), m) || m.verb != "OFFER") continue;
                 int port = m.getInt("port", kDefaultTcpPort);
-                sockaddr_in host = from;
-                host.sin_port = htons((unsigned short)port);
+                const NetAdapter* via = announcedSubnetOf(from.sin_addr.s_addr);
+                if (!via) {
+                    if (now - lastRejectLogMs_ > 60000) {
+                        lastRejectLogMs_ = now;
+                        logLine(format("OFFER from %s (%s) port %d ignored: not on an announced sub-net", ipText(from).c_str(), m.get("host").c_str(), port));
+                    }
+                    continue;
+                }
                 // A held key must be proved by the OFFER: auth= over the challenge token of this
                 // agent's ANNOUNCE. An OFFER that fails is ignored; the file is re-read
                 // in case the key was replaced on disk.
-                bool proved = false;
                 if (!key_.empty()) {
-                    proved = m.has("auth") && !announceChallenge_.empty() &&
-                             equalsConstantTime(m.get("auth"), offerAuth(key_, announceChallenge_, m.get("host"), format("%d", port)));
+                    bool proved = m.has("auth") && !announceChallenge_.empty() &&
+                                  equalsConstantTime(m.get("auth"), offerAuth(key_, announceChallenge_, m.get("host"), format("%d", port)));
                     if (!proved) {
                         if (now - lastRejectLogMs_ > 60000) {
                             lastRejectLogMs_ = now;
@@ -1102,33 +1252,52 @@ private:
                         continue;
                     }
                 }
-                hostAuthenticated_ = proved;
-                offerChallenge_ = m.has("challenge") ? m.get("challenge") : m.get("nonce");   // nonce= from a 0.4.0 host
-                logLine(format("OFFER from %s (%s) port %d%s", ipText(from).c_str(), m.get("host").c_str(), port,
-                               proved ? ", host authenticated" : ", unauthenticated: no farm.key here yet"));
-                SOCKET s = connectWithTimeout(host, 3000);
-                if (s == INVALID_SOCKET) { logLine("connect failed"); continue; }
-                tcp_ = s;
-                parser_.clear();
-                sent_ = Message();
-                if (!sendHello()) { dropSession("hello send failed"); continue; }
-                std::string hostIp = ipText(from);
-                logLine(format("connected to Thunderhead at %s:%d", hostIp.c_str(), port));
-                EnterCriticalSection(&lock_);
-                status_.connected = true;
-                status_.hostName = m.get("host");
-                status_.hostIp = hostIp;
-                status_.hostMac = macOf(hostIp, info_);
-                status_.hostAuthenticated = hostAuthenticated_;
-                status_.haveReport = false;
-                status_.report = Message();
-                LeaveCriticalSection(&lock_);
-                notify();
-                nextReport_ = tickMs() + (unsigned long long)intervalSec_ * 1000;
-                cpu_.sample();
-                lightning_.query();
+                if (via->ip == info_.ip) {
+                    havePending = false;
+                    connectOffer(m, from, "preferred sub-net");
+                } else if (!havePending) {
+                    havePending = true;
+                    pending = m;
+                    pendingFrom = from;
+                    pendingSinceMs = now;
+                    pendingVia = via->desc;
+                }
             }
         }
+    }
+
+    // Connects to the host an acceptable OFFER came from and sends HELLO.
+    void connectOffer(const Message& m, const sockaddr_in& from, const std::string& why)
+    {
+        int port = m.getInt("port", kDefaultTcpPort);
+        sockaddr_in host = from;
+        host.sin_port = htons((unsigned short)port);
+        hostAuthenticated_ = !key_.empty();   // an OFFER reaches here only when it proved a held key
+        offerChallenge_ = m.has("challenge") ? m.get("challenge") : m.get("nonce");   // nonce= from a 0.4.0 host
+        logLine(format("OFFER from %s (%s) port %d%s, %s", ipText(from).c_str(), m.get("host").c_str(), port,
+                       hostAuthenticated_ ? ", host authenticated" : ", unauthenticated: no farm.key here yet", why.c_str()));
+        SOCKET s = connectWithTimeout(host, 3000);
+        if (s == INVALID_SOCKET) { logLine("connect failed"); return; }
+        tcp_ = s;
+        hostAddrN_ = from.sin_addr.s_addr;
+        parser_.clear();
+        sent_ = Message();
+        if (!sendHello()) { dropSession("hello send failed"); return; }
+        std::string hostIp = ipText(from);
+        logLine(format("connected to Thunderhead at %s:%d", hostIp.c_str(), port));
+        EnterCriticalSection(&lock_);
+        status_.connected = true;
+        status_.hostName = m.get("host");
+        status_.hostIp = hostIp;
+        status_.hostMac = macOf(hostIp, info_);
+        status_.hostAuthenticated = hostAuthenticated_;
+        status_.haveReport = false;
+        status_.report = Message();
+        LeaveCriticalSection(&lock_);
+        notify();
+        nextReport_ = tickMs() + (unsigned long long)intervalSec_ * 1000;
+        cpu_.sample();
+        lightning_.query();
     }
 
     // ---- session ---------------------------------------------------------
@@ -1174,6 +1343,13 @@ private:
         m.set("render_host", boolText(renderHostSetting()));
         m.set("render_bin", narrow(renderBinSetting()));
         m.set("render_bin_exists", boolText(renderBinExists()));
+        {
+            std::string pref;
+            std::vector<std::string> off;
+            netSnapshot(pref, off);
+            m.set("net_count", (long long)nets_.size());
+            for (size_t i = 0; i < nets_.size(); ++i) m.set(format("net%u", (unsigned)i + 1), netText(nets_[i], info_.ip, pref, off));
+        }
         m.set("keyed", boolText(!key_.empty()));
         if (!key_.empty() && !offerChallenge_.empty()) {
             m.set("challenge", offerChallenge_);
@@ -1997,6 +2173,19 @@ private:
                 if (!sendHello()) { dropSession("hello send failed"); return; }
                 logLine("HELLO sent again: SMB1 relay " + relayText());
             }
+            if (InterlockedExchange(&g_renet, 0)) {
+                // A new identity adapter changes the address and MAC the node reports,
+                // and a host outside the announced sub-nets is no longer wanted: either
+                // way the session ends and the node announces again. Otherwise the new
+                // network list goes out in a fresh HELLO.
+                std::string oldIp = info_.ip;
+                rereadNetworks();
+                logNetworks();
+                if (info_.ip != oldIp) { dropSession("network settings changed the identity adapter; announcing again"); return; }
+                if (!announcedSubnetOf(hostAddrN_)) { dropSession("network settings exclude the host's sub-net; announcing again"); return; }
+                if (!sendHello()) { dropSession("hello send failed"); return; }
+                logLine("HELLO sent again: network settings changed");
+            }
             if (pollKey()) {
                 // This session began without a key, so the host was never proved;
                 // the next OFFER has to prove it.
@@ -2040,6 +2229,8 @@ private:
 
     SOCKET udp_, tcp_;
     StaticInfo info_;
+    std::vector<NetAdapter> nets_;        // every adapter with a working address, as last read
+    unsigned long hostAddrN_;             // the host's address (network order) of the current session
     CpuTracker cpu_;
     LightningMonitor lightning_;
     BryceMonitor bryce_;
@@ -2109,6 +2300,13 @@ void setRow(int row, const wchar_t* item, const std::wstring& value)
         it.iItem = row;
         it.pszText = (LPWSTR)item;
         SendMessageW(g_list, LVM_INSERTITEMW, 0, (LPARAM)&it);
+    } else {
+        // The label as well: the network rows shift the rows below them when
+        // an adapter comes or goes.
+        memset(&it, 0, sizeof(it));
+        it.iSubItem = 0;
+        it.pszText = (LPWSTR)item;
+        SendMessageW(g_list, LVM_SETITEMTEXTW, (WPARAM)row, (LPARAM)&it);
     }
     memset(&it, 0, sizeof(it));
     it.iSubItem = 1;
@@ -2169,6 +2367,16 @@ void refreshAll()
     setRow(row++, L"Name",                widen(i.name));
     setRow(row++, L"IP",                  widen(i.ip));
     setRow(row++, L"MAC",                 widen(i.mac));
+    {
+        std::string pref;
+        std::vector<std::string> off;
+        netSnapshot(pref, off);
+        if (s.nets.empty()) setRow(row++, L"Networks", L"no adapter holds a working address");
+        for (size_t k = 0; k < s.nets.size(); ++k) {
+            std::wstring label = widen(format("Network %u", (unsigned)k + 1));
+            setRow(row++, label.c_str(), widen(netText(s.nets[k], i.ip, pref, off)));
+        }
+    }
     setRow(row++, L"Agent",               TLR_VERSION_WSTRING);
     setRow(row++, L"OS",                  widen(i.os));
     setRow(row++, L"CPU",                 widen(i.cpu));
@@ -2195,6 +2403,7 @@ void refreshAll()
     setRow(row++, L"RENDER.BIN",          renderBinSetting() + (renderBinExists() ? L"  (exists)" : L"  (missing; created when this node is the host)"));
     setRow(row++, L"Authentication",      s.keyed ? L"farm.key present: only a host that proves it is obeyed"
                                                   : L"no farm.key in " + exeDirectory() + L": Thunderhead writes it through the shared folder; commands are refused until then");
+    while ((int)SendMessageW(g_list, LVM_GETITEMCOUNT, 0, 0) > row) SendMessageW(g_list, LVM_DELETEITEM, (WPARAM)row, 0);
     refreshClock();
 }
 
@@ -2221,6 +2430,79 @@ void layout(HWND hwnd)
 // the track metallic blue when on. The value edited sits in g_dlgRenderHost
 // until OK applies it.
 bool g_dlgRenderHost = false;
+std::vector<NetAdapter> g_dlgNets;   // the adapters the Settings dialog lists, in list order
+
+void fillNetworkControls(HWND dlg)
+{
+    HWND list = GetDlgItem(dlg, IDC_NET_LIST);
+    HWND combo = GetDlgItem(dlg, IDC_NET_PREFERRED);
+    AgentStatus s;
+    g_agent->snapshot(s);
+    g_dlgNets = s.nets;
+    std::string pref;
+    std::vector<std::string> off;
+    netSnapshot(pref, off);
+    SendMessageW(list, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_CHECKBOXES);
+    const wchar_t* titles[3] = { L"Announce on (adapter)", L"Address", L"Network" };
+    const int widths[3] = { 230, 110, 60 };
+    for (int c = 0; c < 3; ++c) {
+        LVCOLUMNW col;
+        memset(&col, 0, sizeof(col));
+        col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+        col.pszText = (LPWSTR)titles[c];
+        col.cx = widths[c];
+        col.iSubItem = c;
+        SendMessageW(list, LVM_INSERTCOLUMNW, (WPARAM)c, (LPARAM)&col);
+    }
+    SendMessageW(combo, CB_ADDSTRING, 0, (LPARAM)L"Automatic: the best adapter (Ethernet with a gateway first)");
+    int selected = 0;
+    for (size_t k = 0; k < g_dlgNets.size(); ++k) {
+        const NetAdapter& n = g_dlgNets[k];
+        std::wstring desc = widen(n.desc), addr = widen(format("%s/%d", n.ip.c_str(), n.prefix())), cat = widen(n.category);
+        LVITEMW it;
+        memset(&it, 0, sizeof(it));
+        it.mask = LVIF_TEXT;
+        it.iItem = (int)k;
+        it.pszText = (LPWSTR)desc.c_str();
+        SendMessageW(list, LVM_INSERTITEMW, 0, (LPARAM)&it);
+        it.iSubItem = 1; it.pszText = (LPWSTR)addr.c_str(); SendMessageW(list, LVM_SETITEMTEXTW, (WPARAM)k, (LPARAM)&it);
+        it.iSubItem = 2; it.pszText = (LPWSTR)cat.c_str();  SendMessageW(list, LVM_SETITEMTEXTW, (WPARAM)k, (LPARAM)&it);
+        LVITEMW st;
+        memset(&st, 0, sizeof(st));
+        st.stateMask = LVIS_STATEIMAGEMASK;
+        st.state = INDEXTOSTATEIMAGEMASK(netIsOff(off, n.id) ? 1 : 2);
+        SendMessageW(list, LVM_SETITEMSTATE, (WPARAM)k, (LPARAM)&st);
+        std::wstring entry = desc + L"  (" + widen(n.ip) + L")";
+        SendMessageW(combo, CB_ADDSTRING, 0, (LPARAM)entry.c_str());
+        if (n.id == pref) selected = (int)k + 1;
+    }
+    SendMessageW(combo, CB_SETCURSEL, (WPARAM)selected, 0);
+}
+
+// The network values as the dialog shows them; false with a message when they
+// cannot be applied.
+bool readNetworkControls(HWND dlg, std::string& pref, std::vector<std::string>& off)
+{
+    HWND list = GetDlgItem(dlg, IDC_NET_LIST);
+    int sel = (int)SendMessageW(GetDlgItem(dlg, IDC_NET_PREFERRED), CB_GETCURSEL, 0, 0);
+    pref = sel > 0 && sel <= (int)g_dlgNets.size() ? g_dlgNets[sel - 1].id : std::string();
+    off.clear();
+    int on = 0;
+    for (size_t k = 0; k < g_dlgNets.size(); ++k) {
+        UINT state = (UINT)SendMessageW(list, LVM_GETITEMSTATE, (WPARAM)k, LVIS_STATEIMAGEMASK);
+        bool checked = state == INDEXTOSTATEIMAGEMASK(2);
+        if (checked) ++on; else off.push_back(g_dlgNets[k].id);
+    }
+    if (!g_dlgNets.empty() && on == 0) {
+        MessageBoxW(dlg, L"Check at least one network to announce on, or Thunderhead cannot find this node.", L"Lightning Rod Settings", MB_OK | MB_ICONWARNING);
+        return false;
+    }
+    if (!pref.empty() && netIsOff(off, pref)) {
+        MessageBoxW(dlg, L"The preferred adapter must be one of the networks announced on.", L"Lightning Rod Settings", MB_OK | MB_ICONWARNING);
+        return false;
+    }
+    return true;
+}
 
 void drawRenderHostSwitch(const DRAWITEMSTRUCT* di)
 {
@@ -2282,6 +2564,11 @@ INT_PTR CALLBACK settingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                         L"Thunderhead copies files for that client into this node's shared folder, and this agent copies them on "
                         L"to \\\\<address>\\LightningRod\\ over SMB1, which Windows 10 no longer speaks to Windows XP. "
                         L"This node must be able to open that share with its own logon.");
+        SetDlgItemTextW(dlg, IDC_NET_INFO,
+                        L"Networks: the agent announces on the checked sub-nets and connects only to a Thunderhead on one of them; "
+                        L"a host on the preferred adapter's sub-net is chosen first. The preferred adapter's address and MAC identify "
+                        L"this node to Thunderhead. Kept for the next start.");
+        fillNetworkControls(dlg);
         return TRUE;
     }
     case WM_COMMAND:
@@ -2320,10 +2607,14 @@ INT_PTR CALLBACK settingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                             L"Lightning Rod Settings", MB_OK | MB_ICONWARNING);
                 return TRUE;
             }
+            std::string netPref;
+            std::vector<std::string> netOff;
+            if (!readNetworkControls(dlg, netPref, netOff)) return TRUE;
             applyRelaySetting(on, ip, s.info.ip);   // the checks above make it succeed
             applyRenderHostSetting(g_dlgRenderHost);   // reaches Thunderhead with the next report
             bool binChanged = false;
             applyRenderBin(bin, binChanged);
+            applyNetSettings(netPref, netOff);
             EndDialog(dlg, IDOK);
             return TRUE;
         }

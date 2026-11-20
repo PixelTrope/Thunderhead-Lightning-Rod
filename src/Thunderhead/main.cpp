@@ -707,6 +707,13 @@ void showStaticPane(NodeRecord* n)
     if (!h.get("name").empty() && h.get("name") != n->name) add(L"Reported name", widen(h.get("name")));
     add(L"MAC", widen(n->mac));
     add(L"IP", widen(nodeIp(*n)));
+    // Every adapter of the node with a working address, as an agent from 0.5.5
+    // lists them: address/prefix, Windows network category, announced or not,
+    // adapter, MAC, and which is preferred and the identity (the IP above).
+    for (int k = 1; k <= h.getInt("net_count", 0); ++k) {
+        std::wstring label = widen(format("Network %d", k));
+        add(label.c_str(), widen(h.get(format("net%d", k))));
+    }
     add(L"Status", columnText(*n, ColStatus));
     add(L"Connected for", n->online ? durationText((long long)((tickMs() - n->onlineSinceMs) / 1000)) : std::wstring());
     add(L"Last report", columnText(*n, ColLastReport));
@@ -770,6 +777,7 @@ void showStaticPane(NodeRecord* n)
     for (std::map<std::string, std::string>::const_iterator it = h.fields.begin(); it != h.fields.end(); ++it) {
         bool known = false;
         for (size_t k = 0; k < sizeof(knownHello) / sizeof(knownHello[0]); ++k) if (it->first == knownHello[k]) known = true;
+        if (it->first.compare(0, 3, "net") == 0) known = true;   // net_count and net1.. have their rows above
         if (!known) add((L"HELLO " + widen(it->first)).c_str(), widen(it->second));
     }
     for (std::map<std::string, std::string>::const_iterator it = r.fields.begin(); it != r.fields.end(); ++it) {

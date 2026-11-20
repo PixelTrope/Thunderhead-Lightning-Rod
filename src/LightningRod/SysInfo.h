@@ -6,6 +6,23 @@
 
 namespace tlr {
 
+// One adapter with an address, as the network stack of the agent's Settings
+// lists it. id is the adapter's GUID string, the stable key the settings use.
+struct NetAdapter {
+    std::string id;         // {GUID} of the adapter
+    std::string desc;       // the adapter's description
+    std::string mac;        // XX-XX-XX-XX-XX-XX
+    std::string ip, mask;   // dotted
+    unsigned long ipN, maskN;   // the same in network order
+    bool gateway;           // has a default gateway
+    int type;               // 2 Ethernet, 1 wireless, 0 other
+    std::string category;   // Windows network profile: Private, Public, Domain; n/a where Windows has none (XP)
+    NetAdapter() : ipN(0), maskN(0), gateway(false), type(0) {}
+    unsigned long broadcast() const { return ipN | ~maskN; }
+    bool sameSubnet(unsigned long addrN) const { return maskN && (addrN & maskN) == (ipN & maskN); }
+    int prefix() const;     // bits in the mask
+};
+
 // Gathered once at start; sent in HELLO.
 struct StaticInfo {
     std::string mac;        // XX-XX-XX-XX-XX-XX of the primary adapter
@@ -51,14 +68,19 @@ private:
     ULONGLONG idle_, kernel_, user_;
 };
 
-StaticInfo  collectStatic();
+StaticInfo  collectStatic(const std::string& preferredId, std::vector<NetAdapter>& nets);
+// Every adapter that holds a working address (not 0.0.0.0, loopback or an
+// APIPA 169.254 one), with its Windows network category. COM must be
+// initialised on the calling thread for the category; without it, or on XP,
+// the category reads n/a.
+std::vector<NetAdapter> listAdapters();
+// The adapter the agent identifies itself by: the one whose id is preferredId
+// when it holds a working address, else the best by type and gateway.
+const NetAdapter* pickAdapter(const std::vector<NetAdapter>& nets, const std::string& preferredId);
 // Re-reads only mac and ip of s from the adapters, for the start-up wait on a
-// node whose NIC has no lease yet.
-void        collectAddress(StaticInfo& s);
+// node whose NIC has no lease yet; nets receives the current list.
+void        collectAddress(StaticInfo& s, const std::string& preferredId, std::vector<NetAdapter>& nets);
 DynamicInfo collectDynamic(CpuTracker& cpu);
-
-// Directed broadcast address (network order) of every adapter with an address.
-std::vector<unsigned long> broadcastAddresses();
 
 // Registry helpers shared with Lightning.cpp.
 std::string regString(HKEY root, const wchar_t* path, const wchar_t* value);
