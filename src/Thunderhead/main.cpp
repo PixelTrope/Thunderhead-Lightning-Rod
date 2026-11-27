@@ -1596,19 +1596,40 @@ void startUpdateThread(NodeRecord* n, LPTHREAD_START_ROUTINE fn, const char* wha
 }
 
 // A share that refused the credentials Windows offered gets the credential
-// prompt, owned by the main window, and the staging is tried once more with
-// what was typed. Refusals that arrive while a prompt is up wait their turn.
-std::vector<std::pair<NodeRecord*, std::wstring> > g_credQueue;
+// prompt, owned by the main window, and the operation is tried once more with
+// what was typed: an update stages again, a shared-folder gate check runs
+// again. Refusals that arrive while a prompt is up wait their turn.
+struct CredRequest { NodeRecord* n; std::wstring dir; bool update; };   // update: the staging asked; otherwise the gate's share check
+std::vector<CredRequest> g_credQueue;
 bool g_credPrompting = false;
+void startShareCheck(NodeRecord* n, const char* why);
 
 void runCredQueue()
 {
     if (g_credPrompting) return;
     g_credPrompting = true;
     while (!g_credQueue.empty()) {
-        NodeRecord* n = g_credQueue.front().first;
-        std::wstring dir = g_credQueue.front().second;
+        CredRequest req = g_credQueue.front();
         g_credQueue.erase(g_credQueue.begin());
+        NodeRecord* n = req.n;
+        std::wstring dir = req.dir;
+        if (!req.update) {
+            // The gate: the share is checked again at once with what was typed;
+            // a cancelled prompt leaves the minute retries running without one,
+            // until the node's next HELLO or Open Client's Shared Folder.
+            if (n->shareState == 1) continue;
+            logEvent(n->name + ": " + narrow(dir) + " refused the credentials Windows offered; asking for them");
+            DWORD e = promptShareCredentials(g_main, dir);
+            if (e == NO_ERROR) {
+                logEvent(n->name + ": connected to " + narrow(dir) + " with the credentials given; checking the shared folder again");
+                n->shareChecking = false;
+                startShareCheck(n, "credentials");
+            } else {
+                logEvent(n->name + ": " + (e == ERROR_CANCELLED ? std::string("the credential prompt was cancelled; the shared folder is checked again every minute, and the prompt returns at its next HELLO or with Open Client's Shared Folder")
+                                                                : lastErrorText((int)e)));
+            }
+            continue;
+        }
         if (!n->updating) continue;
         logEvent(n->name + " update: " + narrow(dir) + " refused the credentials Windows offered; asking for them");
         DWORD e = promptShareCredentials(g_main, dir);
@@ -1636,7 +1657,8 @@ void onUpdateDone(UpdateResult* r)
     if (!n || !n->updating) return;
     if (r->phase == 1 && !r->ok && r->needCredentials && !n->updatePrompted) {
         n->updatePrompted = true;
-        g_credQueue.push_back(std::make_pair(n, r->credDir));
+        CredRequest req; req.n = n; req.dir = r->credDir; req.update = true;
+        g_credQueue.push_back(req);
         runCredQueue();
         return;
     }
@@ -3564,6 +3586,7 @@ void openSharedFolders()
         // share is checked again every few seconds for a while so that the row
         // clears as soon as they are in.
         n->shareRetryUntilMs = tickMs() + 120000;
+        n->sharePrompted = false;   // the next refused check prompts again, should Explorer's own prompt not be used
         if (n->shareState != 1) n->shareNextMs = tickMs() + 5000;
     }
     if (paths->empty()) { delete paths; return; }
@@ -5100,7 +5123,7 @@ INT_PTR CALLBACK intervalDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 // checked by the relay's RELAY op=probe instead and paired by a push through it.
 
 struct ShareJob { std::string mac, name, ip; std::wstring share; std::string key; bool viaRelay; int relayConn; std::string relayName, relayIp; bool fresh; };
-struct ShareResult { std::string mac; bool viaRelay; bool ok; std::wstring dir; std::string error; bool credential; bool keyWritten; std::string keyError; };
+struct ShareResult { std::string mac; bool viaRelay; bool ok; std::wstring dir; std::string error; bool credential; std::wstring credDir; bool keyWritten; std::string keyError; };   // credDir: the path that refused the credentials
 
 DWORD WINAPI shareCheckThread(LPVOID p)
 {
@@ -5153,7 +5176,7 @@ DWORD WINAPI shareCheckThread(LPVOID p)
         if (h != INVALID_HANDLE_VALUE) { FindClose(h); res->ok = true; res->dir = dirs[i]; break; }
         int err = (int)GetLastError();
         errors += std::string(errors.empty() ? "" : "; ") + narrow(dirs[i]) + ": " + lastErrorText(err);
-        if (isCredentialError(err)) res->credential = true;
+        if (isCredentialError(err)) { res->credential = true; res->credDir = dirs[i]; }
     }
     if (res->ok) {
         std::string note = copyKeyTo(res->dir, job->key, res->keyWritten);
@@ -5308,16 +5331,28 @@ void onShareChecked(ShareResult* r)
         if (n->reportsRefused) { n->reportsRefused = false; logEvent(format("%s: its reports are accepted again from the next one", n->name.c_str())); }
         shareVerified(n);
     } else {
+        bool changed = prev != 2 || n->shareError != r->error;   // a new reason (the firewall opened, the share now refuses the logon) is logged as well
         n->shareState = 2;
         n->shareError = r->error;
         n->report = Message();   // nothing of an untrusted client is shown live
         n->shareNextMs = now + (now < n->shareRetryUntilMs ? 5000 : 60000);
-        if (prev != 2) logEvent(format("%s: shared folder not readable from this host (%s); no command goes to it until it is. "
-                                       "Use Open Client's Shared Folder and enter the credentials Windows asks for%s",
-                                       n->name.c_str(), r->error.c_str(), r->credential ? "" : " (or check that the folder is shared)"));
+        if (changed) logEvent(format("%s: shared folder not readable from this host (%s); no command goes to it until it is. "
+                                     "%s",
+                                     n->name.c_str(), r->error.c_str(),
+                                     r->credential ? "The credential prompt follows" : "Check that the folder is shared and reachable, then use Open Client's Shared Folder"));
     }
     refreshRow(n);
     if (g_staticNode == n) showStaticPane(n);
+    // A share that refused the credentials Windows offered gets the standard
+    // credential prompt, once per HELLO (and again after Open Client's Shared
+    // Folder): the farm's access challenge is Windows file sharing, so the
+    // refusal is put to the operator rather than only logged.
+    if (!r->ok && r->credential && !n->sharePrompted) {
+        n->sharePrompted = true;
+        CredRequest req; req.n = n; req.dir = r->credDir; req.update = false;
+        g_credQueue.push_back(req);
+        runCredQueue();
+    }
 }
 
 // The relay's answer to RELAY op=probe stands in for the share check of the
@@ -5460,6 +5495,7 @@ void onNet(NetEvent* e)
             n->shareState = 0;
             n->shareError.clear();
             n->shareRetryUntilMs = 0;
+            n->sharePrompted = false;   // a connecting node gets the credential prompt again if its share refuses the logon
             startShareCheck(n, "HELLO");
         }
         refreshRow(n);

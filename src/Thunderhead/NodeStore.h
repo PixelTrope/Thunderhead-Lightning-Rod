@@ -53,6 +53,7 @@ struct NodeRecord {
     unsigned long long shareNextMs;  // tickMs() when the next check is due (0 at once)
     unsigned long long shareRetryUntilMs;   // while before this, failed checks are repeated every few seconds (after Open Client's Shared Folder)
     bool helloFollowupPending;       // the messages that follow HELLO (audio switch, sound scheme, relay probe) wait for the share check
+    bool sharePrompted;              // the credential prompt for its share has been shown since its HELLO or since Open Client's Shared Folder
     unsigned long long lastAnnounceMs;      // tickMs() of its latest ANNOUNCE
     int announcesUnanswered;         // ANNOUNCEs since its last HELLO
     unsigned long long pingFlashUntilMs;    // the row is painted in the ping color until then (0 none)
@@ -64,7 +65,7 @@ struct NodeRecord {
         : wol(false), boot(false), autoLogin(false), autoRod(false), autoLightning(false), renderHost(false), autoShutdown(false),
           online(false), conn(-1), lastReportMs(0), nextReportMs(0), nudgeDueMs(0), arrivalSec(0), onlineSinceMs(0), updating(false), updateStaged(false), updatePrompted(false), updateStartMs(0),
           rebootAfterRename(false), pingPending(false), haveClockOffset(false), clockOffsetMs(0), pingSentMs(0), updateViaRelay(false),
-          authenticated(false), keyed(false), shareState(0), shareChecking(false), shareNextMs(0), shareRetryUntilMs(0), helloFollowupPending(false),
+          authenticated(false), keyed(false), shareState(0), shareChecking(false), shareNextMs(0), shareRetryUntilMs(0), helloFollowupPending(false), sharePrompted(false),
           lastAnnounceMs(0), announcesUnanswered(0), pingFlashUntilMs(0), shadeKey(-1), reportsRefused(false) {}
 };
 

@@ -399,6 +399,21 @@ runs every five seconds for two minutes, so that the row clears as soon as
 the credentials typed into the Explorer prompt are in. A node that is
 staged for an update has proved its share writable and passes the gate.
 
+A check that fails because the share refused the credentials Windows offered
+(access denied, logon failure, wrong password, unknown user, a credential
+conflict) brings up the standard Windows credential prompt for that share,
+the one Explorer shows for a shared folder without stored credentials, owned
+by Thunderhead's window (from 0.5.8). The farm's access challenge is Windows
+file sharing, so the refusal is put to the operator rather than only logged.
+What is typed connects the share, is saved in the Credential Manager when
+*Remember my credentials* is ticked, and the check runs again at once; a
+cancelled prompt leaves the minute retries running without a prompt. The
+prompt is shown once per HELLO, and again after *Open Client's Shared Folder*;
+several refusals at once wait their turn behind one prompt, in the queue the
+update's prompt uses. A failure for another reason (the path not found, the
+share absent) is logged without a prompt, and a change of reason, as when a
+firewall opens and the share then refuses the logon, is logged again.
+
 A node reached through an SMB1 relay cannot be opened from the host; the
 relay's `RELAY op=probe` stands in for the check, sent once the relay itself
 has passed the gate, and farm.key reaches such a node by a push through the
