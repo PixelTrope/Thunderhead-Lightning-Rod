@@ -89,6 +89,7 @@ public:
     void saveSettings();              // settings.txt
 
     NodeRecord* find(const std::string& mac);
+    NodeRecord* findByName(const std::string& name);   // case-insensitive; NULL when none or the name is empty
     NodeRecord* findByConn(int conn);
     NodeRecord& add(const std::string& mac);
     void remove(const std::string& mac);

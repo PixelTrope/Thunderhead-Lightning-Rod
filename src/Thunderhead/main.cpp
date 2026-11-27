@@ -76,6 +76,8 @@ bool isRelay(const NodeRecord* n);
 std::string relayTarget(const NodeRecord* n);
 NodeRecord* nodeAtIp(const std::string& ip);
 NodeRecord* relayFor(const NodeRecord* n);
+NodeRecord* nodeOfRelayTarget(const NodeRecord* relay);
+bool validIpText(const std::string& s);
 // Shared-folder gate and authentication; defined with the share check code below.
 std::string shareStateText(const NodeRecord* n);
 std::string authText(const NodeRecord* n);
@@ -747,8 +749,8 @@ void showStaticPane(NodeRecord* n)
     if (h.has("relay")) {
         add(L"Relay Node", isRelay(n) ? L"Yes" : L"No");
         if (isRelay(n)) {
-            NodeRecord* target = nodeAtIp(relayTarget(n));
-            add(L"Relay IP", widen(relayTarget(n) + (target ? " (" + target->name + ")" : std::string()) +
+            NodeRecord* target = nodeOfRelayTarget(n);
+            add(L"Relay To", widen(relayTarget(n) + (target ? " (" + (validIpText(relayTarget(n)) ? target->name : target->ip) + ")" : std::string()) +
                                    (n->relayProbe.empty() ? std::string() : "; its share " + n->relayProbe)));
         }
     }
@@ -1056,6 +1058,18 @@ std::wstring pushFilePath()
     return g_dir + L"\\LightningRod.exe";
 }
 
+// A Windows XP node (HELLO os version 5.x) cannot run the standard build of the
+// agent; it takes the XP build, LightningRod-xp.exe beside Thunderhead.exe (the
+// build-xp tree, toolset v141_xp). Empty when that file is absent.
+bool isWindowsXp(const NodeRecord* n) { return n && n->hello.get("os").find("(5.") != std::string::npos; }
+
+std::wstring pushFilePathFor(const NodeRecord* n)
+{
+    if (!isWindowsXp(n)) return pushFilePath();
+    std::wstring xp = g_dir + L"\\LightningRod-xp.exe";
+    return GetFileAttributesW(xp.c_str()) == INVALID_FILE_ATTRIBUTES ? std::wstring() : xp;
+}
+
 // "major.minor.patch" from the file's version resource; empty if absent.
 std::string fileVersion(const std::wstring& path)
 {
@@ -1113,6 +1127,8 @@ bool refreshPushVersion()
 const char* const kRelayAgent = "0.3.0";
 
 bool isRelay(const NodeRecord* n) { return n && parseBool(n->hello.get("relay")); }
+// The relay's destination as its Settings hold it: the client's address, or
+// (agents from 0.5.7) its computer name, which survives a changed DHCP lease.
 std::string relayTarget(const NodeRecord* n) { return n ? n->hello.get("relay_ip") : std::string(); }
 
 NodeRecord* nodeAtIp(const std::string& ip)
@@ -1123,14 +1139,34 @@ NodeRecord* nodeAtIp(const std::string& ip)
     return NULL;
 }
 
-// The online relay set to n's address, or NULL.
+// True when the relay target text names node n: its current address, or its
+// name without regard to case.
+bool relayTargetIs(const std::string& target, const NodeRecord* n)
+{
+    if (target.empty() || !n) return false;
+    if (!n->ip.empty() && target == n->ip) return true;
+    return !n->name.empty() && _stricmp(target.c_str(), n->name.c_str()) == 0;
+}
+
+// The node a relay's destination names, by address or by name; NULL when none.
+NodeRecord* nodeOfRelayTarget(const NodeRecord* relay)
+{
+    std::string target = relayTarget(relay);
+    if (target.empty()) return NULL;
+    if (NodeRecord* byIp = nodeAtIp(target)) return byIp;
+    std::vector<NodeRecord*>& nodes = g_store->nodes();
+    for (size_t i = 0; i < nodes.size(); ++i) if (nodes[i] != relay && relayTargetIs(target, nodes[i])) return nodes[i];
+    return NULL;
+}
+
+// The online relay set to n's address or name, or NULL.
 NodeRecord* relayFor(const NodeRecord* n)
 {
-    if (!n || n->ip.empty()) return NULL;
+    if (!n || (n->ip.empty() && n->name.empty())) return NULL;
     std::vector<NodeRecord*>& nodes = g_store->nodes();
     for (size_t i = 0; i < nodes.size(); ++i) {
         NodeRecord* r = nodes[i];
-        if (r != n && r->online && isRelay(r) && relayTarget(r) == n->ip && compareVersions(r->hello.get("agent"), kRelayAgent) >= 0) return r;
+        if (r != n && r->online && isRelay(r) && relayTargetIs(relayTarget(r), n) && compareVersions(r->hello.get("agent"), kRelayAgent) >= 0) return r;
     }
     return NULL;
 }
@@ -1460,7 +1496,7 @@ void startUpdateThread(NodeRecord* n, LPTHREAD_START_ROUTINE fn, const char* wha
     UpdateJob* job = new UpdateJob();
     job->name = n->name;
     job->ip = n->ip;
-    job->source = pushFilePath();
+    job->source = pushFilePathFor(n);
     job->share = widen(g_store->settings.shareName);
     job->dir = n->updateDir;
     job->sounds = soundDir();
@@ -1560,13 +1596,20 @@ void updateChecked()
         if (!n->online || n->updating) continue;
         if (!commandAllowed(n, "UPDATE")) continue;   // the agent file goes into its share: no share, no update
         if (NodeRecord* relay = relayFor(n)) { if (!commandAllowed(relay, "UPDATE (as relay for " + n->name + ")")) continue; }
+        std::wstring nodeFile = pushFilePathFor(n);
+        std::string nodeVersion = nodeFile.empty() ? std::string() : fileVersion(nodeFile);
+        if (nodeVersion.empty()) {
+            logEvent(format("%s update not started: it runs %s, which needs the XP build LightningRod-xp.exe beside Thunderhead.exe, and that file is %s",
+                            n->name.c_str(), n->hello.get("os").c_str(), nodeFile.empty() ? "absent" : "without a version resource"));
+            continue;
+        }
         ++sent;
         n->updating = true;
         n->updateStaged = false;
         n->updateDir.clear();
         n->updatePrompted = false;
         n->updateStartMs = tickMs();
-        logEvent(format("%s update: agent %s, staging %s from %s", n->name.c_str(), n->hello.get("agent").c_str(), version.c_str(), narrow(file).c_str()));
+        logEvent(format("%s update: agent %s, staging %s from %s", n->name.c_str(), n->hello.get("agent").c_str(), nodeVersion.c_str(), narrow(nodeFile).c_str()));
         if (NodeRecord* relay = relayFor(n)) logEvent(format("%s update: its share is reached through SMB1 relay %s", n->name.c_str(), relay->name.c_str()));
         refreshRow(n);
         startUpdateThread(n, updateStageThread, "staging");
@@ -3135,7 +3178,7 @@ INT_PTR CALLBACK renameDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 // line in the event log.
 const char* const kRelaySetAgent = "0.3.1";
 
-struct RelayDlgData { std::wstring info; bool on; std::string ip; std::string ownIp; };
+struct RelayDlgData { std::wstring info; bool on; std::string ip; std::string ownIp, ownName; };
 
 bool isWindows7(const NodeRecord* n)
 {
@@ -3150,6 +3193,19 @@ bool validIpText(const std::string& s)
         if (parts[i].empty() || parts[i].size() > 3) return false;
         for (size_t k = 0; k < parts[i].size(); ++k) if (parts[i][k] < '0' || parts[i][k] > '9') return false;
         if (atoi(parts[i].c_str()) > 255) return false;
+    }
+    return true;
+}
+
+// A relay destination: an IPv4 address or a computer name (letters, digits,
+// hyphens and dots, 63 characters at most), as agents from 0.5.7 accept it.
+bool validRelayTargetText(const std::string& s)
+{
+    if (validIpText(s)) return true;
+    if (s.empty() || s.size() > 63 || s[0] == '-' || s[0] == '.') return false;
+    for (size_t i = 0; i < s.size(); ++i) {
+        char c = s[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '.')) return false;
     }
     return true;
 }
@@ -3169,7 +3225,7 @@ INT_PTR CALLBACK relayDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SetDlgItemTextW(dlg, IDC_RELAY_INFO, d->info.c_str());
         SetDlgItemTextW(dlg, IDC_RELAY_STATE, d->on ? L"On" : L"Off");
         SetDlgItemTextW(dlg, IDC_RELAY_DEST, widen(d->ip).c_str());
-        SendDlgItemMessageW(dlg, IDC_RELAY_DEST, EM_LIMITTEXT, 15, 0);
+        SendDlgItemMessageW(dlg, IDC_RELAY_DEST, EM_LIMITTEXT, 63, 0);
         EnableWindow(GetDlgItem(dlg, IDC_RELAY_DEST), d->on);
         return TRUE;
     case WM_COMMAND:
@@ -3185,12 +3241,12 @@ INT_PTR CALLBACK relayDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             wchar_t buf[64];
             GetDlgItemTextW(dlg, IDC_RELAY_DEST, buf, 64);
             std::string ip = trim(narrow(buf));
-            if (d->on && !validIpText(ip)) {
-                MessageBoxW(dlg, L"Enter the destination as an IP address of four numbers, for example 42.32.22.156.", L"Set Relay Address", MB_OK | MB_ICONWARNING);
+            if (d->on && !validRelayTargetText(ip)) {
+                MessageBoxW(dlg, L"Enter the destination as the Windows XP client's computer name, for example LATITUDE, or as an IP address of four numbers, for example 42.32.22.156. A name keeps the relay working when the client's DHCP address changes (agents from 0.5.7).", L"Set Relay Address", MB_OK | MB_ICONWARNING);
                 return TRUE;
             }
-            if (d->on && ip == d->ownIp) {
-                MessageBoxW(dlg, L"That is the client's own address. Enter the address of the Windows XP client it relays to.", L"Set Relay Address", MB_OK | MB_ICONWARNING);
+            if (d->on && (ip == d->ownIp || _stricmp(ip.c_str(), d->ownName.c_str()) == 0)) {
+                MessageBoxW(dlg, L"That is the client itself. Enter the name or address of the Windows XP client it relays to.", L"Set Relay Address", MB_OK | MB_ICONWARNING);
                 return TRUE;
             }
             if (d->on) d->ip = ip;
@@ -3224,6 +3280,7 @@ void setRelayAddress()
         d.on = isRelay(n);
         d.ip = relayTarget(n);
         d.ownIp = n->ip;
+        d.ownName = n->name;
         bool wasOn = d.on;
         std::string wasIp = d.ip;
         ++shown;
@@ -5128,7 +5185,7 @@ void shareVerified(NodeRecord* n)
     if (isRelay(n) && compareVersions(n->hello.get("agent"), kRelayAgent) >= 0) {
         Message probe = relayMessage("probe", std::string(), relayTarget(n), widen(g_store->settings.shareName));
         if (sendToNode(n, probe, probe.oneLine())) {
-            if (NodeRecord* target = nodeAtIp(relayTarget(n))) { target->shareChecking = true; target->shareNextMs = tickMs() + 60000; }
+            if (NodeRecord* target = nodeOfRelayTarget(n)) { target->shareChecking = true; target->shareNextMs = tickMs() + 60000; }
         }
     }
     if (!n->keyed && compareVersions(n->hello.get("agent"), kAuthAgent) >= 0 && n->shareState == 1 && !n->sharePath.empty())
@@ -5226,18 +5283,24 @@ void onNet(NetEvent* e)
     switch (e->type) {
     case NetEvent::Announce: {
         // Every ANNOUNCE is answered by the server thread; here it only shows a
-        // known node as Announcing, and a node that keeps announcing without
-        // connecting most likely holds another farm.key: the key is written to
-        // its shared folder when that is readable, and it reconnects by itself.
+        // known node as Announcing. The node is found by its MAC, or by its name
+        // when the ANNOUNCE carries no MAC (an agent before 0.5.6 whose adapter
+        // list came back empty). A node that keeps announcing without connecting
+        // either sees no host on a sub-net it announces on (its log says which)
+        // or holds another farm.key: the key is written to its shared folder when
+        // that is readable, and it reconnects by itself.
         NodeRecord* n = e->msg.get("mac").empty() ? NULL : g_store->find(e->msg.get("mac"));
+        if (!n) n = g_store->findByName(e->msg.get("name"));
         if (!n) break;   // a new node joins the inventory with its HELLO
         n->lastAnnounceMs = now;
         if (n->online) break;
         if (!e->ip.empty()) n->ip = e->ip;
         ++n->announcesUnanswered;
         if (n->announcesUnanswered == 4 || n->announcesUnanswered % 120 == 0) {
-            logEvent(format("%s announces from %s but has not connected (%d announcements): its farm.key may differ from this host's; "
-                            "the key is written to its shared folder when that is readable", n->name.c_str(), n->ip.c_str(), n->announcesUnanswered));
+            logEvent(format("%s announces from %s (agent %s) but has not connected (%d announcements): it accepts no OFFER from this host, "
+                            "because its announced sub-nets do not include this host's or its farm.key differs; its log says which; "
+                            "the key is written to its shared folder when that is readable",
+                            n->name.c_str(), n->ip.c_str(), e->msg.get("agent").c_str(), n->announcesUnanswered));
             startShareCheck(n, "announce");
         }
         refreshRow(n, ColStatus);
@@ -5289,9 +5352,9 @@ void onNet(NetEvent* e)
         sendSchedule(n, phase, now);
         playEventSound(SoundThHello);                        // every HELLO, the renewed one as well
         if (isRelay(n)) {
-            NodeRecord* target = nodeAtIp(relayTarget(n));
+            NodeRecord* target = nodeOfRelayTarget(n);
             logEvent(format("%s acts as SMB1 relay to %s%s", n->name.c_str(), relayTarget(n).c_str(),
-                            target ? (" (" + target->name + ")").c_str() : ""));
+                            target ? (" (" + (validIpText(relayTarget(n)) ? target->name : target->ip) + ")").c_str() : " (no known client at that address or name)"));
             n->relayProbe.clear();
             if (target && g_staticNode == target) showStaticPane(target);
         } else if (NodeRecord* via = relayFor(n)) {

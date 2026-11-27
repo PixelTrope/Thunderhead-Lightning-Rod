@@ -37,13 +37,21 @@ using namespace tlr;
 namespace {
 
 const UINT WM_AGENT_UPDATE = WM_APP + 1;
-const UINT WM_NETWORK_ERROR = WM_APP + 2;   // no valid address after kIpTries re-reads; the window shows the error box
 const UINT WM_SHOW_MESSAGE = WM_APP + 3;    // lParam: ShownMessage* from the agent thread; the window thread opens the window and owns it
 // A node whose NIC has not finished DHCP when the agent starts at logon reads
-// no address, 127.x or an APIPA 169.254.x.y one. The agent then re-reads the
-// address every kIpWaitMs, up to kIpTries times, before it gives up.
+// no address, 127.x or an APIPA 169.254.x.y one, or lists no adapter with a
+// working address at all. The agent then re-reads the adapters every kIpWaitMs
+// until a working address appears, sounding the alarm at every re-read; from
+// the kIpTries-th re-read on, its window shows the network error as well. It
+// never gives up: a lease that arrives late is picked up at the next re-read.
 const int kIpTries = 4;
-const DWORD kIpWaitMs = 30000;
+const DWORD kIpWaitMs = 60000;
+// Announcing this long without an acceptable OFFER (no Thunderhead on an
+// announced sub-net) sounds the alarm, and again every kAnnounceAlarmMs.
+const unsigned long long kAnnounceAlarmMs = 60000;
+// While announcing or in a session the adapters are re-read this often, so
+// that a lease lost, renewed with another address, or arriving late is noticed.
+const unsigned long long kNetRereadMs = 30000;
 const UINT_PTR kClockTimer = 1;
 
 Logger g_log;
@@ -297,13 +305,69 @@ bool validIpText(const std::string& s)
     return true;
 }
 
+// The relay destination as the Settings dialog and RELAYSET accept it: a dotted
+// IPv4 address, or the Windows XP client's computer name (letters, digits,
+// hyphens and dots, 63 characters at most), which the file-sharing path
+// \\NAME\share resolves on this node by NetBIOS or DNS. A name keeps the relay
+// working when the client's DHCP lease changes its address.
+bool validRelayTarget(const std::string& s)
+{
+    if (validIpText(s)) return true;
+    if (s.empty() || s.size() > 63) return false;
+    for (size_t i = 0; i < s.size(); ++i) {
+        char c = s[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '.')) return false;
+    }
+    return s[0] != '-' && s[0] != '.';
+}
+
+// This node's own computer name, for the own-address checks of the relay settings.
+std::string ownComputerName()
+{
+    wchar_t name[MAX_COMPUTERNAME_LENGTH + 1];
+    DWORD len = MAX_COMPUTERNAME_LENGTH + 1;
+    return GetComputerNameW(name, &len) ? narrow(name) : std::string();
+}
+
+// True when a RELAY's dest= names the destination this node is set to relay
+// to: the same text (names compare without case), or an address the configured
+// name resolves to, or a name resolving to the configured address.
+bool destMatchesRelay(const std::string& dest, const std::string& relayTo)
+{
+    if (_stricmp(dest.c_str(), relayTo.c_str()) == 0) return true;
+    std::string a = dest, b = relayTo;
+    for (int side = 0; side < 2; ++side) {
+        const std::string& name = side == 0 ? b : a;
+        const std::string& addr = side == 0 ? a : b;
+        if (validIpText(name) || !validIpText(addr)) continue;
+        addrinfo hints, *res = NULL;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_INET;
+        if (getaddrinfo(name.c_str(), NULL, &hints, &res) != 0 || !res) continue;
+        bool found = false;
+        for (addrinfo* p = res; p && !found; p = p->ai_next) {
+            char text[32] = "";
+            const sockaddr_in* sin = (const sockaddr_in*)p->ai_addr;
+            if (p->ai_family == AF_INET && sin) {
+                const unsigned char* bb = (const unsigned char*)&sin->sin_addr;
+                _snprintf_s(text, sizeof(text), _TRUNCATE, "%u.%u.%u.%u", bb[0], bb[1], bb[2], bb[3]);
+                found = addr == text;
+            }
+        }
+        freeaddrinfo(res);
+        if (found) return true;
+    }
+    return false;
+}
+
 // Sets the relay values as the Settings dialog or Thunderhead's RELAYSET asks,
 // saves them, and has HELLO sent again when they changed; off keeps the last
-// address for the dialog. Returns the error text, empty when applied.
+// destination for the dialog. Returns the error text, empty when applied.
 std::string applyRelaySetting(bool on, const std::string& ip, const std::string& ownIp)
 {
-    if (on && !validIpText(ip)) return "relay_ip must be an IPv4 address of four numbers";
+    if (on && !validRelayTarget(ip)) return "relay_ip must be an IPv4 address of four numbers or the client's computer name";
     if (on && ip == ownIp) return "relay_ip " + ip + " is this node's own address";
+    if (on && _stricmp(ip.c_str(), ownComputerName().c_str()) == 0) return "relay_ip " + ip + " is this node's own name";
     bool was;
     std::string wasIp;
     relaySnapshot(was, wasIp);
@@ -995,9 +1059,9 @@ public:
 
     void run()
     {
-        if (!acquireAddress()) return;   // the window thread shows the error and relaunches
-        logNetworks();
-        for (;;) {
+        for (bool first = true;; first = false) {
+            if (!networkReady()) { acquireAddress(); logNetworks(); }
+            else if (first) logNetworks();
             if (tcp_ == INVALID_SOCKET) announcePhase();
             else sessionPhase();
         }
@@ -1047,6 +1111,19 @@ private:
             logLine("the preferred adapter " + pref + " holds no working address; the best adapter identifies the node instead");
     }
 
+    // True when the node can work: the identity address is valid and at least
+    // one adapter holds a working address (the two differ when the adapter list
+    // came back empty while a plain address read still succeeded).
+    bool networkReady() const { return validAddress(info_.ip) && !nets_.empty(); }
+
+    // A key of the adapter list as last read, to notice a change between re-reads.
+    std::string netsKey() const
+    {
+        std::string k;
+        for (size_t i = 0; i < nets_.size(); ++i) k += nets_[i].id + "=" + nets_[i].ip + "/" + nets_[i].mask + ";";
+        return k;
+    }
+
     // The announced adapter whose sub-net holds the address; NULL when none does.
     const NetAdapter* announcedSubnetOf(unsigned long addrN) const
     {
@@ -1059,16 +1136,16 @@ private:
     }
 
     // ---- address ---------------------------------------------------------
-    // True once the adapter has a valid address. An invalid one at start is
-    // re-read every kIpWaitMs up to kIpTries times; when a valid address then
-    // appears, Lightning, which started at logon as well and most likely bound
-    // the same bad address, is stopped and started again. After kIpTries
-    // failures the window is told to show the network error box, and false is
-    // returned so that nothing is announced from the bad address.
-    bool acquireAddress()
+    // Returns once an adapter holds a working address. Until then the adapters
+    // are re-read every kIpWaitMs, without limit, the alarm sounding before
+    // each wait; from the kIpTries-th re-read on the window shows the network
+    // error too. When a working address then appears, Lightning, which started
+    // at logon as well and most likely bound the bad address, is stopped and
+    // started again. Nothing is announced from a bad address.
+    void acquireAddress()
     {
         int tries = 0;
-        while (!validAddress(info_.ip)) {
+        while (!networkReady()) {
             if (tries == 0) {
                 // The alarm must be heard: the node has no network, so no AUDIO unmute
                 // from Thunderhead can reach it, and a mute left from an earlier session
@@ -1081,14 +1158,14 @@ private:
                 Sleep(4500);
             }
             playEventSound(SoundLrBadIp);   // once per unworkable reading: the start-up one and each re-read
-            if (tries == kIpTries) {
-                logLine(format("no valid IP address after %d re-reads (last read \"%s\"); network error shown", kIpTries, info_.ip.c_str()));
-                if (g_window) PostMessageW(g_window, WM_NETWORK_ERROR, 0, 0);
-                return false;
-            }
             ++tries;
-            logLine(format("no valid IP address (read \"%s\"); waiting %u s, then re-reading, try %d of %d",
-                           info_.ip.c_str(), (unsigned)(kIpWaitMs / 1000), tries, kIpTries));
+            const char* why = nets_.empty() ? (validAddress(info_.ip) ? ", no adapter holds a working address" : "") : "";
+            if (tries == kIpTries)
+                logLine(format("no working address after %d re-reads (last read \"%s\"%s); network error shown, re-reading goes on every %u s",
+                               kIpTries, info_.ip.c_str(), why, (unsigned)(kIpWaitMs / 1000)));
+            else
+                logLine(format("no working address (read \"%s\"%s); waiting %u s, then re-reading, try %d",
+                               info_.ip.c_str(), why, (unsigned)(kIpWaitMs / 1000), tries));
             EnterCriticalSection(&lock_);
             status_.waitingIp = true;
             status_.ipTry = tries;
@@ -1098,8 +1175,8 @@ private:
             Sleep(kIpWaitMs);
             rereadNetworks();
         }
-        if (tries == 0) return true;
-        logLine(format("valid IP address %s (mac %s) after %d re-read(s)", info_.ip.c_str(), info_.mac.c_str(), tries));
+        if (tries == 0) return;
+        logLine(format("working address %s (mac %s) after %d re-read(s)", info_.ip.c_str(), info_.mac.c_str(), tries));
         EnterCriticalSection(&lock_);
         status_.waitingIp = false;
         status_.info = info_;
@@ -1117,7 +1194,6 @@ private:
         } else {
             logLine("Lightning restarted so that it binds the new address");
         }
-        return true;
     }
 
     // ---- announcing ------------------------------------------------------
@@ -1194,6 +1270,9 @@ private:
         memset(&pendingFrom, 0, sizeof(pendingFrom));
         unsigned long long pendingSinceMs = 0;
         std::string pendingVia;
+        unsigned long long startMs = tickMs();
+        unsigned long long nextAlarm = startMs + kAnnounceAlarmMs;
+        unsigned long long nextReread = startMs + kNetRereadMs;
         while (tcp_ == INVALID_SOCKET) {
             unsigned long long now = tickMs();
             pollKey();
@@ -1202,6 +1281,30 @@ private:
                 logNetworks();
                 havePending = false;
                 nextAnnounce = 0;
+            }
+            // The adapters are re-read every kNetRereadMs: a lease lost takes the
+            // node back to the address wait; a changed one is announced from at once.
+            if (now >= nextReread) {
+                nextReread = now + kNetRereadMs;
+                std::string before = netsKey();
+                rereadNetworks();
+                if (!networkReady()) {
+                    logLine(format("working address lost while announcing (read \"%s\"); waiting for one", info_.ip.c_str()));
+                    return;   // run() goes back to acquireAddress
+                }
+                if (netsKey() != before) {
+                    logLine("adapters changed while announcing");
+                    logNetworks();
+                    havePending = false;
+                    nextAnnounce = 0;
+                }
+            }
+            // No host on an announced sub-net has answered since announcing began:
+            // the alarm, then again every kAnnounceAlarmMs.
+            if (now >= nextAlarm) {
+                nextAlarm = now + kAnnounceAlarmMs;
+                logLine(format("no Thunderhead on an announced sub-net for %llu s; alarm", (now - startMs) / 1000));
+                playEventSound(SoundLrBadIp);
             }
             if (havePending && now - pendingSinceMs >= kOfferHoldMs) {
                 havePending = false;
@@ -1229,6 +1332,15 @@ private:
                 if (!parseMessage(std::string(buf, (size_t)n), m) || m.verb != "OFFER") continue;
                 int port = m.getInt("port", kDefaultTcpPort);
                 const NetAdapter* via = announcedSubnetOf(from.sin_addr.s_addr);
+                if (!via) {
+                    // The host's sub-net is not among the announced ones as last read:
+                    // the adapters are re-read before the OFFER is judged, since a lease
+                    // that arrived after the last read is the usual reason.
+                    std::string before = netsKey();
+                    rereadNetworks();
+                    if (netsKey() != before) { logLine("adapters changed; re-read for an OFFER"); logNetworks(); }
+                    via = announcedSubnetOf(from.sin_addr.s_addr);
+                }
                 if (!via) {
                     if (now - lastRejectLogMs_ > 60000) {
                         lastRejectLogMs_ = now;
@@ -1670,7 +1782,7 @@ private:
             std::string relayIp;
             relaySnapshot(relay, relayIp);
             if (!relay) err = "this agent is not set to act as an SMB1 relay";
-            else if (dest != relayIp) err = "this agent relays to " + relayIp + ", not to " + dest;
+            else if (!destMatchesRelay(dest, relayIp)) err = "this agent relays to " + relayIp + ", not to " + dest;
             else if (share.empty() || share.find_first_of("\\/") != std::string::npos) err = "share name missing";
             else if (op != "probe" && op != "push" && op != "pull") err = "unknown op \"" + op + "\"";
             else if (op != "probe" && (job.empty() || job.find_first_of("\\/:.") != std::string::npos)) err = "job must be a plain name";
@@ -2163,9 +2275,19 @@ private:
 
     void sessionPhase()
     {
+        unsigned long long nextReread = tickMs() + kNetRereadMs;
         while (tcp_ != INVALID_SOCKET) {
             tryTeamViewerWindow();
             tryBryceWindow();
+            if (tickMs() >= nextReread) {
+                // A lease renewed with another address, or lost, ends the session: the
+                // node announces again from the new address, or waits for one.
+                nextReread = tickMs() + kNetRereadMs;
+                std::string oldIp = info_.ip;
+                rereadNetworks();
+                if (!networkReady()) { dropSession(format("working address lost (read \"%s\"); waiting for one", info_.ip.c_str()).c_str()); return; }
+                if (info_.ip != oldIp) { logNetworks(); dropSession(("address changed from " + oldIp + " to " + info_.ip + "; announcing again").c_str()); return; }
+            }
             if (!pollBatches()) { dropSession("batch result send failed"); return; }
             if (!pollMessages()) { dropSession("message result send failed"); return; }
             if (!pollRelays()) { dropSession("relay result send failed"); return; }
@@ -2332,8 +2454,10 @@ void refreshAll()
                (s.hostMac.empty() ? L"" : L", " + widen(s.hostMac)) + L")" +
                (s.hostAuthenticated ? L", host authenticated" : L", host not authenticated: commands refused until farm.key arrives");
     } else if (s.waitingIp) {
-        host = widen(format("No valid IP address (read \"%s\"): re-reading it in %u s, try %d of %d",
-                            s.badIp.c_str(), (unsigned)(kIpWaitMs / 1000), s.ipTry, kIpTries));
+        host = widen(format("%sNo working IP address (read \"%s\"%s): re-reading in %u s, try %d",
+                            s.ipTry >= kIpTries ? "Network Error: " : "", s.badIp.c_str(),
+                            s.nets.empty() && validAddress(s.badIp) ? ", no adapter holds a working address" : "",
+                            (unsigned)(kIpWaitMs / 1000), s.ipTry));
     } else {
         host = L"Not connected: announcing, waiting for Thunderhead";
     }
@@ -2558,7 +2682,7 @@ INT_PTR CALLBACK settingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SetDlgItemTextW(dlg, IDC_RENDERBIN_NOTE, renderBinExists() ? L"The folder exists." : L"The folder does not exist yet; it is created when this node is the host.");
         CheckDlgButton(dlg, IDC_RELAY_CHECK, relay ? BST_CHECKED : BST_UNCHECKED);
         SetDlgItemTextW(dlg, IDC_RELAY_IP, widen(ip).c_str());
-        SendDlgItemMessageW(dlg, IDC_RELAY_IP, EM_LIMITTEXT, 15, 0);
+        SendDlgItemMessageW(dlg, IDC_RELAY_IP, EM_LIMITTEXT, 63, 0);
         EnableWindow(GetDlgItem(dlg, IDC_RELAY_IP), relay);
         SetDlgItemTextW(dlg, IDC_RELAY_INFO,
                         L"Thunderhead copies files for that client into this node's shared folder, and this agent copies them on "
@@ -2587,13 +2711,13 @@ INT_PTR CALLBACK settingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             AgentStatus s;
             g_agent->snapshot(s);
             if (on) {
-                if (!validIpText(ip)) {
-                    MessageBoxW(dlg, L"Enter the IP address of the Windows XP client as four numbers, for example 42.32.22.156.",
+                if (!validRelayTarget(ip)) {
+                    MessageBoxW(dlg, L"Enter the Windows XP client's computer name, for example LATITUDE, or its IP address as four numbers, for example 42.32.22.156.",
                                 L"Lightning Rod Settings", MB_OK | MB_ICONWARNING);
                     return TRUE;
                 }
-                if (ip == s.info.ip) {
-                    MessageBoxW(dlg, L"That is this node's own address. Enter the address of the Windows XP client to relay to.",
+                if (ip == s.info.ip || _stricmp(ip.c_str(), s.info.name.c_str()) == 0) {
+                    MessageBoxW(dlg, L"That is this node itself. Enter the name or address of the Windows XP client to relay to.",
                                 L"Lightning Rod Settings", MB_OK | MB_ICONWARNING);
                     return TRUE;
                 }
@@ -2644,14 +2768,6 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
         return 0;
-    case WM_NETWORK_ERROR:
-        // MB_ICONERROR plays the Critical Stop sound; OK starts a fresh agent.
-        SetWindowTextW(g_hostText, L"Network Error: Invalid IP address");
-        MessageBoxW(hwnd, L"Network Error: Invalid IP address. Check network settings or hardware and restart Lightning Rod.",
-                    L"Lightning Rod " TLR_VERSION_WSTRING, MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST);
-        logLine("network error acknowledged, relaunching");
-        relaunchSelf();
-        ExitProcess(0);
     case WM_TIMER: if (wp == kClockTimer) refreshClock(); return 0;
     case WM_CLOSE: playCloseSound(); DestroyWindow(hwnd); return 0;
     case WM_DESTROY: KillTimer(hwnd, kClockTimer); PostQuitMessage(0); return 0;

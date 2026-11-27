@@ -134,6 +134,14 @@ NodeRecord* NodeStore::find(const std::string& mac)
     return NULL;
 }
 
+NodeRecord* NodeStore::findByName(const std::string& name)
+{
+    if (name.empty()) return NULL;
+    for (size_t i = 0; i < nodes_.size(); ++i)
+        if (_stricmp(nodes_[i]->name.c_str(), name.c_str()) == 0) return nodes_[i];
+    return NULL;
+}
+
 NodeRecord* NodeStore::findByConn(int conn)
 {
     if (conn < 0) return NULL;

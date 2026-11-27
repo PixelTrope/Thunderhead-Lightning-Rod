@@ -440,14 +440,20 @@ void collectAddress(StaticInfo& s, const std::string& preferredId, std::vector<N
     s.mac = a ? a->mac : std::string();
     s.ip = a ? a->ip : std::string();
     if (!a) {
-        // No working address: the first adapter's reading, for the start-up wait's message.
+        // No working address: the first adapter's reading, for the start-up wait's
+        // message, and its MAC, so that the node is identifiable (the ANNOUNCE
+        // carries it) even while its address is unusable.
         ULONG size = 0;
         if (GetAdaptersInfo(NULL, &size) == ERROR_BUFFER_OVERFLOW && size) {
             std::vector<BYTE> buf(size);
             IP_ADAPTER_INFO* info = (IP_ADAPTER_INFO*)&buf[0];
             if (GetAdaptersInfo(info, &size) == NO_ERROR)
                 for (IP_ADAPTER_INFO* x = info; x; x = x->Next)
-                    if (x->AddressLength == 6) { s.ip = x->IpAddressList.IpAddress.String; break; }
+                    if (x->AddressLength == 6) {
+                        s.ip = x->IpAddressList.IpAddress.String;
+                        s.mac = format("%02X-%02X-%02X-%02X-%02X-%02X", x->Address[0], x->Address[1], x->Address[2], x->Address[3], x->Address[4], x->Address[5]);
+                        break;
+                    }
         }
     }
 }

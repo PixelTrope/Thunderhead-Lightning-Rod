@@ -28,7 +28,7 @@ FONT 8, "MS Shell Dlg"
 BEGIN
     AUTOCHECKBOX    "Act as SMB1 Relay", IDC_RELAY_CHECK, 10, 10, 250, 10
     LTEXT           "Relay to this Windows XP client (IP address):", -1, 24, 28, 236, 10
-    EDITTEXT        IDC_RELAY_IP, 24, 40, 110, 13, ES_AUTOHSCROLL | WS_DISABLED
+    EDITTEXT        IDC_RELAY_IP, 24, 40, 180, 13, ES_AUTOHSCROLL | WS_DISABLED
     LTEXT           "", IDC_RELAY_INFO, 10, 60, 250, 34
     LTEXT           "Bryce 3D Network Render Host (B3NDHR) mode:", IDC_RENDERHOST_LABEL, 10, 104, 170, 10
     CONTROL         "", IDC_RENDERHOST_SWITCH, "BUTTON", BS_OWNERDRAW | WS_TABSTOP, 184, 101, 30, 14

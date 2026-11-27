@@ -824,7 +824,11 @@ agent's connection has closed and then creates `update.go`. If the node has not
 reconnected after ten minutes, Thunderhead drops the Updating state and logs it.
 
 This path uses Windows file sharing and therefore covers the Windows 7 nodes.
-A Windows XP node's share is reached through an SMB1 relay (see SMB1 relay):
+A Windows XP node (HELLO `os` version 5.x) receives the XP build of the agent,
+`LightningRod-xp.exe` beside Thunderhead.exe (from the build-xp tree, toolset
+v141_xp); when that file is absent its update is not started and the event log
+says so (Thunderhead from 0.5.7; before that the standard build was pushed,
+which does not run on XP). Its share is reached through an SMB1 relay (see SMB1 relay):
 the agent file and the sounds are staged under `relay\<job>\` in the relay
 node's share, the relay copies them to the root of the XP node's share, and
 UPDATE then goes to the XP node as to any other; its helper swaps the file in
@@ -837,10 +841,14 @@ log's staging line names the relay and the files it copied.
 A Windows XP node's file server speaks SMB1 only, which Windows 10 no longer
 speaks once its SMB 1.0/CIFS client is removed; a Windows 7 node speaks both.
 The agent's Settings dialog (Control, Settings) has *Act as SMB1 Relay* and,
-once that is ticked, the IP address of the Windows XP client to relay for. The
+once that is ticked, the Windows XP client to relay for: its IP address, or,
+from 0.5.7, its computer name, which `\\NAME\share` resolves on the relay node
+by NetBIOS or DNS and which therefore survives a changed DHCP lease (a relay
+set to an address stops matching its client as soon as the client's lease
+changes, which is how LATITUDE went unreached on 2026-11-26). The
 values go to `settings.txt` beside the agent, HELLO is sent again at once with
 `relay=yes` and `relay_ip=`, and from then on Thunderhead treats the client at
-that address as relayed whenever the relay is online: the client's commands
+that address or of that name as relayed whenever the relay is online: the client's commands
 still go over its own session, which needs no file sharing, but every share
 operation of the client is done through the relay. The Client Details of the
 relay show *Relay Node: Yes* and *Relay IP: ADDRESS (NAME); its share opens
