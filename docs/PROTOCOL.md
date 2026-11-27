@@ -843,9 +843,10 @@ speaks once its SMB 1.0/CIFS client is removed; a Windows 7 node speaks both.
 The agent's Settings dialog (Control, Settings) has *Act as SMB1 Relay* and,
 once that is ticked, the Windows XP client to relay for: its IP address, or,
 from 0.5.7, its computer name, which `\\NAME\share` resolves on the relay node
-by NetBIOS or DNS and which therefore survives a changed DHCP lease (a relay
-set to an address stops matching its client as soon as the client's lease
-changes, which is how LATITUDE went unreached on 2026-11-26). The
+by NetBIOS or DNS and which therefore does not depend on the address DHCP
+hands the client (a relay set to an address matches its client only while the
+client holds exactly that address; on 2026-11-26 the relays held addresses
+LATITUDE did not have, and it went unreached). The
 values go to `settings.txt` beside the agent, HELLO is sent again at once with
 `relay=yes` and `relay_ip=`, and from then on Thunderhead treats the client at
 that address or of that name as relayed whenever the relay is online: the client's commands
