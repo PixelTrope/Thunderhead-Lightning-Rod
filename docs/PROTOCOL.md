@@ -1167,20 +1167,34 @@ below.
 | TH | App Receives HELLO from Client | Proximity Notification |
 | TH | App Closed or Closes | Shutdown |
 | TH | Client that was Online went Offline | Minimize |
+| TH | App Sends a Message to a Client | Feed Discovered |
+| TH | Client Did Not Receive or Answer a Command | Menu Command |
 | LR | App Opens | Logon |
 | LR | App Sends HELLO to Host | Proximity Connection |
 | LR | App Closed or Closes | Logoff Sound |
 | LR | App Sends Report to Host | Navigation Start |
 | LR | App Finds No Workable IP Address | Battery Low |
 
-Thunderhead plays its four itself, the closing one to its end (5 s at most)
-before the window goes. The agent plays Logon as its window appears, Proximity
+Thunderhead plays its six itself, the closing one to its end (5 s at most)
+before the window goes. Feed Discovered plays for every message that leaves
+for a client (commands, RELAY to a relay node; not SET, the report-interval and
+spacing adjustment that the report-spacing nudges send every few seconds on a
+farm of twenty nodes, and not the UDP OFFER, which goes to a node that is not
+yet a client). Menu Command plays when a message
+could not reach the client (the shared-folder gate refused it or the send
+failed), when a command the agent answers with ACK has no ACK within 15 s or
+the node goes offline first (the reply watch; SET is sent in the blind), when
+a PING has no answer within its 5 s, and when a relay does not answer a RELAY
+within its wait; the event log names the node and the command each time (from 0.5.8).
+The agent plays Logon as its window appears, Proximity
 Connection when Thunderhead's SET answers its HELLO, which is the same
 exchange, Navigation Start after every REPORT it sends (the regular ones and
-the one a PING asks for), Battery Low each time its start-up address check
-reads an unworkable address (the first reading and each of the three re-reads
-30 s apart, so four times before the network error box when no address ever
-comes), and the Logoff Sound to its end (4 s at most) before
+the one a PING asks for), Battery Low each time its address check reads no
+working adapter (at start-up and before every 60 s re-read, without limit, the
+window showing the network error from the fourth re-read on) and, while it
+announces, after 60 s without an acceptable OFFER and every 60 s after (agents
+from 0.5.6; before that four readings 30 s apart and then a modal error box),
+and the Logoff Sound to its end (4 s at most) before
 it stops for EXIT, RESTART, UPDATE or a closed window; its log has one line per
 sound, with the file, or the reason it did not play, except that the report
 sound is logged only when it fails.

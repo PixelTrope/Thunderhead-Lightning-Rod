@@ -23,6 +23,8 @@ const SoundEventDef kSoundEvents[kSoundEventCount] = {
     { SoundThHello,         L"TH", L"App Receives HELLO from Client",      L"Proximity Notification", "th_hello" },
     { SoundThClose,         L"TH", L"App Closed or Closes",                L"Shutdown",               "th_close" },
     { SoundThClientOffline, L"TH", L"Client that was Online went Offline", L"Minimize",               "th_offline" },
+    { SoundThSend,          L"TH", L"App Sends a Message to a Client",     L"Feed Discovered",        "th_send" },
+    { SoundThNoReply,       L"TH", L"Client Did Not Receive or Answer a Command", L"Menu Command",   "th_noreply" },
     { SoundLrOpen,          L"LR", L"App Opens",                           L"Logon",                  "logon" },
     { SoundLrHello,         L"LR", L"App Sends HELLO to Host",             L"Proximity Connection",   "hello" },
     { SoundLrClose,         L"LR", L"App Closed or Closes",                L"Logoff Sound",           "logoff" },

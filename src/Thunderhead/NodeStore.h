@@ -58,6 +58,7 @@ struct NodeRecord {
     unsigned long long pingFlashUntilMs;    // the row is painted in the ping color until then (0 none)
     int shadeKey;                    // the shade conditions as last painted (see shadeKey in main.cpp); -1 never
     bool reportsRefused;             // reports arrived while its shared folder was not readable and were discarded (logged once)
+    std::vector<std::pair<std::string, unsigned long long> > pendingReplies;   // commands sent that await an ACK: verb and tickMs() of the send (see the reply watch)
 
     NodeRecord()
         : wol(false), boot(false), autoLogin(false), autoRod(false), autoLightning(false), renderHost(false), autoShutdown(false),

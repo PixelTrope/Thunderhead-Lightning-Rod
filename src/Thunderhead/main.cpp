@@ -87,13 +87,52 @@ bool sendToNode(NodeRecord* n, const Message& m, const std::string& label);
 void createRemoteShare(const std::vector<NodeRecord*>& nodes);
 std::wstring shareRootOf(const NodeRecord* n);
 
+// The reply watch (sound events App Sends a Message to a Client, Client Did Not
+// Receive or Answer a Command): every message that leaves for a client plays
+// the send sound, except SET (the report-interval and spacing adjustments, which
+// go out every few seconds); a message the client cannot receive (the gate refused it, or
+// the send failed) plays the no-reply sound at once; a command that the agent
+// answers with ACK is remembered in the node's pendingReplies and plays the
+// no-reply sound when no ACK has come within kReplyWaitMs or the node goes
+// offline first. SET is sent in the blind, PING has its own watch (kPingWaitMs,
+// answered by HELLO, REPORT or PONG) and RELAY is awaited by relayRequest.
+const unsigned long long kReplyWaitMs = 15000;
+void logEvent(const std::string& text);
+void logNode(const NodeRecord& n, const std::string& text);
+void playEventSound(SoundEvent e);
+
+bool verbExpectsAck(const std::string& verb) { return verb != "SET" && verb != "PING" && verb != "RELAY"; }
+
+void expectReply(NodeRecord* n, const std::string& verb)
+{
+    if (verbExpectsAck(verb)) n->pendingReplies.push_back(std::make_pair(verb, tickMs()));
+}
+
+// The ACK with cmd= verb clears the oldest pending entry of that verb (BATCH and
+// MESSAGE acknowledge twice; the first ACK is the receipt).
+void replyArrived(NodeRecord* n, const std::string& verb)
+{
+    for (size_t i = 0; i < n->pendingReplies.size(); ++i)
+        if (n->pendingReplies[i].first == verb) { n->pendingReplies.erase(n->pendingReplies.begin() + i); return; }
+}
+
+void noReply(NodeRecord* n, const std::string& what)
+{
+    logEvent(format("%s: %s", n->name.c_str(), what.c_str()));
+    logNode(*n, what);
+    playEventSound(SoundThNoReply);
+}
+
 // The one gate in front of every message Thunderhead sends to a client: nothing
 // but SET, the report schedule, leaves this host for a node whose shared folder
 // it has not read (see the shared-folder gate). Every send site goes through here.
 bool sendGated(NodeRecord* n, const Message& m)
 {
-    if (m.verb != "SET" && !commandAllowed(n, m.oneLine())) return false;
-    return g_server->send(n->conn, m);
+    if (m.verb != "SET" && !commandAllowed(n, m.oneLine())) { playEventSound(SoundThNoReply); return false; }
+    if (!g_server->send(n->conn, m)) { noReply(n, m.verb + " could not be sent: its connection is gone"); return false; }
+    playEventSound(SoundThSend);
+    expectReply(n, m.verb);
+    return true;
 }
 int shadeKey(const NodeRecord* n);
 COLORREF rowShade(const NodeRecord* n, int row, COLORREF* textColor);
@@ -1209,6 +1248,7 @@ bool relayRequest(int relayConn, const Message& m, DWORD timeoutMs, Message& ack
     g_relayWaits[job] = w;
     LeaveCriticalSection(&g_relayLock);
     bool sent = g_server->send(relayConn, m);
+    playEventSound(sent ? SoundThSend : SoundThNoReply);   // soundPlay is safe from this worker thread
     DWORD start = GetTickCount();
     while (sent) {
         if (WaitForSingleObject(w->done, pump ? 100 : timeoutMs) == WAIT_OBJECT_0) break;
@@ -1223,7 +1263,7 @@ bool relayRequest(int relayConn, const Message& m, DWORD timeoutMs, Message& ack
     CloseHandle(w->done);
     delete w;
     if (!sent) { err = "the relay's connection is gone"; return false; }
-    if (!got) { err = format("no answer from the relay within %u s", (unsigned)(timeoutMs / 1000)); return false; }
+    if (!got) { err = format("no answer from the relay within %u s", (unsigned)(timeoutMs / 1000)); playEventSound(SoundThNoReply); return false; }
     if (!parseBool(ack.get("ok"))) { err = ack.get("error"); return false; }
     return true;
 }
@@ -4517,6 +4557,12 @@ void setOffline(NodeRecord* n, const std::string& reason)
     n->conn = -1;
     logEvent(format("%s offline: %s", n->name.c_str(), reason.c_str()));
     logNode(*n, "offline: " + reason);
+    if (!n->pendingReplies.empty()) {
+        std::string verbs;
+        for (size_t i = 0; i < n->pendingReplies.size(); ++i) verbs += (i ? ", " : "") + n->pendingReplies[i].first;
+        n->pendingReplies.clear();
+        noReply(n, "went offline before answering " + verbs);
+    }
     playEventSound(SoundThClientOffline);
     refreshRow(n);
     if (g_staticNode == n) showStaticPane(n);
@@ -4569,7 +4615,9 @@ void sendSchedule(NodeRecord* n, int phaseMs, unsigned long long now)
     Message m("SET");
     m.set("interval", (long long)g_store->settings.intervalSec);
     m.set("phase", (long long)phaseMs);
-    if (!g_server->send(n->conn, m)) return;
+    if (!g_server->send(n->conn, m)) { noReply(n, "SET could not be sent: its connection is gone"); return; }
+    // No send sound for SET: the report-spacing nudges send one every few
+    // seconds on a farm of this size, which would make the event continuous.
     logNode(*n, "-> " + m.oneLine());
     bool knowsPhase = compareVersions(n->hello.get("agent"), kPhaseAgent) >= 0;
     n->nextReportMs = now + (unsigned long long)(knowsPhase ? phaseMs : g_store->settings.intervalSec * 1000);
@@ -5426,6 +5474,7 @@ void onNet(NetEvent* e)
         logNode(*n, "<- " + e->msg.oneLine());
         bool ok = parseBool(e->msg.get("ok"));
         std::string cmd = e->msg.get("cmd"), text;
+        replyArrived(n, cmd);
         if (cmd == "BATCH") {
             // Two acknowledgements per batch file: stage=started, then stage=finished.
             std::string file = e->msg.get("file");
@@ -5629,9 +5678,18 @@ void onTimer()
         if (!n->shareChecking && now >= n->shareNextMs) startShareCheck(n, n->shareState == 1 ? "periodic" : "retry");
         if (n->pingPending && now - n->pingSentMs > kPingWaitMs) {
             ++g_pingNoReply;
+            noReply(n, format("no answer within %d s of PING", (int)(kPingWaitMs / 1000)));
             setOffline(n, format("no report within %d s of PING", (int)(kPingWaitMs / 1000)));
             pingStatus();
             continue;
+        }
+        // The reply watch: a command the agent should have acknowledged by now.
+        for (size_t i = 0; i < n->pendingReplies.size();) {
+            if (now - n->pendingReplies[i].second > kReplyWaitMs) {
+                std::string verb = n->pendingReplies[i].first;
+                n->pendingReplies.erase(n->pendingReplies.begin() + i);
+                noReply(n, format("no ACK to %s within %d s", verb.c_str(), (int)(kReplyWaitMs / 1000)));
+            } else ++i;
         }
         if (now - n->lastReportMs > limit) {
             setOffline(n, format("no report for %llu s", (now - n->lastReportMs) / 1000));
