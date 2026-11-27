@@ -636,9 +636,12 @@ A node is also offline when its connection closes.
 
 ## Thunderhead files
 
-All files live beside Thunderhead.exe.
+All files live beside Thunderhead.exe, which is installed in `C:\LightningRod`
+together with the host's own agent; the agent's settings file is `settings.txt`,
+so Thunderhead's is named `Thunderhead.settings.txt` (from 0.5.7; before that both
+programs wrote `settings.txt` and overwrote each other's values).
 
-`settings.txt`
+`Thunderhead.settings.txt`
 
 ```
 interval=15
@@ -825,8 +828,9 @@ reconnected after ten minutes, Thunderhead drops the Updating state and logs it.
 
 This path uses Windows file sharing and therefore covers the Windows 7 nodes.
 A Windows XP node (HELLO `os` version 5.x) receives the XP build of the agent,
-`LightningRod-xp.exe` beside Thunderhead.exe (from the build-xp tree, toolset
-v141_xp); when that file is absent its update is not started and the event log
+`XP\LightningRod.exe` under Thunderhead's folder (from the build-xp tree, toolset
+v141_xp; Thunderhead and the host's own agent run from `C:\LightningRod`, so the
+XP build lives in `C:\LightningRod\XP`); when that file is absent its update is not started and the event log
 says so (Thunderhead from 0.5.7; before that the standard build was pushed,
 which does not run on XP). Its share is reached through an SMB1 relay (see SMB1 relay):
 the agent file and the sounds are staged under `relay\<job>\` in the relay
@@ -1150,7 +1154,7 @@ Settings dialog, assigns another file of the folder to a category: *Browse* take
 folder when it comes from elsewhere (a file bearing a default scheme name is
 never replaced), and assigns it to the selected category; *Use Default* drops
 the assignment; *Play* and a double click play the file; *Default* and
-*Custom* choose the scheme in force. The scheme is saved in `settings.txt`
+*Custom* choose the scheme in force. The scheme is saved in `Thunderhead.settings.txt`
 (`sound_scheme`, `sound.<Category>`) when Settings is closed with OK and, since
 the agents' own events follow it, sent to every online agent as described
 below.

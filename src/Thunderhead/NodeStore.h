@@ -86,7 +86,7 @@ public:
     explicit NodeStore(const std::wstring& dir);
     void load();
     void save();                      // nodes.txt
-    void saveSettings();              // settings.txt
+    void saveSettings();              // Thunderhead.settings.txt
 
     NodeRecord* find(const std::string& mac);
     NodeRecord* findByName(const std::string& name);   // case-insensitive; NULL when none or the name is empty

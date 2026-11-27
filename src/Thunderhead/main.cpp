@@ -1059,14 +1059,14 @@ std::wstring pushFilePath()
 }
 
 // A Windows XP node (HELLO os version 5.x) cannot run the standard build of the
-// agent; it takes the XP build, LightningRod-xp.exe beside Thunderhead.exe (the
-// build-xp tree, toolset v141_xp). Empty when that file is absent.
+// agent; it takes the XP build, XP\LightningRod.exe under Thunderhead's folder
+// (the build-xp tree, toolset v141_xp). Empty when that file is absent.
 bool isWindowsXp(const NodeRecord* n) { return n && n->hello.get("os").find("(5.") != std::string::npos; }
 
 std::wstring pushFilePathFor(const NodeRecord* n)
 {
     if (!isWindowsXp(n)) return pushFilePath();
-    std::wstring xp = g_dir + L"\\LightningRod-xp.exe";
+    std::wstring xp = g_dir + L"\\XP\\LightningRod.exe";
     return GetFileAttributesW(xp.c_str()) == INVALID_FILE_ATTRIBUTES ? std::wstring() : xp;
 }
 
@@ -1105,7 +1105,7 @@ bool refreshPushVersion()
     std::string version = fileVersion(file);
     if (version.empty()) {
         MessageBoxW(g_main, (L"No agent file with a version resource at\n" + file +
-                    L"\n\nPut the LightningRod.exe to push beside Thunderhead.exe, or set agent_file in settings.txt.").c_str(),
+                    L"\n\nPut the LightningRod.exe to push beside Thunderhead.exe, or set agent_file in Thunderhead.settings.txt.").c_str(),
                     L"Thunderhead", MB_OK | MB_ICONWARNING);
         return false;
     }
@@ -1599,7 +1599,7 @@ void updateChecked()
         std::wstring nodeFile = pushFilePathFor(n);
         std::string nodeVersion = nodeFile.empty() ? std::string() : fileVersion(nodeFile);
         if (nodeVersion.empty()) {
-            logEvent(format("%s update not started: it runs %s, which needs the XP build LightningRod-xp.exe beside Thunderhead.exe, and that file is %s",
+            logEvent(format("%s update not started: it runs %s, which needs the XP build XP\\LightningRod.exe under Thunderhead's folder, and that file is %s",
                             n->name.c_str(), n->hello.get("os").c_str(), nodeFile.empty() ? "absent" : "without a version resource"));
             continue;
         }

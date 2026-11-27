@@ -36,8 +36,9 @@ NodeStore::NodeStore(const std::wstring& dir) : dir_(dir) {}
 
 void NodeStore::load()
 {
-    // settings.txt
-    std::vector<std::string> lines = split(readFile(dir_ + L"\\settings.txt"), '\n');
+    // Thunderhead.settings.txt (not settings.txt: that name is the agent's own
+    // settings file, and the two programs share a folder, C:\LightningRod)
+    std::vector<std::string> lines = split(readFile(dir_ + L"\\Thunderhead.settings.txt"), '\n');
     for (size_t i = 0; i < lines.size(); ++i) {
         std::string line = trim(lines[i]);
         size_t eq = line.find('=');
@@ -124,7 +125,7 @@ void NodeStore::saveSettings()
     out += std::string("sound_scheme=") + (settings.customScheme ? "custom" : "default") + "\r\n";
     for (std::map<std::string, std::string>::const_iterator it = settings.sounds.begin(); it != settings.sounds.end(); ++it)
         out += "sound." + it->first + "=" + it->second + "\r\n";
-    writeFile(dir_ + L"\\settings.txt", out);
+    writeFile(dir_ + L"\\Thunderhead.settings.txt", out);
 }
 
 NodeRecord* NodeStore::find(const std::string& mac)
