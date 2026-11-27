@@ -166,8 +166,45 @@ bool fileInfo(const std::wstring& path, ULONGLONG& size, FILETIME& written, std:
     return true;
 }
 
+// Raises the level of a 16-bit PCM .wav held in memory so that its peak sits at
+// kWavTargetPeak (-3 dBFS); files already louder are left alone, and the file
+// on disk is never changed. The Windows system sounds that make up the default
+// scheme differ by 35 dB (Feed Discovered peaks at -44 dBFS, Notify Messaging
+// at -8), so without this the quiet ones are not heard as event sounds at all.
+const int kWavTargetPeak = 23197;   // 32767 * 10^(-3/20)
+
+void normalizeWavLevel(std::vector<char>& b)
+{
+    if (b.size() < 44 || memcmp(&b[0], "RIFF", 4) != 0 || memcmp(&b[8], "WAVE", 4) != 0) return;
+    size_t pos = 12, fmtAt = 0, dataAt = 0, dataLen = 0;
+    while (pos + 8 <= b.size()) {
+        unsigned long len = *(const unsigned long*)&b[pos + 4];
+        if (memcmp(&b[pos], "fmt ", 4) == 0) fmtAt = pos + 8;
+        else if (memcmp(&b[pos], "data", 4) == 0) { dataAt = pos + 8; dataLen = (size_t)len; break; }
+        pos += 8 + len + (len & 1);
+    }
+    if (!fmtAt || !dataAt || fmtAt + 16 > b.size()) return;
+    unsigned short tag = *(const unsigned short*)&b[fmtAt], bits = *(const unsigned short*)&b[fmtAt + 14];
+    if ((tag != 1 && tag != 0xFFFE) || bits != 16) return;   // PCM (or extensible, PCM in practice), 16-bit only
+    if (dataAt + dataLen > b.size()) dataLen = b.size() - dataAt;
+    int peak = 0;
+    for (size_t i = dataAt; i + 1 < dataAt + dataLen; i += 2) {
+        int v = *(const short*)&b[i];
+        if (v < 0) v = -v;
+        if (v > peak) peak = v;
+    }
+    if (peak == 0 || peak >= kWavTargetPeak) return;
+    double gain = (double)kWavTargetPeak / peak;
+    for (size_t i = dataAt; i + 1 < dataAt + dataLen; i += 2) {
+        double v = *(const short*)&b[i] * gain;
+        if (v > 32767) v = 32767; else if (v < -32768) v = -32768;
+        *(short*)&b[i] = (short)v;
+    }
+}
+
 // Lock held. The held copy of a .wav, read now when it is not held yet or the
-// file has changed; NULL without error for a file too large to hold.
+// file has changed; NULL without error for a file too large to hold. The copy
+// is level-normalised (normalizeWavLevel).
 WavData* heldWavLocked(const std::wstring& path, std::string& error)
 {
     ULONGLONG size = 0;
@@ -185,6 +222,7 @@ WavData* heldWavLocked(const std::wstring& path, std::string& error)
     if (got != (size_t)size) { delete d; error = narrow(path) + ": short read"; return NULL; }
     d->size = size;
     d->written = written;
+    normalizeWavLevel(d->bytes);
     if (it != g_wavs.end()) {
         PlaySoundW(NULL, NULL, 0);   // a copy that may still be playing is not freed under the player
         delete it->second;

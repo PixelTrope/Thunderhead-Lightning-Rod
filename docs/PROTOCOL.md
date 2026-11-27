@@ -1152,7 +1152,11 @@ and the device is closed the moment the sound has ended. A sound still
 playing gives way to the next. The files live in `sounds\` beside each
 executable. The 38 files of the repository's `assets\sounds`, named
 `ThunderheadLightningRod <Category>.wav`, define the 38 categories and form
-the default scheme, in which each category plays its own file. The custom
+the default scheme, in which each category plays its own file. The files are
+Windows system sounds and differ in level by 35 dB (Feed Discovered peaks at
+-44 dBFS, Notify Messaging at -8), so both programs raise the in-memory copy
+of a 16-bit PCM .wav to a -3 dBFS peak before playing it (from 0.5.8; the file
+on disk is never changed, and a louder file is left as it is). The custom
 scheme, edited in the *Sound scheme* section at the bottom of Thunderhead's
 Settings dialog, assigns another file of the folder to a category: *Browse* takes a `.wav` or `.mp3`, copies it into the
 folder when it comes from elsewhere (a file bearing a default scheme name is
@@ -1180,8 +1184,10 @@ below.
 | LR | App Finds No Workable IP Address | Battery Low |
 
 Thunderhead plays its six itself, the closing one to its end (5 s at most)
-before the window goes. Feed Discovered plays for every message that leaves
-for a client (commands, RELAY to a relay node; not SET, the report-interval and
+before the window goes; the others are queued and played one after another on
+a thread of their own, each to its end (3 s at most), so that a command sent to
+ten checked clients is heard ten times. Feed Discovered plays for every message that leaves
+for a client (commands, Wake On LAN magic packets, RELAY to a relay node; not SET, the report-interval and
 spacing adjustment that the report-spacing nudges send every few seconds on a
 farm of twenty nodes, and not the UDP OFFER, which goes to a node that is not
 yet a client). Menu Command plays when a message

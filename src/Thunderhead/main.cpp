@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cwchar>
+#include <deque>
 #include <map>
 #include <string>
 #include <vector>
@@ -315,11 +316,50 @@ std::wstring soundPathForEvent(SoundEvent e) { return soundDir() + L"\\" + sound
 
 // Plays the sound of one of Thunderhead's own events; nothing while
 // Thunderhead Audio is off. A failure is one line in the event log.
+// The sounds are queued and played one after another on a thread of their own,
+// each to its end (kEventSoundMaxMs at most), so that a command sent to ten
+// clients is heard ten times; soundPlay, which replaces a sound still playing,
+// would merge such a burst into one tick. The file is chosen at queueing time,
+// so a scheme change in Settings is read on the window thread only.
+const DWORD kEventSoundMaxMs = 3000;
+const size_t kEventSoundQueueMax = 200;
+struct EventSoundQueue { CRITICAL_SECTION lock; HANDLE wake; HANDLE thread; std::deque<std::pair<SoundEvent, std::wstring> > items; bool started; };
+EventSoundQueue g_eventSounds = { {0}, NULL, NULL, std::deque<std::pair<SoundEvent, std::wstring> >(), false };
+
+DWORD WINAPI eventSoundThread(LPVOID)
+{
+    for (;;) {
+        WaitForSingleObject(g_eventSounds.wake, INFINITE);
+        for (;;) {
+            EnterCriticalSection(&g_eventSounds.lock);
+            if (g_eventSounds.items.empty()) { LeaveCriticalSection(&g_eventSounds.lock); break; }
+            std::pair<SoundEvent, std::wstring> item = g_eventSounds.items.front();
+            g_eventSounds.items.pop_front();
+            LeaveCriticalSection(&g_eventSounds.lock);
+            std::string err;
+            if (!soundPlayAndWait(item.second, kEventSoundMaxMs, err)) logEvent(format("sound %s not played: %s", kSoundEvents[item.first].key, err.c_str()));   // logEvent is thread-safe
+        }
+    }
+}
+
 void playEventSound(SoundEvent e)
 {
     if (!g_store || !g_store->settings.thAudio) return;
-    std::string err;
-    if (!soundPlay(soundPathForEvent(e), err)) logEvent(format("sound %s not played: %s", kSoundEvents[e].key, err.c_str()));
+    if (!g_eventSounds.started) {
+        g_eventSounds.started = true;
+        InitializeCriticalSection(&g_eventSounds.lock);
+        g_eventSounds.wake = CreateEventW(NULL, FALSE, FALSE, NULL);
+        g_eventSounds.thread = CreateThread(NULL, 0, eventSoundThread, NULL, 0, NULL);
+    }
+    if (!g_eventSounds.thread) {   // no thread: the old way, one sound replacing the last
+        std::string err;
+        if (!soundPlay(soundPathForEvent(e), err)) logEvent(format("sound %s not played: %s", kSoundEvents[e].key, err.c_str()));
+        return;
+    }
+    EnterCriticalSection(&g_eventSounds.lock);
+    if (g_eventSounds.items.size() < kEventSoundQueueMax) g_eventSounds.items.push_back(std::make_pair(e, soundPathForEvent(e)));
+    LeaveCriticalSection(&g_eventSounds.lock);
+    SetEvent(g_eventSounds.wake);
 }
 
 std::wstring durationText(long long seconds)
@@ -2407,11 +2447,13 @@ void sendWakeOnLan()
         }
         if (where.empty()) {
             logEvent(format("WOL magic packet for %s (%s) could not be sent: %s", n->name.c_str(), n->mac.c_str(), error.c_str()));
+            playEventSound(SoundThNoReply);
             continue;
         }
         ++done;
         logEvent(format("WOL magic packet for %s (%s) sent to %s, UDP port 9", n->name.c_str(), n->mac.c_str(), where.c_str()));
         logNode(*n, "-> WOL magic packet to " + where);
+        playEventSound(SoundThSend);   // one send sound per client woken, as for any other command
     }
     closesocket(s);
     updateStatusBar(widen(format("|  WOL magic packet sent for %d of %d checked", done, (int)targets.size())).c_str());
