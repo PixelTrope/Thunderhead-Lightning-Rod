@@ -425,6 +425,36 @@ every ten minutes after that, Thunderhead logs that its farm.key may differ
 from the host's and checks its share, which writes the host's key into it;
 the agent re-reads the file at its next rejected OFFER and connects.
 
+### Troubleshooting a node that reports but takes no commands
+
+A node whose rows arrive but whose commands do nothing has not passed the
+gate or the pairing. The event log names the stage; the steps, in the order
+the failures appear, are these (recorded from LOANERLAPTOP, 2026-11-27):
+
+1. **The node's network must be a Private Windows network.** On the Public
+   profile Windows 10 blocks File and Printer Sharing and ping, so the share
+   check fails with "The network path was not found" although the agent's
+   TCP session is up. Set the connection to Private (Settings, Network, the
+   connection's properties, or `Set-NetConnectionProfile -NetworkCategory
+   Private`); Network discovery is on only for private networks, and
+   Thunderhead and Lightning Rod need a private network on every node.
+2. **The share must accept the host's credentials.** "Access is denied" or
+   "The user name or password is incorrect" from the check brings up the
+   credential prompt; enter an account of the node with *Remember my
+   credentials*. Windows 10 refuses guest access to shares, so an Everyone
+   permission alone does not admit the host.
+3. **The share must allow writing.** The sharing wizard grants Read; the log
+   then says "farm.key could not be written ... Access is denied", the agent
+   stays unpaired and answers every command "not paired: this node holds no
+   farm.key". Give the share Change permission (`Grant-SmbShareAccess -Name
+   LightningRod -AccountName Everyone -AccessRight Change -Force`; the
+   folder's NTFS permissions still govern the writes), then *Open Client's
+   Shared Folder* puts the check on the five-second cycle and the key is
+   written at the next one.
+4. **The agent must reconnect with the key.** It reads farm.key and
+   reconnects by itself; Client details then shows "authenticated: its HELLO
+   proved the farm key", and commands execute.
+
 ### Inventory tints
 
 The Client Inventory's alternating gray rows are tinted to state a node's
