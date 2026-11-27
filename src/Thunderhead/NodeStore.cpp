@@ -76,6 +76,7 @@ void NodeStore::load()
         if (eq == std::string::npos) continue;
         std::string key = trim(line.substr(0, eq)), value = trim(line.substr(eq + 1));
         if (key == "name") cur->name = value;
+        else if (key == "ip") cur->ip = value;   // last known address: shown while offline and used by Network Ping
         else if (key == "group") cur->group = value;
         else if (key == "wol") cur->wol = parseBool(value);
         else if (key == "boot") cur->boot = parseBool(value);
@@ -100,6 +101,7 @@ void NodeStore::save()
         const NodeRecord& n = *nodes_[i];
         out += "\r\n[" + n.mac + "]\r\n";
         out += "name=" + n.name + "\r\n";
+        out += "ip=" + n.ip + "\r\n";
         out += "group=" + n.group + "\r\n";
         out += std::string("wol=") + boolText(n.wol) + "\r\n";
         out += std::string("boot=") + boolText(n.boot) + "\r\n";

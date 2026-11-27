@@ -23,7 +23,7 @@ struct NodeRecord {
     // live
     bool online;
     int conn;                        // server connection id, -1 when offline
-    std::string ip;
+    std::string ip;                  // current address, kept as the last known one while offline and persisted in nodes.txt (ip=)
     Message hello;                   // static fields
     Message report;                  // latest REPORT
     unsigned long long lastReportMs; // tickMs() of the latest REPORT

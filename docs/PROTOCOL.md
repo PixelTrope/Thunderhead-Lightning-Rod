@@ -680,11 +680,15 @@ build copies beside the executable, plus any file *Sound Schemes* copies in.
 line each (see Bryce 3D on the host).
 
 `nodes.txt`, one block per node, keyed by MAC; the user-edited fields are kept
-here and survive re-imaging of the node:
+here and survive re-imaging of the node, and `ip=` records the last address the
+node was seen at (written when a HELLO or ANNOUNCE arrives from a new address),
+so that an offline client still shows it in the IP column and Network Ping
+tests it there after a Thunderhead restart (from 0.5.8):
 
 ```
 [00-80-64-BF-49-77]
 name=WIN7E0007
+ip=42.32.22.107
 group=Rack 1
 wol=yes
 boot=yes

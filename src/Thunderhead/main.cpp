@@ -1850,7 +1850,9 @@ void showTextBox(const std::wstring& title, const std::wstring& text, void (*ope
 
 // Network Ping: a plain ICMP echo test of every checked client, three echo
 // requests each as "ping -n 3" sends, to the address the client is known by:
-// that of its connection, else the one its last HELLO carried, else its name
+// that of its connection, or for an offline client its last known address (kept
+// in nodes.txt across Thunderhead restarts and shown in its IP column), else the
+// one its last HELLO carried, else its name
 // resolved. The clients are pinged at the same time, each on its own thread,
 // and the lines appear in a text box as each one finishes; OK closes it. A box
 // closed early loses nothing but the display: the threads finish on their own
@@ -5342,7 +5344,7 @@ void onNet(NetEvent* e)
         if (!n) break;   // a new node joins the inventory with its HELLO
         n->lastAnnounceMs = now;
         if (n->online) break;
-        if (!e->ip.empty()) n->ip = e->ip;
+        if (!e->ip.empty() && n->ip != e->ip) { n->ip = e->ip; g_store->save(); }   // the last known address outlives the session
         ++n->announcesUnanswered;
         if (n->announcesUnanswered == 4 || n->announcesUnanswered % 120 == 0) {
             logEvent(format("%s announces from %s (agent %s) but has not connected (%d announcements): it accepts no OFFER from this host, "
@@ -5371,7 +5373,7 @@ void onNet(NetEvent* e)
         if (n->online && n->conn != e->conn) g_server->close(n->conn);   // replaced by a new session
         n->online = true;
         n->conn = e->conn;
-        n->ip = e->ip;
+        if (n->ip != e->ip) { n->ip = e->ip; g_store->save(); }   // the last known address outlives the session
         n->hello = e->msg;
         if (!again) n->report = Message();
         clearAutoShutdownOfHost(n);   // the agent's own Render Host setting counts
